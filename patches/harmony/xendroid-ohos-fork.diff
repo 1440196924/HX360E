@@ -1,0 +1,1665 @@
+diff --git a/emulator-core/src/main/cpp/xenia/CMakeLists.txt b/emulator-core/src/main/cpp/xenia/CMakeLists.txt
+index f652e2942..fff724d26 100644
+--- a/emulator-core/src/main/cpp/xenia/CMakeLists.txt
++++ b/emulator-core/src/main/cpp/xenia/CMakeLists.txt
+@@ -117,6 +117,8 @@ elseif(APPLE)
+   set(XE_PLATFORM_NAME "macOS")
+ elseif (ANDROID)
+   set(XE_PLATFORM_NAME "Android")
++elseif (OHOS)
++  set(XE_PLATFORM_NAME "OHOS")
+ else()
+   set(XE_PLATFORM_NAME "Linux")
+ endif()
+diff --git a/emulator-core/src/main/cpp/xenia/cmake/XeniaHelpers.cmake b/emulator-core/src/main/cpp/xenia/cmake/XeniaHelpers.cmake
+index edb5f9540..a27e9b9ac 100644
+--- a/emulator-core/src/main/cpp/xenia/cmake/XeniaHelpers.cmake
++++ b/emulator-core/src/main/cpp/xenia/cmake/XeniaHelpers.cmake
+@@ -3,7 +3,7 @@
+ include(CMakeParseArguments)
+ 
+ set(XE_PLATFORM_SUFFIXES
+-  _win _linux _posix _gnulinux _x11 _gtk _android _mac _amd64 _x64 _arm64
++  _win _linux _posix _gnulinux _x11 _gtk _android _mac _amd64 _x64 _arm64 _ohos
+ )
+ 
+ # xe_platform_sources(target base_path [RECURSIVE])
+@@ -60,6 +60,14 @@ function(xe_platform_sources target base_path)
+       "${base_path}/*_posix.h"
+       "${base_path}/*_posix.cc"
+     )
++  elseif(OHOS)
++    # HarmonyOS reuses the fork's POSIX source set plus its own *_ohos.* files.
++    file(${glob_mode} _plat_sources CONFIGURE_DEPENDS
++      "${base_path}/*_posix.h"
++      "${base_path}/*_posix.cc"
++      "${base_path}/*_ohos.h"
++      "${base_path}/*_ohos.cc"
++    )
+   elseif(APPLE)
+     file(${glob_mode} _plat_sources CONFIGURE_DEPENDS
+       "${base_path}/*_posix.h"
+@@ -111,6 +119,9 @@ function(xe_target_defaults target)
+   )
+   if(MSVC)
+     target_compile_options(${target} PRIVATE /WX)
++  elseif(OHOS)
++    # HarmonyOS: keep warnings visible but don't fail the whole build on them
++    # during bring-up (the OHOS toolchain emits many new -W warnings).
+   elseif(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+     target_compile_options(${target} PRIVATE -Werror)
+   endif()
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/CMakeLists.txt b/emulator-core/src/main/cpp/xenia/src/xenia/CMakeLists.txt
+index 97d3e0ea8..450f84336 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/CMakeLists.txt
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/CMakeLists.txt
+@@ -19,8 +19,8 @@ if(XE_TARGET_AARCH64)
+ endif()
+ add_subdirectory(apu)
+ add_subdirectory(apu/nop)
+-# SDL-based audio is not built on Android (uses AAudio/OpenSLES instead).
+-if(NOT ANDROID)
++# SDL-based audio is not built on Android/OHOS (OHAudio/AAudio/OpenSLES instead).
++if(NOT (ANDROID OR OHOS))
+   add_subdirectory(apu/sdl)
+ endif()
+ add_subdirectory(gpu)
+@@ -29,13 +29,13 @@ add_subdirectory(gpu/vulkan)
+ if(APPLE)
+   add_subdirectory(gpu/metal)
+ endif()
+-# SDL-based helper/HID are not built on Android (uses Android input instead).
+-if(NOT ANDROID)
++# SDL-based helper/HID are not built on Android/OHOS (uses platform input instead).
++if(NOT (ANDROID OR OHOS))
+   add_subdirectory(helper/sdl)
+ endif()
+ add_subdirectory(hid)
+ add_subdirectory(hid/nop)
+-if(NOT ANDROID)
++if(NOT (ANDROID OR OHOS))
+   add_subdirectory(hid/sdl)
+ endif()
+ add_subdirectory(hid/portal)
+@@ -48,8 +48,16 @@ if(APPLE)
+ endif()
+ add_subdirectory(vfs)
+ add_subdirectory(debug/ui)
+-add_subdirectory(app/discord)
+-add_subdirectory(app)
++# Discord rich presence is a desktop feature (discord-rpc is not built on OHOS).
++if(NOT OHOS)
++  add_subdirectory(app/discord)
++endif()
++# The desktop windowed xenia-app executable is not built on OHOS (the NAPI
++# module is the entry point), and its configure-time asset/bundle steps need
++# desktop-only data repos.
++if(NOT OHOS)
++  add_subdirectory(app)
++endif()
+ 
+ if(WIN32)
+   add_subdirectory(apu/xaudio2)
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/apu/nop/nop_audio_driver.cc b/emulator-core/src/main/cpp/xenia/src/xenia/apu/nop/nop_audio_driver.cc
+new file mode 100644
+index 000000000..fcad60d71
+--- /dev/null
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/apu/nop/nop_audio_driver.cc
+@@ -0,0 +1,42 @@
++/**
++ ******************************************************************************
++ * Xenia : Xbox 360 Emulator Research Project                                 *
++ ******************************************************************************
++ * Copyright 2026.                                                            *
++ * Released under the BSD license - see LICENSE in the root for more details. *
++ ******************************************************************************
++ */
++
++#include "xenia/apu/nop/nop_audio_driver.h"
++
++namespace xe {
++namespace apu {
++namespace nop {
++
++NopAudioDriver::NopAudioDriver(xe::threading::Semaphore* semaphore)
++    : semaphore_(semaphore) {}
++
++NopAudioDriver::~NopAudioDriver() = default;
++
++bool NopAudioDriver::Initialize() { return true; }
++
++void NopAudioDriver::Shutdown() {}
++
++void NopAudioDriver::SubmitFrame(float* samples) {
++  // No output device, so the frame is complete as soon as it is received.
++  // Release the permit immediately, otherwise the guest audio thread stalls
++  // after consuming the initial queued_frames_ permits.
++  if (semaphore_) {
++    semaphore_->Release(1, nullptr);
++  }
++}
++
++void NopAudioDriver::Pause() {}
++
++void NopAudioDriver::Resume() {}
++
++void NopAudioDriver::SetVolume(float volume) {}
++
++}  // namespace nop
++}  // namespace apu
++}  // namespace xe
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/apu/nop/nop_audio_driver.h b/emulator-core/src/main/cpp/xenia/src/xenia/apu/nop/nop_audio_driver.h
+new file mode 100644
+index 000000000..96de380ad
+--- /dev/null
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/apu/nop/nop_audio_driver.h
+@@ -0,0 +1,43 @@
++/**
++ ******************************************************************************
++ * Xenia : Xbox 360 Emulator Research Project                                 *
++ ******************************************************************************
++ * Copyright 2026.                                                            *
++ * Released under the BSD license - see LICENSE in the root for more details. *
++ ******************************************************************************
++ */
++
++#ifndef XENIA_APU_NOP_NOP_AUDIO_DRIVER_H_
++#define XENIA_APU_NOP_NOP_AUDIO_DRIVER_H_
++
++#include "xenia/apu/audio_driver.h"
++#include "xenia/base/threading.h"
++
++namespace xe {
++namespace apu {
++namespace nop {
++
++// Discards all audio, but still returns the semaphore permit for each submitted
++// frame so guest audio threads keep running instead of stalling once the
++// queued-frame permits are exhausted.
++class NopAudioDriver : public AudioDriver {
++ public:
++  explicit NopAudioDriver(xe::threading::Semaphore* semaphore);
++  ~NopAudioDriver() override;
++
++  bool Initialize() override;
++  void Shutdown() override;
++  void SubmitFrame(float* samples) override;
++  void Pause() override;
++  void Resume() override;
++  void SetVolume(float volume) override;
++
++ private:
++  xe::threading::Semaphore* semaphore_ = nullptr;
++};
++
++}  // namespace nop
++}  // namespace apu
++}  // namespace xe
++
++#endif  // XENIA_APU_NOP_NOP_AUDIO_DRIVER_H_
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/apu/nop/nop_audio_system.cc b/emulator-core/src/main/cpp/xenia/src/xenia/apu/nop/nop_audio_system.cc
+index cfac7e74b..9e86dde42 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/apu/nop/nop_audio_system.cc
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/apu/nop/nop_audio_system.cc
+@@ -10,6 +10,7 @@
+ #include "xenia/apu/nop/nop_audio_system.h"
+ 
+ #include "xenia/apu/apu_flags.h"
++#include "xenia/apu/nop/nop_audio_driver.h"
+ 
+ namespace xe {
+ namespace apu {
+@@ -27,16 +28,33 @@ NopAudioSystem::~NopAudioSystem() = default;
+ X_STATUS NopAudioSystem::CreateDriver(size_t index,
+                                       xe::threading::Semaphore* semaphore,
+                                       AudioDriver** out_driver) {
+-  return X_STATUS_NOT_IMPLEMENTED;
++  auto driver = new NopAudioDriver(semaphore);
++  if (!driver->Initialize()) {
++    delete driver;
++    return X_STATUS_UNSUCCESSFUL;
++  }
++  *out_driver = driver;
++  return X_STATUS_SUCCESS;
+ }
+ 
+ AudioDriver* NopAudioSystem::CreateDriver(xe::threading::Semaphore* semaphore,
+                                           uint32_t frequency, uint32_t channels,
+                                           bool need_format_conversion) {
+-  return nullptr;
++  auto driver = new NopAudioDriver(semaphore);
++  if (!driver->Initialize()) {
++    delete driver;
++    return nullptr;
++  }
++  return driver;
+ }
+ 
+-void NopAudioSystem::DestroyDriver(AudioDriver* driver) { assert_always(); }
++void NopAudioSystem::DestroyDriver(AudioDriver* driver) {
++  if (!driver) {
++    return;
++  }
++  driver->Shutdown();
++  delete driver;
++}
+ 
+ }  // namespace nop
+ }  // namespace apu
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/base/logging.cc b/emulator-core/src/main/cpp/xenia/src/xenia/base/logging.cc
+index 233ec2c2a..82b2f935e 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/base/logging.cc
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/base/logging.cc
+@@ -36,6 +36,8 @@
+ // TODO(benvanik): generic API? logging_win.cc?
+ #if XE_PLATFORM_ANDROID
+ #include <android/log.h>
++#elif XE_PLATFORM_OHOS
++#include <hilog/log.h>
+ #elif XE_PLATFORM_WIN32
+ // For MessageBox:
+ #include "xenia/base/platform_win.h"
+@@ -234,6 +236,98 @@ void AndroidLogSink::WriteLineBuffer() {
+ }
+ #endif  // XE_PLATFORM_ANDROID
+ 
++#if XE_PLATFORM_OHOS
++// HarmonyOS: forward xenia logs to hilog (the sandbox log file isn't readable
++// via hdc, and hilog is the platform-standard sink).
++#undef LOG_DOMAIN
++#undef LOG_TAG
++#define LOG_DOMAIN 0x0000
++#define LOG_TAG "HX360E"
++
++class OhosLogSink final : public LogSink {
++ public:
++  void Write(const char* buf, size_t size) override;
++  void Flush() override;
++
++ private:
++  void WriteLineBuffer();
++
++  // ::LogLevel is hilog's global enum (xe::LogLevel would shadow it).
++  ::LogLevel current_level_ = LOG_INFO;
++  bool is_line_continuation_ = false;
++  size_t line_buffer_used_ = 0;
++  char line_buffer_[1023 + 1];
++};
++
++void OhosLogSink::Write(const char* buf, size_t size) {
++  while (size) {
++    const void* newline = std::memchr(buf, '\n', size);
++    size_t line_remaining =
++        newline ? size_t(static_cast<const char*>(newline) - buf) : size;
++    while (line_remaining) {
++      assert_true(line_buffer_used_ < xe::countof(line_buffer_));
++      size_t append_count =
++          std::min(line_remaining,
++                   xe::countof(line_buffer_) - size_t(1) - line_buffer_used_);
++      std::memcpy(line_buffer_ + line_buffer_used_, buf, append_count);
++      buf += append_count;
++      size -= append_count;
++      line_remaining -= append_count;
++      line_buffer_used_ += append_count;
++      if (line_buffer_used_ >= xe::countof(line_buffer_) - size_t(1)) {
++        WriteLineBuffer();
++        is_line_continuation_ = true;
++      }
++    }
++    if (newline) {
++      if (line_buffer_used_ || !is_line_continuation_) {
++        WriteLineBuffer();
++      }
++      is_line_continuation_ = false;
++      ++buf;
++      --size;
++    }
++  }
++}
++
++void OhosLogSink::Flush() {
++  if (line_buffer_used_) {
++    WriteLineBuffer();
++  }
++}
++
++void OhosLogSink::WriteLineBuffer() {
++  if (!is_line_continuation_ && line_buffer_used_ >= 3 &&
++      line_buffer_[1] == '>' && line_buffer_[2] == ' ') {
++    switch (line_buffer_[0]) {
++      case 'd':
++        current_level_ = LOG_DEBUG;
++        break;
++      case 'w':
++        current_level_ = LOG_WARN;
++        break;
++      case '!':
++        current_level_ = LOG_ERROR;
++        break;
++      case 'x':
++        current_level_ = LOG_FATAL;
++        break;
++      default:
++        current_level_ = LOG_INFO;
++        break;
++    }
++  }
++  if (!line_buffer_used_) {
++    line_buffer_[line_buffer_used_++] = ' ';
++  }
++  assert_true(line_buffer_used_ < xe::countof(line_buffer_));
++  line_buffer_[line_buffer_used_] = '\0';
++  OH_LOG_Print(LOG_APP, current_level_, LOG_DOMAIN, LOG_TAG, "%{public}s",
++               line_buffer_);
++  line_buffer_used_ = 0;
++}
++#endif  // XE_PLATFORM_OHOS
++
+ class Logger {
+  public:
+   explicit Logger(const std::string_view app_name)
+@@ -447,6 +541,9 @@ void InitializeLogging(const std::string_view app_name) {
+   if (cvars::log_to_logcat) {
+     logger_->AddLogSink(std::make_unique<AndroidLogSink>(app_name));
+   }
++#elif XE_PLATFORM_OHOS
++  // HarmonyOS: hilog sink (file/stdout sinks aren't reachable via hdc).
++  logger_->AddLogSink(std::make_unique<OhosLogSink>());
+ #else
+   {
+     FILE* log_file = nullptr;
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/base/memory_posix.cc b/emulator-core/src/main/cpp/xenia/src/xenia/base/memory_posix.cc
+index 43a50c3bc..0bb4e7c65 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/base/memory_posix.cc
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/base/memory_posix.cc
+@@ -35,7 +35,8 @@
+ #include "xenia/base/platform.h"
+ #include "xenia/base/string.h"
+ 
+-#if XE_PLATFORM_xendroid
++#if XE_PLATFORM_xendroid && !XE_PLATFORM_OHOS
++// Android's ashmem; on OHOS CreateFileMappingHandle uses memfd_create instead.
+ #include <android/sharedmem.h>
+ #endif
+ // Both ANDROID and xendroid are defined on the fork; the allocation path below is
+@@ -143,6 +144,13 @@ bool IsWritableExecutableMemorySupported() {
+   }();
+   return supported;
+ }
++#elif XE_PLATFORM_OHOS
++// HarmonyOS: anonymous PROT_EXEC is rejected by the kernel XPM module
++// (EINVAL without MAP_EXECUTABLE, and MAP_EXECUTABLE mappings have W
++// stripped). The working path is plain RW -> write -> mprotect(RX), which
++// the code cache takes when this returns false. Verified on device
++// 2026-09-08 (Maleoon 935) - see docs/phase0-result.md.
++bool IsWritableExecutableMemorySupported() { return false; }
+ #else
+ bool IsWritableExecutableMemorySupported() { return true; }
+ #endif  // XE_PLATFORM_MAC
+@@ -368,7 +376,18 @@ bool QueryProtect(void* base_address, size_t& length, PageAccess& access_out) {
+ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path,
+                                           size_t length, PageAccess access,
+                                           bool commit) {
+-#if XE_PLATFORM_xendroid
++#if XE_PLATFORM_OHOS
++  // HarmonyOS: no ashmem; memfd_create + ftruncate is the portable equivalent.
++  int memfd = memfd_create(path.filename().string().c_str(), MFD_CLOEXEC);
++  if (memfd < 0) {
++    return kFileMappingHandleInvalid;
++  }
++  if (ftruncate(memfd, static_cast<off_t>(length)) != 0) {
++    close(memfd);
++    return kFileMappingHandleInvalid;
++  }
++  return memfd;
++#elif XE_PLATFORM_xendroid
+     //XELOGI("CreateFileMappingHandle: {} 0x{:X}", path.string(), length);
+     int sharedmem_fd = ASharedMemory_create(path.c_str(), length);
+     return sharedmem_fd >= 0 ? sharedmem_fd : kFileMappingHandleInvalid;
+@@ -514,9 +533,22 @@ void* MapFileView(FileMappingHandle handle, void* base_address, size_t length,
+       flags |= MAP_FIXED;
+   }
+ 
++#if XE_PLATFORM_OHOS
++  // HarmonyOS rejects mmap(PROT_EXEC) on file mappings (EACCES/EINVAL, see
++  // docs/phase0-result.md). Map the executable view as RW first, then switch it
++  // to RX with mprotect - the W^X-safe path the Phase 0 JIT probe verified.
++  const bool ohos_exec = (prot & PROT_EXEC) != 0;
++  if (ohos_exec) {
++    prot = PROT_READ | PROT_WRITE;
++  }
++#endif
++
+     void* result = mmap(base_address, length, prot, flags, handle, file_offset);
+ 
+   if (result == MAP_FAILED) {
++    XELOGE("MapFileView failed: base={:p} len=0x{:X} prot=0x{:X} flags=0x{:X} "
++           "errno={}",
++           base_address, length, prot, flags, errno);
+     return nullptr;
+   }
+ 
+@@ -528,6 +560,17 @@ void* MapFileView(FileMappingHandle handle, void* base_address, size_t length,
+     return nullptr;
+   }
+ 
++#if XE_PLATFORM_OHOS
++  if (ohos_exec) {
++    if (mprotect(result, length, PROT_READ | PROT_EXEC) != 0) {
++      XELOGE("MapFileView mprotect(RX) failed: len=0x{:X} errno={}", length,
++             errno);
++      munmap(result, length);
++      return nullptr;
++    }
++  }
++#endif
++
+   std::lock_guard guard(g_mapped_file_ranges_mutex);
+   mapped_file_ranges.push_back({reinterpret_cast<uintptr_t>(result),
+                                 reinterpret_cast<uintptr_t>(result) + length});
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/base/platform.h b/emulator-core/src/main/cpp/xenia/src/xenia/base/platform.h
+index adeffedd3..8eeecc94a 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/base/platform.h
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/base/platform.h
+@@ -38,6 +38,13 @@
+ //#define XE_PLATFORM_ANDROID 1
+ #define XE_PLATFORM_xendroid 1
+ #define XE_PLATFORM_LINUX 1
++#elif defined(__OHOS__)
++// HarmonyOS: reuse the fork's xendroid code paths (113 call sites) and the
++// generic POSIX/Linux paths (77 call sites). XE_PLATFORM_OHOS marks the few
++// places that must differ (JIT memory allocation, surface creation, audio).
++#define XE_PLATFORM_OHOS 1
++#define XE_PLATFORM_xendroid 1
++#define XE_PLATFORM_LINUX 1
+ #elif defined(__gnu_linux__)
+ #define XE_PLATFORM_GNU_LINUX 1
+ #define XE_PLATFORM_LINUX 1
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/base/string_key.h b/emulator-core/src/main/cpp/xenia/src/xenia/base/string_key.h
+index a1adabd55..717de6434 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/base/string_key.h
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/base/string_key.h
+@@ -75,14 +75,11 @@ struct string_key_insensitive : internal::string_key_base {
+ 
+   bool operator==(const string_key_insensitive& other) const {
+     return other.view().size() == view().size() &&
+-           std::ranges::equal(
+-               other.view(), view(), {},
+-               [](char ch) {
+-                 return std::tolower(static_cast<unsigned char>(ch));
+-               },
+-               [](char ch) {
+-                 return std::tolower(static_cast<unsigned char>(ch));
+-               });
++           std::equal(other.view().begin(), other.view().end(),
++                      view().begin(), view().end(), [](char a, char b) {
++                        return std::tolower(static_cast<unsigned char>(a)) ==
++                               std::tolower(static_cast<unsigned char>(b));
++                      });
+   }
+ 
+   size_t hash() const { return utf8::hash_fnv1a(view()); }
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/cpu/backend/code_cache_base.h b/emulator-core/src/main/cpp/xenia/src/xenia/cpu/backend/code_cache_base.h
+index 57cd83547..30e6455bb 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/cpu/backend/code_cache_base.h
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/cpu/backend/code_cache_base.h
+@@ -21,6 +21,12 @@
+ #include <utility>
+ #include <vector>
+ 
++#if defined(__OHOS__)
++// XE_PLATFORM_OHOS isn't defined yet at this point (platform.h comes later).
++#include <sys/mman.h>
++#include <unistd.h>
++#endif
++
+ #include "third_party/fmt/include/fmt/format.h"
+ #include "xenia/base/assert.h"
+ #include "xenia/base/clock.h"
+@@ -174,6 +180,49 @@ class CodeCacheBase : public CodeCache {
+   virtual bool Initialize() {
+     file_name_ =
+         fmt::format("xenia_code_cache_{}", Clock::QueryHostTickCount());
++
++#if XE_PLATFORM_OHOS
++    // HarmonyOS rejects file-backed executable mappings and strips W from
++    // anonymous RWX (see docs/phase0-result.md). Use one anonymous RW region
++    // as both the write and execute view, and toggle its page protection per
++    // placement (OhosMakeWritable / OhosMakeExecutable below).
++    generated_code_execute_base_ = reinterpret_cast<uint8_t*>(
++        xe::memory::AllocFixed(nullptr, kGeneratedCodeSize,
++                               xe::memory::AllocationType::kReserveCommit,
++                               xe::memory::PageAccess::kReadWrite));
++    if (!generated_code_execute_base_) {
++      XELOGE("Unable to allocate OHOS code cache region (size=0x{:X})",
++             static_cast<uint64_t>(kGeneratedCodeSize));
++      return false;
++    }
++    generated_code_write_base_ = generated_code_execute_base_;
++
++    encoded_indirection_ = true;
++    indirection_table_base_ = reinterpret_cast<uint8_t*>(xe::memory::AllocFixed(
++        nullptr, kIndirectionTableSize, xe::memory::AllocationType::kReserve,
++        xe::memory::PageAccess::kReadWrite));
++    if (!indirection_table_base_) {
++      XELOGE("Unable to reserve indirection table at any address (size=0x{:X})",
++             static_cast<uint64_t>(kIndirectionTableSize));
++      return false;
++    }
++    indirection_table_actual_base_ =
++        reinterpret_cast<uintptr_t>(indirection_table_base_);
++    indirection_table_base_bias_ =
++        indirection_table_actual_base_ -
++        static_cast<uintptr_t>(kIndirectionTableBase);
++    external_indirection_targets_ =
++        std::make_unique<uint64_t[]>(kIndirectionExternalCapacity);
++    if (!external_indirection_targets_) {
++      XELOGE("Unable to allocate external indirection table (entries={})",
++             static_cast<uint32_t>(kIndirectionExternalCapacity));
++      return false;
++    }
++    external_indirection_target_count_.store(0, std::memory_order_relaxed);
++    generated_code_map_.reserve(kMaximumFunctionCount);
++    return true;
++#endif  // XE_PLATFORM_OHOS
++
+     mapping_ = xe::memory::CreateFileMappingHandle(
+         file_name_, kGeneratedCodeSize,
+         xe::memory::PageAccess::kExecuteReadWrite, false);
+@@ -310,7 +359,12 @@ class CodeCacheBase : public CodeCache {
+       }
+     }
+     if (!generated_code_execute_base_ || !generated_code_write_base_) {
+-      XELOGE("Unable to allocate code cache generated code storage");
++      XELOGE(
++          "Unable to allocate code cache generated code storage "
++          "(exec=0x{:X} write=0x{:X} wx_preferred={})",
++          reinterpret_cast<uintptr_t>(generated_code_execute_base_),
++          reinterpret_cast<uintptr_t>(generated_code_write_base_),
++          wx_preferred);
+       return false;
+     }
+ 
+@@ -452,6 +506,27 @@ class CodeCacheBase : public CodeCache {
+                    code_execute_address_out, code_write_address_out);
+   }
+ 
++#if XE_PLATFORM_OHOS
++  // W^X toggle for the single anonymous code-cache region (see Initialize).
++  void OhosProtect(void* address, size_t size, int prot) {
++    static const uintptr_t kPageSize = uintptr_t(getpagesize());
++    uintptr_t begin = reinterpret_cast<uintptr_t>(address) & ~(kPageSize - 1);
++    uintptr_t end =
++        (reinterpret_cast<uintptr_t>(address) + size + kPageSize - 1) &
++        ~(kPageSize - 1);
++    if (mprotect(reinterpret_cast<void*>(begin), end - begin, prot) != 0) {
++      XELOGE("OhosProtect failed: begin={:p} size=0x{:X} prot={} errno={}",
++             reinterpret_cast<void*>(begin), end - begin, prot, errno);
++    }
++  }
++  void OhosMakeWritable(void* address, size_t size) {
++    OhosProtect(address, size, PROT_READ | PROT_WRITE);
++  }
++  void OhosMakeExecutable(void* address, size_t size) {
++    OhosProtect(address, size, PROT_READ | PROT_EXEC);
++  }
++#endif  // XE_PLATFORM_OHOS
++
+   void PlaceGuestCode(uint32_t guest_address, void* machine_code,
+                       const EmitFunctionInfo& func_info,
+                       GuestFunction* function_info,
+@@ -502,6 +577,15 @@ class CodeCacheBase : public CodeCache {
+         pthread_jit_write_protect_np(0);
+       }
+ #endif
++#if XE_PLATFORM_OHOS
++      const bool ohos_toggle =
++          generated_code_execute_base_ == generated_code_write_base_;
++      if (ohos_toggle) {
++        OhosMakeWritable(
++            code_write_address,
++            static_cast<size_t>(end_write_address - code_write_address));
++      }
++#endif
+ 
+       // Copy code.
+       std::memcpy(code_write_address, machine_code, func_info.code_size.total);
+@@ -521,6 +605,13 @@ class CodeCacheBase : public CodeCache {
+         pthread_jit_write_protect_np(1);
+       }
+ #endif
++#if XE_PLATFORM_OHOS
++      if (ohos_toggle) {
++        OhosMakeExecutable(
++            code_write_address,
++            static_cast<size_t>(end_write_address - code_write_address));
++      }
++#endif
+ 
+       // Flush I-cache for code and fill regions.
+       self().FlushCodeRange(code_write_address, func_info.code_size.total);
+@@ -558,12 +649,24 @@ class CodeCacheBase : public CodeCache {
+     if (jit_write_toggle) {
+       pthread_jit_write_protect_np(0);
+     }
++#endif
++#if XE_PLATFORM_OHOS
++    const bool ohos_toggle =
++        generated_code_execute_base_ == generated_code_write_base_;
++    if (ohos_toggle) {
++      OhosMakeWritable(data_address, length);
++    }
+ #endif
+     std::memcpy(data_address, data, length);
+ #if XE_PLATFORM_MAC && XE_ARCH_ARM64
+     if (jit_write_toggle) {
+       pthread_jit_write_protect_np(1);
+     }
++#endif
++#if XE_PLATFORM_OHOS
++    if (ohos_toggle) {
++      OhosMakeExecutable(data_address, length);
++    }
+ #endif
+     return uint32_t(uintptr_t(data_address));
+   }
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/cpu/xex_module.h b/emulator-core/src/main/cpp/xenia/src/xenia/cpu/xex_module.h
+index a2b6750d7..7072ae4c0 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/cpu/xex_module.h
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/cpu/xex_module.h
+@@ -49,8 +49,8 @@ static_assert(sizeof(InfoCacheFlags) == 4,
+ inline void AtomicSetInfoCacheFlags(InfoCacheFlags* slot, InfoCacheFlags bits) {
+   uint32_t mask;
+   std::memcpy(&mask, &bits, sizeof(mask));
+-  std::atomic_ref<uint32_t>(*reinterpret_cast<uint32_t*>(slot))
+-      .fetch_or(mask, std::memory_order_relaxed);
++  __atomic_fetch_or(reinterpret_cast<uint32_t*>(slot), mask,
++                    __ATOMIC_RELAXED);
+ }
+ 
+ struct XexInfoCache {
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/emulator.cc b/emulator-core/src/main/cpp/xenia/src/xenia/emulator.cc
+index 54b7e5980..11e1ec9c3 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/emulator.cc
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/emulator.cc
+@@ -313,9 +313,11 @@ X_STATUS Emulator::Setup(
+   // logical processors.
+   xe::threading::EnableAffinityConfiguration();
+ 
+-#if XE_PLATFORM_LINUX
++#if XE_PLATFORM_LINUX && !XE_PLATFORM_OHOS
+   // Check if /dev/shm is mounted with noexec. The code cache uses shm_open
+   // with PROT_EXEC, which will fail with EPERM on noexec tmpfs mounts.
++  // HarmonyOS mounts /dev/shm noexec, but its code cache uses memfd_create
++  // (see memory_posix.cc CreateFileMappingHandle), so this check doesn't apply.
+   {
+     std::ifstream mounts("/proc/mounts");
+     std::string line;
+@@ -2374,7 +2376,8 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
+   // Making changes to the UI (setting the icon) and executing game config
+   // load callbacks which expect to be called from the UI thread.
+   // If not on UI thread, dispatch to it synchronously.
+-  if (!display_window_->app_context().IsInUIThread()) {
++  // HarmonyOS headless boot has no display window - run directly on this thread.
++  if (display_window_ && !display_window_->app_context().IsInUIThread()) {
+     X_STATUS result = X_STATUS_UNSUCCESSFUL;
+     display_window_->app_context().CallInUIThreadSynchronous(
+         [this, &path, &module_path, &result]() {
+@@ -2417,7 +2420,9 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
+   title_id_ = std::nullopt;
+   title_name_ = "";
+   title_version_ = "";
+-  display_window_->SetIcon(nullptr, 0);
++  if (display_window_) {
++    display_window_->SetIcon(nullptr, 0);
++  }
+ 
+   // Allow xam to request module loads.
+   auto xam = kernel_state()->GetKernelModule<kernel::xam::XamModule>("xam.xex");
+@@ -2511,18 +2516,19 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
+           properties_list = game_info_database_->GetProperties();
+       {
+         // 4D5307DC SPA contains a lot of properties, limit to log.
+-        const auto properties_list_limit =
+-            properties_list | std::views::take(150);
++        const size_t properties_limit =
++            std::min<size_t>(properties_list.size(), 150);
+         std::string body;
+-        for (const kernel::util::GameInfoDatabase::Property& entry :
+-             properties_list_limit) {
++        for (size_t i = 0; i < properties_limit; ++i) {
++          const kernel::util::GameInfoDatabase::Property& entry =
++              properties_list[i];
+           body += fmt::format(
+               "  {:08X} [{} bytes{}] {}\n", entry.id, entry.data_size,
+               entry.is_matchmaking ? ", matchmaking" : "",
+               string_util::remove_eol(string_util::trim(entry.description)));
+         }
+-        XELOGI("-- PROPERTIES ({}{}) --\n{}", properties_list_limit.size(),
+-               properties_list.size() > properties_list_limit.size()
++        XELOGI("-- PROPERTIES ({}{}) --\n{}", properties_limit,
++               properties_list.size() > properties_limit
+                    ? fmt::format(" of {}", properties_list.size())
+                    : "",
+                body);
+@@ -2547,10 +2553,11 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
+           game_info_database_->GetStatsViews();
+       {
+         // 4D5307EA SPA contains a lot of stats, limit to log.
+-        const auto stats_views_limit = stats_views | std::views::take(100);
++        const size_t stats_limit = std::min<size_t>(stats_views.size(), 100);
+         std::string body;
+-        for (const kernel::util::GameInfoDatabase::StatsView& entry :
+-             stats_views_limit) {
++        for (size_t i = 0; i < stats_limit; ++i) {
++          const kernel::util::GameInfoDatabase::StatsView& entry =
++              stats_views[i];
+           std::string flags;
+           auto add = [&](bool b, const char* tag) {
+             if (b) {
+@@ -2571,8 +2578,8 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
+               flags.empty() ? "" : ", ", flags,
+               string_util::remove_eol(string_util::trim(entry.view.name)));
+         }
+-        XELOGI("-- STATS VIEWS ({}{}) --\n{}", stats_views_limit.size(),
+-               stats_views.size() > stats_views_limit.size()
++        XELOGI("-- STATS VIEWS ({}{}) --\n{}", stats_limit,
++               stats_views.size() > stats_limit
+                    ? fmt::format(" of {}", stats_views.size())
+                    : "",
+                body);
+@@ -2593,7 +2600,7 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
+       }
+ 
+       auto icon_block = game_info_database_->GetIcon();
+-      if (!icon_block.empty()) {
++      if (display_window_ && !icon_block.empty()) {
+         display_window_->SetIcon(icon_block.data(), icon_block.size());
+       }
+     }
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/CMakeLists.txt b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/CMakeLists.txt
+index 8a447b3dd..b92902e59 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/CMakeLists.txt
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/CMakeLists.txt
+@@ -4,7 +4,7 @@ xe_platform_sources(xenia-gpu-vulkan ${CMAKE_CURRENT_SOURCE_DIR})
+ # (and slangc for .slang sources), which can't run in the arm64 NDK cross-build.
+ # Skip shader regeneration on Android and consume the committed SPIR-V bytecode headers
+ # under gpu/shaders/bytecode/vulkan_spirv/. See REBASE_EDGE_REPORT.md (build phase).
+-if(NOT ANDROID)
++if(NOT (ANDROID OR OHOS))
+   xe_shader_rules_spirv(xenia-gpu-vulkan ${CMAKE_CURRENT_SOURCE_DIR}/../shaders)
+   xe_shader_rules_slang(xenia-gpu-vulkan ${CMAKE_CURRENT_SOURCE_DIR}/../shaders
+                         TARGET spirv)
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/kernel/kernel_state.cc b/emulator-core/src/main/cpp/xenia/src/xenia/kernel/kernel_state.cc
+index 032d6559d..519a6bd5b 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/kernel/kernel_state.cc
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/kernel/kernel_state.cc
+@@ -982,12 +982,11 @@ object_ref<XThread> KernelState::GetThreadByID(uint32_t thread_id) {
+ std::vector<uint32_t> KernelState::GetAllThreadIDs() {
+   auto global_lock = global_critical_region_.Acquire();
+ 
+-  auto thread_ids_view =
+-      threads_by_id_ |
+-      std::views::transform([](const auto& pair) { return pair.first; });
+-
+-  std::vector<std::uint32_t> thread_ids(thread_ids_view.begin(),
+-                                        thread_ids_view.end());
++  std::vector<std::uint32_t> thread_ids;
++  thread_ids.reserve(threads_by_id_.size());
++  for (const auto& pair : threads_by_id_) {
++    thread_ids.push_back(pair.first);
++  }
+ 
+   return thread_ids;
+ }
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/kernel/xam/user_property.cc b/emulator-core/src/main/cpp/xenia/src/xenia/kernel/xam/user_property.cc
+index 97470e008..3ca68b4ef 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/kernel/xam/user_property.cc
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/kernel/xam/user_property.cc
+@@ -20,7 +20,7 @@ Property::Property(const Property& property)
+ 
+ Property::Property(uint32_t property_id, UserDataTypes property_data)
+     : UserData(get_type(property_id), property_data) {
+-  property_id_ = static_cast<AttributeKey>(property_id);
++  property_id_.value = property_id;
+ }
+ 
+ Property::Property(uint32_t property_id, uint32_t value_size,
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/kernel/xam/user_settings.h b/emulator-core/src/main/cpp/xenia/src/xenia/kernel/xam/user_settings.h
+index b97735e1a..711a3b969 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/kernel/xam/user_settings.h
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/kernel/xam/user_settings.h
+@@ -532,7 +532,8 @@ class UserSetting : public UserData {
+   }
+ 
+   static bool is_setting_valid(uint32_t setting_id) {
+-    const auto setting = static_cast<AttributeKey>(setting_id);
++    AttributeKey setting{};
++    setting.value = setting_id;
+ 
+     if (setting.id < kMaxUserSettingId) {
+       return true;
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/kernel/xam/xam_info.cc b/emulator-core/src/main/cpp/xenia/src/xenia/kernel/xam/xam_info.cc
+index 80a3fa51c..c8cc202a4 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/kernel/xam/xam_info.cc
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/kernel/xam/xam_info.cc
+@@ -56,7 +56,7 @@ DEFINE_bool(in_process_title_relaunch, true,
+             "Shutdown/Setup cycle instead of spawning a new emulator process.",
+             "Kernel");
+ 
+-#if XE_PLATFORM_xendroid
++#if XE_PLATFORM_xendroid && !XE_PLATFORM_OHOS
+ #include <jni.h>
+ // Process-wide JavaVM set in JNI_OnLoad (xendroid.cpp); declared at global scope
+ // so the relaunch detach-current-thread guard resolves to ::g_jvm rather than a
+@@ -383,7 +383,7 @@ void XamLoaderLaunchTitle_entry(lpstring_t raw_name_ptr, dword_t flags) {
+                                 caller_thread_id
+ #endif
+         );
+-#if XE_PLATFORM_xendroid
++#if XE_PLATFORM_xendroid && !XE_PLATFORM_OHOS
+         // The relaunch runs on this detached thread; if any JNI attach happened
+         // (e.g. a callback into Java), the JNIEnv must be detached before the
+         // thread exits to avoid the "native thread exited without detaching"
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/kernel/xam/xam_ui.cc b/emulator-core/src/main/cpp/xenia/src/xenia/kernel/xam/xam_ui.cc
+index a378fcd9d..22b042988 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/kernel/xam/xam_ui.cc
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/kernel/xam/xam_ui.cc
+@@ -87,7 +87,7 @@ X_RESULT xeXamDispatchDialog(T* dialog,
+     return result;
+   };
+   auto post = []() {
+-    std::jthread t([] {
++    std::thread t([] {
+       xe::threading::Sleep(kUIDelayMillis);
+       kernel_state()->BroadcastNotification(kXNotificationSystemUI, false);
+     });
+@@ -154,7 +154,7 @@ X_RESULT xeXamDispatchHeadless(std::function<X_RESULT()> run_callback,
+     xe::threading::Sleep(std::chrono::milliseconds(25));
+   };
+   auto post = []() {
+-    std::jthread t([]() {
++    std::thread t([]() {
+       xe::threading::Sleep(kUIDelayMillis);
+       kernel_state()->BroadcastNotification(kXNotificationSystemUI, false);
+     });
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/kernel/xam/xdbf/gpd_info_profile.cc b/emulator-core/src/main/cpp/xenia/src/xenia/kernel/xam/xdbf/gpd_info_profile.cc
+index a5bbf9551..e73522a36 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/kernel/xam/xdbf/gpd_info_profile.cc
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/kernel/xam/xdbf/gpd_info_profile.cc
+@@ -24,36 +24,24 @@ const std::vector<const X_XDBF_GPD_TITLE_PLAYED*>
+ GpdInfoProfile::GetTitlesInfo() const {
+   std::vector<const X_XDBF_GPD_TITLE_PLAYED*> entries;
+ 
+-  auto titles = entries_ | std::views::filter([](const auto& entry) {
+-                  return !IsSyncEntry(&entry);
+-                }) |
+-                std::views::filter([](const auto& entry) {
+-                  return IsEntryOfSection(&entry, GpdSection::kTitle);
+-                });
+-
+-  for (const auto& title : titles) {
+-    entries.push_back(
+-        reinterpret_cast<const X_XDBF_GPD_TITLE_PLAYED*>(title.data.data()));
++  for (const auto& title : entries_) {
++    if (!IsSyncEntry(&title) && IsEntryOfSection(&title, GpdSection::kTitle)) {
++      entries.push_back(
++          reinterpret_cast<const X_XDBF_GPD_TITLE_PLAYED*>(title.data.data()));
++    }
+   }
+   return entries;
+ };
+ 
+ X_XDBF_GPD_TITLE_PLAYED* GpdInfoProfile::GetTitleInfo(const uint32_t title_id) {
+-  auto title = entries_ | std::views::filter([](const auto& entry) {
+-                 return !IsSyncEntry(&entry);
+-               }) |
+-               std::views::filter([](const auto& entry) {
+-                 return IsEntryOfSection(&entry, GpdSection::kTitle);
+-               }) |
+-               std::views::filter([title_id](const auto& entry) {
+-                 return static_cast<uint32_t>(entry.info.id) == title_id;
+-               });
+-
+-  if (title.empty()) {
+-    return nullptr;
++  for (auto& entry : entries_) {
++    if (!IsSyncEntry(&entry) &&
++        IsEntryOfSection(&entry, GpdSection::kTitle) &&
++        static_cast<uint32_t>(entry.info.id) == title_id) {
++      return reinterpret_cast<X_XDBF_GPD_TITLE_PLAYED*>(entry.data.data());
++    }
+   }
+-
+-  return reinterpret_cast<X_XDBF_GPD_TITLE_PLAYED*>(title.begin()->data.data());
++  return nullptr;
+ }
+ 
+ std::u16string GpdInfoProfile::GetTitleName(const uint32_t title_id) const {
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/kernel/xam/xdbf/gpd_info_title.cc b/emulator-core/src/main/cpp/xenia/src/xenia/kernel/xam/xdbf/gpd_info_title.cc
+index 359717ba8..225fb8098 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/kernel/xam/xdbf/gpd_info_title.cc
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/kernel/xam/xdbf/gpd_info_title.cc
+@@ -89,16 +89,11 @@ std::u16string GpdInfoTitle::GetAchievementUnachievedDescription(
+ std::vector<uint32_t> GpdInfoTitle::GetAchievementsIds() const {
+   std::vector<uint32_t> ids;
+ 
+-  auto achievements =
+-      entries_ | std::views::filter([](const auto& entry) {
+-        return !IsSyncEntry(&entry);
+-      }) |
+-      std::views::filter([](const auto& entry) {
+-        return IsEntryOfSection(&entry, GpdSection::kAchievement);
+-      });
+-
+-  for (const auto& achievement : achievements) {
+-    ids.push_back(static_cast<uint32_t>(achievement.info.id));
++  for (const auto& achievement : entries_) {
++    if (!IsSyncEntry(&achievement) &&
++        IsEntryOfSection(&achievement, GpdSection::kAchievement)) {
++      ids.push_back(static_cast<uint32_t>(achievement.info.id));
++    }
+   }
+   return ids;
+ }
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/kernel/xam/xdbf/spa_info.cc b/emulator-core/src/main/cpp/xenia/src/xenia/kernel/xam/xdbf/spa_info.cc
+index dbf41b115..1ed306cab 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/kernel/xam/xdbf/spa_info.cc
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/kernel/xam/xdbf/spa_info.cc
+@@ -507,8 +507,8 @@ const std::optional<PropertyBag> SpaInfo::GetPresenceMode(
+ }
+ 
+ const std::optional<ViewTable> SpaInfo::GetStatsView(uint32_t id) {
+-  const auto itr = std::ranges::find_if(
+-      stats_views_,
++  const auto itr = std::find_if(
++      stats_views_.begin(), stats_views_.end(),
+       [id](const ViewTable& view) { return view.view_entry.id == id; });
+ 
+   return itr != stats_views_.cend() ? std::make_optional(*itr) : std::nullopt;
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/kernel/xevent.cc b/emulator-core/src/main/cpp/xenia/src/xenia/kernel/xevent.cc
+index 4da4e0815..5f07fe1df 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/kernel/xevent.cc
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/kernel/xevent.cc
+@@ -76,7 +76,10 @@ void XEvent::InitializeNative(void* native_ptr,
+ }
+ 
+ void XEvent::RecordCreator() {
+-  auto* thread = XThread::GetCurrentThread();
++  // GetCurrentFiberThread() (not GetCurrentThread()) - the creator may be a
++  // host thread (kernel globals are initialized before any guest thread
++  // exists), which GetCurrentThread() would assert on in debug builds.
++  auto* thread = XThread::GetCurrentFiberThread();
+   if (thread && thread->thread_state()) {
+     creator_thread_ = thread->handle();
+     creator_lr_ = uint32_t(thread->thread_state()->context()->lr);
+@@ -87,7 +90,8 @@ void XEvent::RecordCreator() {
+ }
+ 
+ void XEvent::RecordSetter() {
+-  auto* thread = XThread::GetCurrentThread();
++  // See RecordCreator - the setter may be a host thread.
++  auto* thread = XThread::GetCurrentFiberThread();
+   if (thread && thread->thread_state()) {
+     last_set_thread_ = thread->handle();
+     last_set_lr_ = uint32_t(thread->thread_state()->context()->lr);
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/kernel/xobject.cc b/emulator-core/src/main/cpp/xenia/src/xenia/kernel/xobject.cc
+index 91a4cc02e..0762fc329 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/kernel/xobject.cc
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/kernel/xobject.cc
+@@ -362,7 +362,9 @@ void XObject::RecordCooperativeSignal(XObject* object) {
+   rec.handle = object->handle();
+   rec.type = static_cast<uint8_t>(object->type());
+   rec.uptime_ms = uint32_t(Clock::QueryGuestUptimeMillis());
+-  if (auto* thread = XThread::GetCurrentThread()) {
++  // GetCurrentFiberThread() - the signaller may be a host thread during
++  // kernel globals initialization (GetCurrentThread() asserts in that case).
++  if (auto* thread = XThread::GetCurrentFiberThread()) {
+     rec.signaler_thread = thread->handle();
+     if (auto* state = thread->thread_state()) {
+       rec.signaler_lr = uint32_t(state->context()->lr);
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/ui/CMakeLists.txt b/emulator-core/src/main/cpp/xenia/src/xenia/ui/CMakeLists.txt
+index 4a8bc46a4..b12683b9c 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/ui/CMakeLists.txt
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/ui/CMakeLists.txt
+@@ -7,7 +7,7 @@ file(GLOB _ui_exclude
+   "${CMAKE_CURRENT_SOURCE_DIR}/*_demo.cc"
+   "${CMAKE_CURRENT_SOURCE_DIR}/windowed_app_main_*.cc"
+ )
+-if(CMAKE_SYSTEM_NAME STREQUAL "Android")
++if(CMAKE_SYSTEM_NAME STREQUAL "Android" OR OHOS)
+   file(GLOB _wx_exclude
+     "${CMAKE_CURRENT_SOURCE_DIR}/*_wx.cc"
+     "${CMAKE_CURRENT_SOURCE_DIR}/*_wx.h"
+@@ -31,7 +31,7 @@ if(_ui_exclude AND _ui_srcs)
+   set_target_properties(xenia-ui PROPERTIES SOURCES "${_ui_srcs}")
+ endif()
+ target_link_libraries(xenia-ui PUBLIC xenia-base)
+-if(NOT CMAKE_SYSTEM_NAME STREQUAL "Android")
++if(NOT (CMAKE_SYSTEM_NAME STREQUAL "Android" OR OHOS))
+   target_link_libraries(xenia-ui PUBLIC xe-wxWidgets)
+ endif()
+ if(WIN32)
+@@ -63,7 +63,7 @@ xe_embed_binary_assets(xenia-ui
+ # time, then bundle the staging tree into the binary. wx_locale.cc decodes
+ # the bundle and feeds it to wxTranslations via a custom loader, so no
+ # .mo files ship alongside the exe.
+-if(NOT CMAKE_SYSTEM_NAME STREQUAL "Android")
++if(NOT (CMAKE_SYSTEM_NAME STREQUAL "Android" OR OHOS))
+   set(_xe_locale_stage "${CMAKE_CURRENT_BINARY_DIR}/locale_staged")
+   file(GLOB _xe_po_files
+        "${PROJECT_SOURCE_DIR}/assets/locale/*/xenia.po")
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/ui/imgui_drawer.cc b/emulator-core/src/main/cpp/xenia/src/xenia/ui/imgui_drawer.cc
+index 10b6b65c4..4c6c56c2c 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/ui/imgui_drawer.cc
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/ui/imgui_drawer.cc
+@@ -719,25 +719,36 @@ void ImGuiDrawer::Draw(UIDrawContext& ui_draw_context) {
+   dialog_loop_next_index_ = SIZE_MAX;
+ 
+   if (!notifications_.empty() && are_notifications_enabled_) {
+-    auto guest_notifications =
+-        notifications_ | std::views::filter([](auto* notification) {
+-          return notification->GetNotificationType() == NotificationType::Guest;
+-        });
+-
+-    auto host_notifications =
+-        notifications_ | std::views::filter([](auto* notification) {
+-          return notification->GetNotificationType() == NotificationType::Host;
+-        });
+-
+-    if (!guest_notifications.empty()) {
+-      guest_notifications.front()->Draw();
++    // libc++ 15 has no <ranges> algorithms, so filter explicitly.
++    ImGuiNotification* guest_notification = nullptr;
++    ImGuiNotification* host_notification = nullptr;
++    size_t host_count = 0;
++    for (auto* notification : notifications_) {
++      switch (notification->GetNotificationType()) {
++        case NotificationType::Guest:
++          if (!guest_notification) {
++            guest_notification = notification;
++          }
++          break;
++        case NotificationType::Host:
++          if (!host_notification) {
++            host_notification = notification;
++          }
++          ++host_count;
++          break;
++        default:
++          break;
++      }
+     }
+ 
+-    if (!host_notifications.empty()) {
+-      host_notifications.front()->Draw();
++    if (guest_notification) {
++      guest_notification->Draw();
++    }
+ 
+-      if (std::ranges::distance(host_notifications) > 1) {
+-        host_notifications.front()->SetDeletionPending();
++    if (host_notification) {
++      host_notification->Draw();
++      if (host_count > 1) {
++        host_notification->SetDeletionPending();
+       }
+     }
+   }
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/ui/profile_dialogs.cc b/emulator-core/src/main/cpp/xenia/src/xenia/ui/profile_dialogs.cc
+index 29a8c31ad..924b97b8c 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/ui/profile_dialogs.cc
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/ui/profile_dialogs.cc
+@@ -152,7 +152,11 @@ void ProfileConfigDialog::OnDraw(ImGuiIO& io) {
+       ImVec2(ImGui::GetWindowPos().x + ImGui::GetWindowSize().x + 20.f,
+              ImGui::GetWindowPos().y);
+ 
+-  for (auto& [xuid, account] : *profiles) {
++  // Plain locals instead of a structured binding: clang 15 cannot capture
++  // structured bindings in the lambdas below (P1091R3).
++  for (auto& profile_entry : *profiles) {
++    const uint64_t xuid = profile_entry.first;
++    auto& account = profile_entry.second;
+     ImGui::PushID(fmt::format("{:016X}", xuid).c_str());
+ 
+     const uint8_t user_index =
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/ui/surface.h b/emulator-core/src/main/cpp/xenia/src/xenia/ui/surface.h
+index 3d64036e9..8b9c26d49 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/ui/surface.h
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/ui/surface.h
+@@ -36,6 +36,8 @@ class Surface {
+     kTypeIndex_MacNSView,
+     // Windows.
+     kTypeIndex_Win32Hwnd,
++    // HarmonyOS (OHNativeWindow from XComponent).
++    kTypeIndex_OHOSNativeWindow,
+   };
+   using TypeFlags = uint32_t;
+   enum : TypeFlags {
+@@ -45,6 +47,7 @@ class Surface {
+     kTypeFlag_XcbWindow = TypeFlags(1) << kTypeIndex_XcbWindow,
+     kTypeFlag_MacNSView = TypeFlags(1) << kTypeIndex_MacNSView,
+     kTypeFlag_Win32Hwnd = TypeFlags(1) << kTypeIndex_Win32Hwnd,
++    kTypeFlag_OHOSNativeWindow = TypeFlags(1) << kTypeIndex_OHOSNativeWindow,
+   };
+ 
+   Surface(const Surface& surface) = delete;
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/ui/surface_ohos.cc b/emulator-core/src/main/cpp/xenia/src/xenia/ui/surface_ohos.cc
+new file mode 100644
+index 000000000..fbe3bfca7
+--- /dev/null
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/ui/surface_ohos.cc
+@@ -0,0 +1,34 @@
++/**
++ ******************************************************************************
++ * Xenia : Xbox 360 Emulator Research Project                                 *
++ ******************************************************************************
++ * Copyright 2026.                                                            *
++ * Released under the BSD license - see LICENSE in the root for more details. *
++ ******************************************************************************
++ */
++
++#include "xenia/ui/surface_ohos.h"
++
++namespace xe {
++namespace ui {
++
++bool OHOSNativeWindowSurface::GetSizeImpl(uint32_t& width_out,
++                                          uint32_t& height_out) const {
++  if (!window_) {
++    return false;
++  }
++  int32_t width = 0, height = 0;
++  if (OH_NativeWindow_NativeWindowHandleOpt(window_, GET_BUFFER_GEOMETRY, &width,
++                                            &height) != 0) {
++    return false;
++  }
++  if (width <= 0 || height <= 0) {
++    return false;
++  }
++  width_out = uint32_t(width);
++  height_out = uint32_t(height);
++  return true;
++}
++
++}  // namespace ui
++}  // namespace xe
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/ui/surface_ohos.h b/emulator-core/src/main/cpp/xenia/src/xenia/ui/surface_ohos.h
+new file mode 100644
+index 000000000..64bf6866c
+--- /dev/null
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/ui/surface_ohos.h
+@@ -0,0 +1,37 @@
++/**
++ ******************************************************************************
++ * Xenia : Xbox 360 Emulator Research Project                                 *
++ ******************************************************************************
++ * Copyright 2026.                                                            *
++ * Released under the BSD license - see LICENSE in the root for more details. *
++ ******************************************************************************
++ */
++
++#ifndef XENIA_UI_SURFACE_OHOS_H_
++#define XENIA_UI_SURFACE_OHOS_H_
++
++#include <native_window/external_window.h>
++
++#include "xenia/ui/surface.h"
++
++namespace xe {
++namespace ui {
++
++class OHOSNativeWindowSurface : public Surface {
++ public:
++  explicit OHOSNativeWindowSurface(OHNativeWindow* window)
++      : window_(window) {}
++  TypeIndex GetType() const override { return kTypeIndex_OHOSNativeWindow; }
++  OHNativeWindow* window() const { return window_; }
++
++ protected:
++  bool GetSizeImpl(uint32_t& width_out, uint32_t& height_out) const override;
++
++ private:
++  OHNativeWindow* window_;
++};
++
++}  // namespace ui
++}  // namespace xe
++
++#endif  // XENIA_UI_SURFACE_OHOS_H_
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/CMakeLists.txt b/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/CMakeLists.txt
+index 98d4126fc..85a19a82a 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/CMakeLists.txt
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/CMakeLists.txt
+@@ -2,7 +2,7 @@ add_library(xenia-ui-vulkan STATIC)
+ xe_platform_sources(xenia-ui-vulkan ${CMAKE_CURRENT_SOURCE_DIR})
+ xe_platform_sources(xenia-ui-vulkan ${CMAKE_CURRENT_SOURCE_DIR}/functions)
+ # XenDroid (Android): skip shader regeneration on Android (see gpu/vulkan/CMakeLists.txt).
+-if(NOT ANDROID)
++if(NOT (ANDROID OR OHOS))
+   xe_shader_rules_spirv(xenia-ui-vulkan ${CMAKE_CURRENT_SOURCE_DIR}/../shaders)
+   xe_shader_rules_slang(xenia-ui-vulkan ${CMAKE_CURRENT_SOURCE_DIR}/../shaders
+                         TARGET spirv)
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/functions/instance_ohos_surface.inc b/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/functions/instance_ohos_surface.inc
+new file mode 100644
+index 000000000..39da40e13
+--- /dev/null
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/functions/instance_ohos_surface.inc
+@@ -0,0 +1,2 @@
++// VK_OHOS_surface functions used in Xenia.
++XE_UI_VULKAN_FUNCTION(vkCreateSurfaceOHOS)
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_api.h b/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_api.h
+index b2952880d..31ff4e639 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_api.h
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_api.h
+@@ -21,12 +21,19 @@
+ #define VK_ENABLE_BETA_EXTENSIONS
+ #endif
+ 
+-#if XE_PLATFORM_ANDROID || XE_PLATFORM_xendroid
++#if (XE_PLATFORM_ANDROID || XE_PLATFORM_xendroid) && !XE_PLATFORM_OHOS
+ #ifndef VK_USE_PLATFORM_ANDROID_KHR
+ #define VK_USE_PLATFORM_ANDROID_KHR
+ #endif
+ #endif
+ 
++#if XE_PLATFORM_OHOS
++// HarmonyOS native window surface (VK_OHOS_surface / vkCreateSurfaceOHOS).
++#ifndef VK_USE_PLATFORM_OHOS
++#define VK_USE_PLATFORM_OHOS
++#endif
++#endif
++
+ #if XE_PLATFORM_MAC
+ #ifndef VK_USE_PLATFORM_METAL_EXT
+ #define VK_USE_PLATFORM_METAL_EXT
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_instance.cc b/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_instance.cc
+index 2265abbb4..0b87119c6 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_instance.cc
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_instance.cc
+@@ -41,7 +41,7 @@ vkDestroyInstance(VkInstance instance, const VkAllocationCallbacks* pAllocator);
+ }
+ #endif
+ 
+-#if XE_PLATFORM_xendroid||XE_PLATFORM_ANDROID
++#if (XE_PLATFORM_xendroid||XE_PLATFORM_ANDROID) && !XE_PLATFORM_OHOS
+ #include <sys/system_properties.h>
+ 
+ #include "third_party/libadrenotools/include/adrenotools/priv.h"
+@@ -180,12 +180,12 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(
+ 
+   bool functions_loaded = true;
+ #if XE_PLATFORM_LINUX
+-#if XE_PLATFORM_ANDROID||XE_PLATFORM_xendroid
++#if XE_PLATFORM_ANDROID||XE_PLATFORM_xendroid||XE_PLATFORM_OHOS
+   const char* const loader_library_name = "libvulkan.so";
+ #else
+   const char* const loader_library_name = "libvulkan.so.1";
+ #endif
+-#if XE_PLATFORM_ANDROID||XE_PLATFORM_xendroid
++#if (XE_PLATFORM_ANDROID||XE_PLATFORM_xendroid) && !XE_PLATFORM_OHOS
+     // Turnip reads TU_DEBUG from the environment at vkCreateInstance, so set it
+     // before the driver is loaded. Default "sysmem" forces untiled rendering,
+     // which avoids a class of Adreno GPU hangs (device-loss).
+@@ -270,7 +270,7 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(
+   // http://developer.download.nvidia.com/mobile/shield/assets/Vulkan/UsingtheVulkanAPI.pdf
+   vulkan_instance->loader_ = dlopen(loader_library_name, RTLD_NOW | RTLD_LOCAL);
+ 
+-#if XE_PLATFORM_ANDROID || XE_PLATFORM_xendroid
++#if (XE_PLATFORM_ANDROID || XE_PLATFORM_xendroid) && !XE_PLATFORM_OHOS
+     }
+ #endif
+ 
+@@ -393,6 +393,10 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(
+         "VK_KHR_android_surface",
+         &vulkan_instance->extensions_.ext_KHR_android_surface);
+ #endif
++#ifdef VK_USE_PLATFORM_OHOS
++    requested_extensions.emplace("VK_OHOS_surface",
++                                 &vulkan_instance->extensions_.ext_OHOS_surface);
++#endif
+ #ifdef VK_USE_PLATFORM_METAL_EXT
+     // #218.
+     requested_extensions.emplace(
+@@ -755,6 +759,11 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(
+ #include "xenia/ui/vulkan/functions/instance_khr_android_surface.inc"
+   }
+ #endif
++#ifdef VK_USE_PLATFORM_OHOS
++  if (vulkan_instance->extensions_.ext_OHOS_surface) {
++#include "xenia/ui/vulkan/functions/instance_ohos_surface.inc"
++  }
++#endif
+ #ifdef VK_USE_PLATFORM_METAL_EXT
+   if (vulkan_instance->extensions_.ext_EXT_metal_surface) {
+ #include "xenia/ui/vulkan/functions/instance_ext_metal_surface.inc"
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_instance.h b/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_instance.h
+index fd3e34d1c..b491f38ab 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_instance.h
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_instance.h
+@@ -73,6 +73,10 @@ class VulkanInstance {
+     // VK_KHR_android_surface (#9)
+ #ifdef VK_USE_PLATFORM_ANDROID_KHR
+ #include "xenia/ui/vulkan/functions/instance_khr_android_surface.inc"
++#endif
++    // VK_OHOS_surface
++#ifdef VK_USE_PLATFORM_OHOS
++#include "xenia/ui/vulkan/functions/instance_ohos_surface.inc"
+ #endif
+     // VK_EXT_metal_surface (#218)
+ #ifdef VK_USE_PLATFORM_METAL_EXT
+@@ -107,6 +111,9 @@ class VulkanInstance {
+ #ifdef VK_USE_PLATFORM_ANDROID_KHR
+     bool ext_KHR_android_surface = false;  // #9
+ #endif
++#ifdef VK_USE_PLATFORM_OHOS
++    bool ext_OHOS_surface = false;
++#endif
+ #ifdef VK_USE_PLATFORM_METAL_EXT
+     bool ext_EXT_metal_surface = false;  // #218
+ #endif
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_presenter.cc b/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_presenter.cc
+index 0f5e7e7bf..b43a80dcc 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_presenter.cc
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_presenter.cc
+@@ -18,9 +18,12 @@
+ #include "xenia/base/platform.h"
+ #include "xenia/ui/vulkan/vulkan_util.h"
+ 
+-#if XE_PLATFORM_ANDROID || XE_PLATFORM_xendroid
++#if (XE_PLATFORM_ANDROID || XE_PLATFORM_xendroid) && !XE_PLATFORM_OHOS
+ #include "xenia/ui/surface_android.h"
+ #endif
++#if XE_PLATFORM_OHOS
++#include "xenia/ui/surface_ohos.h"
++#endif
+ #if XE_PLATFORM_MAC
+ #include "xenia/ui/surface_mac.h"
+ #endif
+@@ -206,11 +209,16 @@ Surface::TypeFlags VulkanPresenter::GetSurfaceTypesSupportedByInstance(
+     return 0;
+   }
+   Surface::TypeFlags type_flags = 0;
+-#if XE_PLATFORM_ANDROID || XE_PLATFORM_xendroid
++#if (XE_PLATFORM_ANDROID || XE_PLATFORM_xendroid) && !XE_PLATFORM_OHOS
+   if (instance_extensions.ext_KHR_android_surface) {
+     type_flags |= Surface::kTypeFlag_AndroidNativeWindow;
+   }
+ #endif
++#if XE_PLATFORM_OHOS
++  if (instance_extensions.ext_OHOS_surface) {
++    type_flags |= Surface::kTypeFlag_OHOSNativeWindow;
++  }
++#endif
+ #if XE_PLATFORM_MAC
+   if (instance_extensions.ext_EXT_metal_surface) {
+     type_flags |= Surface::kTypeFlag_MacNSView;
+@@ -594,7 +602,7 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(
+     }
+     VkResult vulkan_surface_create_result = VK_ERROR_UNKNOWN;
+     switch (surface_type) {
+-#if XE_PLATFORM_ANDROID || XE_PLATFORM_xendroid
++#if (XE_PLATFORM_ANDROID || XE_PLATFORM_xendroid) && !XE_PLATFORM_OHOS
+       case Surface::kTypeIndex_AndroidNativeWindow: {
+         auto& android_native_window_surface =
+             static_cast<const AndroidNativeWindowSurface&>(new_surface);
+@@ -609,6 +617,20 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(
+             &paint_context_.vulkan_surface);
+       } break;
+ #endif
++#if XE_PLATFORM_OHOS
++      case Surface::kTypeIndex_OHOSNativeWindow: {
++        auto& ohos_native_window_surface =
++            static_cast<const OHOSNativeWindowSurface&>(new_surface);
++        VkSurfaceCreateInfoOHOS surface_create_info;
++        surface_create_info.sType = VK_STRUCTURE_TYPE_SURFACE_CREATE_INFO_OHOS;
++        surface_create_info.pNext = nullptr;
++        surface_create_info.flags = 0;
++        surface_create_info.window = ohos_native_window_surface.window();
++        vulkan_surface_create_result = ifn.vkCreateSurfaceOHOS(
++            instance, &surface_create_info, nullptr,
++            &paint_context_.vulkan_surface);
++      } break;
++#endif
+ #if XE_PLATFORM_GNU_LINUX
+       case Surface::kTypeIndex_WaylandWindow: {
+         auto& wayland_window_surface =
+@@ -1107,8 +1129,8 @@ VkSwapchainKHR VulkanPresenter::PaintContext::CreateSwapchainForVulkanSurface(
+     // specification violation).
+     surface_formats.clear();
+   }
+-#if XE_PLATFORM_ANDROID || XE_PLATFORM_xendroid
+-  // Android uses R8G8B8A8.
++#if XE_PLATFORM_ANDROID || XE_PLATFORM_xendroid || XE_PLATFORM_OHOS
++  // Android/OHOS use R8G8B8A8.
+   static constexpr VkFormat kFormat8888Primary = VK_FORMAT_R8G8B8A8_UNORM;
+   static constexpr VkFormat kFormat8888Secondary = VK_FORMAT_B8G8R8A8_UNORM;
+ #else
+diff --git a/emulator-core/src/main/cpp/xenia/third_party/CMakeLists.txt b/emulator-core/src/main/cpp/xenia/third_party/CMakeLists.txt
+index 09b41006b..a6dad625e 100644
+--- a/emulator-core/src/main/cpp/xenia/third_party/CMakeLists.txt
++++ b/emulator-core/src/main/cpp/xenia/third_party/CMakeLists.txt
+@@ -122,6 +122,8 @@ target_include_directories(dxbc PUBLIC dxbc)
+ # ==============================================================================
+ # discord-rpc
+ # ==============================================================================
++# OHOS: Discord rich presence is a desktop convenience feature, not ported.
++if(NOT OHOS)
+ add_library(discord-rpc STATIC
+   discord-rpc/src/connection.h
+   discord-rpc/src/discord_rpc.cpp
+@@ -154,6 +156,7 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+     discord-rpc/src/discord_register_linux.cpp
+   )
+ endif()
++endif()  # NOT OHOS
+ 
+ # ==============================================================================
+ # fmt
+@@ -627,6 +630,9 @@ if(XE_TARGET_AARCH64)
+     WITH_GZFILEOP
+   )
+   if(NOT MSVC)
++    # crc32_acle.c uses the ARMv8 CRC32 intrinsics (__crc32b/...) which need
++    # the CRC extension enabled explicitly with -march=armv8-a+crc.
++    target_compile_options(zlib-ng PRIVATE -march=armv8-a+crc)
+     target_compile_definitions(zlib-ng PRIVATE HAVE_BUILTIN_CTZ HAVE_BUILTIN_CTZLL HAVE_ATTRIBUTE_ALIGNED)
+   endif()
+ else()
+@@ -771,13 +777,19 @@ get_directory_property(_xe_save_opts COMPILE_OPTIONS)
+ set(_xe_sdl_opts "${_xe_save_opts}")
+ list(FILTER _xe_sdl_opts EXCLUDE REGEX "/GL>$")
+ set_property(DIRECTORY PROPERTY COMPILE_OPTIONS "${_xe_sdl_opts}")
+-add_subdirectory(SDL3 EXCLUDE_FROM_ALL)
++# OHOS: SDL is not used (the fork's SDL audio/helper/HID targets are all
++# excluded on Android-like platforms, which are the only SDL3 consumers).
++if(NOT OHOS)
++  add_subdirectory(SDL3 EXCLUDE_FROM_ALL)
++endif()
+ set_property(DIRECTORY PROPERTY COMPILE_OPTIONS "${_xe_save_opts}")
+ # Consistent target name for downstream link calls.
+-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+-  add_library(SDL3 ALIAS SDL3-shared)
+-else()
+-  add_library(SDL3 ALIAS SDL3-static)
++if(NOT OHOS)
++  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
++    add_library(SDL3 ALIAS SDL3-shared)
++  else()
++    add_library(SDL3 ALIAS SDL3-static)
++  endif()
+ endif()
+ 
+ # SDL3 explicitly bakes /W3 into its target COMPILE_OPTIONS, which clashes
+@@ -1173,7 +1185,7 @@ ffmpeg_common(libavformat)
+ # ==============================================================================
+ # wxWidgets
+ # ==============================================================================
+-if(NOT CMAKE_SYSTEM_NAME STREQUAL "Android")
++if(NOT (CMAKE_SYSTEM_NAME STREQUAL "Android" OR OHOS))
+     # Build from vendored source — matches what we ship on Windows/macOS, and
+     # on Linux gives us a known-good 3.3 (system 3.2 has GTK3/Wayland issues).
+     # Strip the directory-level /W0 (or -w) so wxWidgets's own /W3 doesn't
+diff --git a/emulator-core/src/main/cpp/xenia/tools/build/compile_shader_spirv.py b/emulator-core/src/main/cpp/xenia/tools/build/compile_shader_spirv.py
+index 1af0b5e61..35c13d936 100644
+--- a/emulator-core/src/main/cpp/xenia/tools/build/compile_shader_spirv.py
++++ b/emulator-core/src/main/cpp/xenia/tools/build/compile_shader_spirv.py
+@@ -17,6 +17,7 @@ Pipeline:
+ """
+ 
+ import os
++import shutil
+ import struct
+ import subprocess
+ import sys
+@@ -36,26 +37,54 @@ XESL_WRAPPER = (
+ )
+ 
+ 
++def _find_tool(names, search_dirs):
++    """Return the first existing path for names across search_dirs, else PATH."""
++    for d in search_dirs:
++        for n in names:
++            cand = os.path.join(d, n)
++            if os.path.isfile(cand):
++                return cand
++    for n in names:
++        found = shutil.which(n)
++        if found:
++            return found
++    return None
++
++
+ def find_vulkan_tools():
+-    """Find Vulkan SDK tools via VULKAN_SDK env or PATH."""
++    """Find the shader host tools.
++
++    HarmonyOS: the OHOS SDK ships only glslang_validator.exe (no spirv-opt /
++    spirv-dis). glslang is required; spirv-opt/spirv-dis are optional (when
++    absent the unoptimized SPIR-V is embedded directly and the disassembly
++    comment is skipped), so the bytecode can be regenerated without the full
++    Vulkan SDK.
++    """
+     # On Windows the binaries carry a .exe suffix. A fully-qualified path without
+-    # an extension is NOT resolved by CreateProcess, so VULKAN_SDK lookups must
++    # an extension is NOT resolved by CreateProcess, so explicit-dir lookups must
+     # include it (the bare-name PATH fallback is fine -- PATHEXT applies there).
+     ext = ".exe" if os.name == "nt" else ""
+-    tools = ("glslangValidator" + ext, "spirv-opt" + ext, "spirv-dis" + ext)
++    names = {
++        "glslang": ("glslangValidator" + ext, "glslang_validator" + ext),
++        "opt": ("spirv-opt" + ext,),
++        "dis": ("spirv-dis" + ext,),
++    }
+ 
++    search_dirs = []
+     vulkan_sdk = os.environ.get("VULKAN_SDK")
+     if vulkan_sdk:
+         # Windows SDK uses "Bin"; Linux/macOS use "bin".
+         for sub in ("bin", "Bin"):
+-            bin_dir = os.path.join(vulkan_sdk, sub)
+-            if os.path.isdir(bin_dir):
+-                cand = tuple(os.path.join(bin_dir, t) for t in tools)
+-                if all(os.path.isfile(c) for c in cand):
+-                    return cand
++            d = os.path.join(vulkan_sdk, sub)
++            if os.path.isdir(d):
++                search_dirs.append(d)
++    # OHOS SDK host toolchains dir (ships glslang_validator.exe).
++    for var in ("OHOS_SDK_TOOLCHAINS", "OHOS_SDK_NATIVE_TOOLCHAINS"):
++        d = os.environ.get(var)
++        if d and os.path.isdir(d):
++            search_dirs.append(d)
+ 
+-    # Fall back to PATH
+-    return tools
++    return {k: _find_tool(v, search_dirs) for k, v in names.items()}
+ 
+ 
+ def parse_stage(filename):
+@@ -98,7 +127,14 @@ def main():
+     # Compute identifier (matches what Lua does: basename with dots -> underscores)
+     identifier = os.path.splitext(src_name)[0].replace(".", "_")
+ 
+-    glslang, spirv_opt, spirv_dis = find_vulkan_tools()
++    tools = find_vulkan_tools()
++    glslang = tools["glslang"]
++    spirv_opt = tools["opt"]
++    spirv_dis = tools["dis"]
++    if not glslang:
++        print("ERROR: glslangValidator not found (set VULKAN_SDK or "
++              "OHOS_SDK_TOOLCHAINS, or put it on PATH)", file=sys.stderr)
++        return 1
+ 
+     # Create output directory if needed.
+     os.makedirs(os.path.dirname(output_path), exist_ok=True)
+@@ -132,38 +168,44 @@ def main():
+                 sys.stderr.write(result.stderr)
+             return 1
+ 
+-        # Step 2: spirv-opt
++        # Step 2: spirv-opt (optional — OHOS SDK ships glslang only).
+         # NOTE: --canonicalize-ids omitted — it only exists in very recent
+         # SPIRV-Tools and is purely cosmetic (renumbers result IDs); -O does the
+         # real optimization. Dropping it lets older spirv-opt builds work.
+-        result = subprocess.run([
+-            spirv_opt, "-O", "-O",
+-            glslang_spv, "-o", opt_spv,
+-        ], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+-        if result.returncode != 0:
+-            print(f"ERROR: spirv-opt failed for {src_name}", file=sys.stderr)
+-            if result.stderr:
+-                sys.stderr.write(result.stderr)
+-            return 1
+-
+-        # Step 3: spirv-dis
+-        result = subprocess.run([spirv_dis, "-o", dis_txt, opt_spv],
+-                                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+-        if result.returncode != 0:
+-            print(f"ERROR: spirv-dis failed for {src_name}", file=sys.stderr)
+-            if result.stderr:
+-                sys.stderr.write(result.stderr)
+-            return 1
++        if spirv_opt:
++            result = subprocess.run([
++                spirv_opt, "-O", "-O",
++                glslang_spv, "-o", opt_spv,
++            ], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
++            if result.returncode != 0:
++                print(f"ERROR: spirv-opt failed for {src_name}", file=sys.stderr)
++                if result.stderr:
++                    sys.stderr.write(result.stderr)
++                return 1
++        else:
++            # No optimizer: embed glslang's output as-is.
++            shutil.copyfile(glslang_spv, opt_spv)
++
++        # Step 3: spirv-dis (optional — only feeds the disassembly comment).
++        if spirv_dis:
++            result = subprocess.run([spirv_dis, "-o", dis_txt, opt_spv],
++                                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
++            if result.returncode != 0:
++                print(f"ERROR: spirv-dis failed for {src_name}", file=sys.stderr)
++                if result.stderr:
++                    sys.stderr.write(result.stderr)
++                return 1
+ 
+         # Step 4: Generate header
+         with open(output_path, "w") as out:
+             out.write("// Generated with `xb buildshaders`.\n#if 0\n")
+-            with open(dis_txt, "r") as dis_file:
+-                dis_data = dis_file.read()
+-                if dis_data:
+-                    out.write(dis_data)
+-                    if dis_data[-1] != "\n":
+-                        out.write("\n")
++            if os.path.exists(dis_txt):
++                with open(dis_txt, "r") as dis_file:
++                    dis_data = dis_file.read()
++                    if dis_data:
++                        out.write(dis_data)
++                        if dis_data[-1] != "\n":
++                            out.write("\n")
+             out.write("#endif\n\nconst uint32_t %s[] = {" % identifier)
+             with open(opt_spv, "rb") as spv_file:
+                 index = 0

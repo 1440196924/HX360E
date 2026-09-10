@@ -1,0 +1,26 @@
+diff --git a/src/util_impl_linux.h b/src/util_impl_linux.h
+index cccc999..56ec38f 100644
+--- a/src/util_impl_linux.h
++++ b/src/util_impl_linux.h
+@@ -391,10 +391,21 @@ private:
+        */
+       lastDataCacheLevel_ = 2; // It is assumed L1 and L2 cache exist.
+ 
++#if defined(_SC_LEVEL1_ICACHE_SIZE) && defined(_SC_LEVEL1_DCACHE_SIZE) && \
++    defined(_SC_LEVEL2_CACHE_SIZE) && defined(_SC_LEVEL3_CACHE_SIZE)
+       cacheInfo_.levelCache[0].size[0] = sysconf(_SC_LEVEL1_ICACHE_SIZE); // L1, ICache
+       cacheInfo_.levelCache[0].size[1] = sysconf(_SC_LEVEL1_DCACHE_SIZE); // L1, DCache
+       cacheInfo_.levelCache[1].size[2] = sysconf(_SC_LEVEL2_CACHE_SIZE);  // L2, UCache
+       cacheInfo_.levelCache[2].size[2] = sysconf(_SC_LEVEL3_CACHE_SIZE);  // L3, UCache
++#else
++      // HarmonyOS (and other non-glibc libcs) lack the _SC_LEVEL*_CACHE_SIZE
++      // sysconf selectors; cache sizes are only used for diagnostics, so leave
++      // them unset when the sysfs dictionary is also unavailable.
++      cacheInfo_.levelCache[0].size[0] = 0;
++      cacheInfo_.levelCache[0].size[1] = 0;
++      cacheInfo_.levelCache[1].size[2] = 0;
++      cacheInfo_.levelCache[2].size[2] = 0;
++#endif
+     }
+   }
+ 

@@ -1,0 +1,57 @@
+{
+  "app": {
+    "signingConfigs": [
+      {
+        "name": "default",
+        "type": "HarmonyOS",
+        "material": {
+          "certpath": "C:\\Users\\14401\\.ohos\\config\\default_HX360E_i7_MV-sRT7mZky8U5Waj4_wo_MZXzHieu9fNS86bpkk=.cer",
+          "keyAlias": "debugKey",
+          "keyPassword": "0000001BCDF1A041EB3929D51CD17861522B292D11C6B698BF5FAB8F1B16FD0D83F4008A21C329548E5838",
+          "profile": "C:\\Users\\14401\\.ohos\\config\\default_HX360E_i7_MV-sRT7mZky8U5Waj4_wo_MZXzHieu9fNS86bpkk=.p7b",
+          "signAlg": "SHA256withECDSA",
+          "storeFile": "C:\\Users\\14401\\.ohos\\config\\default_HX360E_i7_MV-sRT7mZky8U5Waj4_wo_MZXzHieu9fNS86bpkk=.p12",
+          "storePassword": "0000001BF4374F6102DA2919D4BC18F41274F7AF592A0C6F1E6345940A67820FBAAC2E5DEC637EC27149FA"
+        }
+      }
+    ],
+    "products": [
+      {
+        "name": "default",
+        "signingConfig": "default",
+        "targetSdkVersion": "6.1.1(24)",
+        "compatibleSdkVersion": "6.1.1(24)",
+        "runtimeOS": "HarmonyOS",
+        "buildOption": {
+          "nativeCompiler": "BiSheng",
+          "strictMode": {
+            "caseSensitiveCheck": true,
+            "useNormalizedOHMUrl": true
+          }
+        }
+      }
+    ],
+    "buildModeSet": [
+      {
+        "name": "debug",
+      },
+      {
+        "name": "release"
+      }
+    ]
+  },
+  "modules": [
+    {
+      "name": "entry",
+      "srcPath": "./entry",
+      "targets": [
+        {
+          "name": "default",
+          "applyToProducts": [
+            "default"
+          ]
+        }
+      ]
+    }
+  ]
+}

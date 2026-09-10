@@ -1,0 +1,152 @@
+#include "ohos_window.h"
+
+#include <chrono>
+
+#include <hilog/log.h>
+
+#undef LOG_DOMAIN
+#undef LOG_TAG
+#define LOG_DOMAIN 0x0000
+#define LOG_TAG "HX360E"
+
+#include "xenia/ui/surface_ohos.h"
+
+#define HXLOG(...) OH_LOG_INFO(LOG_APP, __VA_ARGS__)
+
+namespace hx360e {
+
+OhosWindowedAppContext::~OhosWindowedAppContext() = default;
+
+void OhosWindowedAppContext::NotifyUILoopOfPendingFunctions() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  pending_ = true;
+  cond_.notify_one();
+}
+
+void OhosWindowedAppContext::PlatformQuitFromUIThread() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  quit_ = true;
+  cond_.notify_one();
+}
+
+void OhosWindowedAppContext::MainLoop() {
+  while (!HasQuitFromUIThread()) {
+    {
+      std::unique_lock<std::mutex> lock(mutex_);
+      cond_.wait_for(lock, std::chrono::milliseconds(4),
+                     [this] { return pending_ || quit_; });
+      pending_ = false;
+    }
+    ExecutePendingFunctionsFromUIThread();
+  }
+  HXLOG("OhosWindowedAppContext: main loop exited");
+}
+
+void OhosWindowedAppContext::SetWindowSurface(OHNativeWindow* window_surface) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  window_surface_ = window_surface;
+}
+
+OHNativeWindow* OhosWindowedAppContext::window_surface() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return window_surface_;
+}
+
+void OhosWindowedAppContext::SetActivityWindow(OhosWindow* window) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  activity_window_ = window;
+}
+
+OhosWindow* OhosWindowedAppContext::activity_window() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return activity_window_;
+}
+
+OhosWindow::OhosWindow(xe::ui::WindowedAppContext& app_context,
+                       const std::string_view title,
+                       uint32_t desired_logical_width,
+                       uint32_t desired_logical_height)
+    : Window(app_context, title, desired_logical_width, desired_logical_height) {
+}
+
+OhosWindow::~OhosWindow() {
+  EnterDestructor();
+  auto& context = static_cast<OhosWindowedAppContext&>(app_context());
+  if (context.activity_window() == this) {
+    context.SetActivityWindow(nullptr);
+  }
+}
+
+bool OhosWindow::OpenImpl() {
+  auto& context = static_cast<OhosWindowedAppContext&>(app_context());
+  context.SetActivityWindow(this);
+
+  // Report the initial size if the XComponent surface is already available.
+  OHNativeWindow* window_surface = context.window_surface();
+  if (window_surface) {
+    int32_t width = 0, height = 0;
+    if (OH_NativeWindow_NativeWindowHandleOpt(window_surface,
+                                              GET_BUFFER_GEOMETRY, &width,
+                                              &height) == 0 &&
+        width > 0 && height > 0) {
+      WindowDestructionReceiver destruction_receiver(this);
+      OnActualSizeUpdate(uint32_t(width), uint32_t(height),
+                         destruction_receiver);
+    }
+  }
+  return true;
+}
+
+void OhosWindow::RequestCloseImpl() {
+  WindowDestructionReceiver destruction_receiver(this);
+  OnBeforeClose(destruction_receiver);
+  if (destruction_receiver.IsWindowDestroyed()) {
+    return;
+  }
+  OnAfterClose();
+}
+
+std::unique_ptr<xe::ui::Surface> OhosWindow::CreateSurfaceImpl(
+    xe::ui::Surface::TypeFlags allowed_types) {
+  if (!(allowed_types & xe::ui::Surface::kTypeFlag_OHOSNativeWindow)) {
+    return nullptr;
+  }
+  auto& context = static_cast<OhosWindowedAppContext&>(app_context());
+  OHNativeWindow* window_surface = context.window_surface();
+  if (!window_surface) {
+    HXLOG("OhosWindow::CreateSurfaceImpl: no surface yet");
+    return nullptr;
+  }
+  HXLOG("OhosWindow::CreateSurfaceImpl: window=%{public}p", window_surface);
+  return std::make_unique<xe::ui::OHOSNativeWindowSurface>(window_surface);
+}
+
+void OhosWindow::RequestPaintImpl() {
+  // The presenter paints from its own thread (host_present_from_non_ui_thread
+  // is forced true), so there is no platform paint request to make.
+}
+
+void OhosWindow::UpdateSurface() {
+  // Called on the UI thread once the XComponent surface is available.
+  if (phase() == Phase::kOpen) {
+    WindowDestructionReceiver destruction_receiver(this);
+    OnSurfaceChanged(true);
+    if (destruction_receiver.IsWindowDestroyedOrClosed()) {
+      return;
+    }
+    OHNativeWindow* window_surface =
+        static_cast<OhosWindowedAppContext&>(app_context()).window_surface();
+    if (window_surface) {
+      int32_t width = 0, height = 0;
+      if (OH_NativeWindow_NativeWindowHandleOpt(window_surface,
+                                                GET_BUFFER_GEOMETRY, &width,
+                                                &height) == 0 &&
+          width > 0 && height > 0) {
+        OnActualSizeUpdate(uint32_t(width), uint32_t(height),
+                           destruction_receiver);
+      }
+    }
+  }
+}
+
+}  // namespace hx360e

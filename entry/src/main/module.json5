@@ -1,0 +1,112 @@
+{
+  "module": {
+    "name": "entry",
+    "type": "entry",
+    "description": "$string:module_desc",
+    "mainElement": "EntryAbility",
+    "deviceTypes": [
+      "phone",
+      "2in1"
+    ],
+    "deliveryWithInstall": true,
+    "installationFree": false,
+    "pages": "$profile:main_pages",
+    // ==========================================================================
+    // JIT（可执行内存）权限
+    //
+    // 模拟器需把 Xbox 360 的 PowerPC 指令实时翻译为 ARM64 机器码并执行，
+    // 这要求申请可执行内存。HarmonyOS 默认关闭该能力。
+    //
+    // 三个权限的性质（实测于 2026-09-08，设备 HUAWEI MateBook Pro S / 2in1）：
+    //   · ALLOW_EXECUTABLE_FORT_MEMORY        system_basic, ACL, 通用设备
+    //   · EXEMPT_ANONYMOUS_EXECUTABLE_MEMORY  normal, system_grant, 仅 2in1
+    //   · ALLOW_WRITABLE_CODE_MEMORY          system_basic, ACL, 通用设备（RWX 用）
+    //
+    // ⚠️ ACL 权限若不在签名 Profile 中，安装会失败：
+    //      9568289 install failed due to grant request permissions failed
+    //    实测 ALLOW_WRITABLE_CODE_MEMORY 触发该错误；必须先在 AGC 申请并
+    //    把权限写入 Profile（.p7b）。申请流程见 docs/JIT-PERMISSION.md。
+    // ==========================================================================
+    "requestPermissions": [
+      {
+        "name": "ohos.permission.kernel.ALLOW_EXECUTABLE_FORT_MEMORY",
+        "reason": "$string:reason_executable_memory",
+        "usedScene": {
+          "abilities": [
+            "EntryAbility"
+          ],
+          "when": "inuse"
+        }
+      },
+      {
+        // 2in1（PC）设备专属：normal 级 + system_grant，安装时自动授予，
+        // 无需 ACL 申请。允许声明匿名可执行内存（JIT）。
+        "name": "ohos.permission.kernel.EXEMPT_ANONYMOUS_EXECUTABLE_MEMORY",
+        "reason": "$string:reason_executable_memory",
+        "usedScene": {
+          "abilities": [
+            "EntryAbility"
+          ],
+          "when": "inuse"
+        }
+      },
+      {
+        // 允许可写代码内存（RWX）。严格 ACL 权限：签名 Profile 必须包含，
+        // 否则安装失败（9568289 install failed due to grant request permissions failed）。
+        "name": "ohos.permission.kernel.ALLOW_WRITABLE_CODE_MEMORY",
+        "reason": "$string:reason_executable_memory",
+        "usedScene": {
+          "abilities": [
+            "EntryAbility"
+          ],
+          "when": "inuse"
+        }
+      }
+      // ----------------------------------------------------------------------
+      // 以下 3 个是候选权限，实测 AGC 签名工具报"权限名不对"（这些权限只出现在
+      // SDK 的 PermissionDefinitions.json，公开文档与 AGC 可申请清单中没有）。
+      // 保持注释；若确认可申请再启用。
+      //
+      // "ohos.permission.kernel.DISABLE_CODE_MEMORY_PROTECTION"  // 禁用代码内存保护
+      // "ohos.permission.kernel.ALLOW_USE_JITFORT_INTERFACE"     // JIT 内核接口
+      // "ohos.permission.RUN_ANY_CODE"                           // 运行未签名代码
+      // ----------------------------------------------------------------------
+    ],
+    "abilities": [
+      {
+        "name": "EntryAbility",
+        "srcEntry": "./ets/entryability/EntryAbility.ets",
+        "description": "$string:EntryAbility_desc",
+        "icon": "$media:layered_image",
+        "label": "$string:EntryAbility_label",
+        "startWindowIcon": "$media:startIcon",
+        "startWindowBackground": "$color:start_window_background",
+        "exported": true,
+        "skills": [
+          {
+            "entities": [
+              "entity.system.home"
+            ],
+            "actions": [
+              "ohos.want.action.home"
+            ]
+          }
+        ]
+      }
+    ],
+    "extensionAbilities": [
+      {
+        "name": "EntryBackupAbility",
+        "srcEntry": "./ets/entrybackupability/EntryBackupAbility.ets",
+        "type": "backup",
+        "exported": false,
+        "metadata": [
+          {
+            "name": "ohos.extension.backup",
+            "resource": "$profile:backup_config"
+          }
+        ],
+      }
+    ]
+  }
+}

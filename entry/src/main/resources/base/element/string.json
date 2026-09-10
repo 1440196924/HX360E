@@ -1,0 +1,20 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "module description"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "description"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "label"
+    },
+    {
+      "name": "reason_executable_memory",
+      "value": "模拟器需要将 Xbox 360 的 PowerPC 指令实时翻译为 ARM64 机器码并执行，因此需要申请可执行内存（JIT）。该能力仅用于运行用户自行导入的本地游戏，不会下载或执行任何远程代码。"
+    }
+  ]
+}
