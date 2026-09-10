@@ -51,6 +51,11 @@ add_library(entry SHARED
         xendroid_ohos/ohos_emulator.cc
         xendroid_ohos/ohos_input_driver.cc
         xendroid_ohos/ohos_window.cc
+        xendroid_ohos/napi_config.cc
+        xendroid_ohos/napi_meta.cc
+        xendroid_ohos/napi_prompt.cc
+        xendroid_ohos/napi_content.cc
+        xendroid_ohos/prompt_providers.cc
         xendroid_ohos/file_picker_ohos.cc
         xendroid_ohos/system_ohos.cc
 )

@@ -82,6 +82,8 @@
         "startWindowIcon": "$media:startIcon",
         "startWindowBackground": "$color:start_window_background",
         "exported": true,
+        // 游戏为 16:9，竖屏窗口会导致画面比例异常；锁定横屏。
+        "orientation": "landscape",
         "skills": [
           {
             "entities": [

@@ -23,19 +23,23 @@
 
 #include "ohos_window.h"
 #include "ohos_input_driver.h"
+#include "prompt_providers.h"
 
 #include "third_party/fmt/include/fmt/format.h"
 
 #include "xenia/apu/nop/nop_audio_system.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/exception_handler.h"
+#include "xenia/base/frame_stats.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/platform_arm64.h"
+#include "xenia/base/shader_compile_counter.h"
 #include "xenia/base/threading.h"
 #include "xenia/config.h"
 #include "xenia/emulator.h"
 #include "xenia/gpu/vulkan/vulkan_graphics_system.h"
 #include "xenia/hid/nop/nop_hid.h"
+#include "xenia/kernel/xam/profile_standalone.h"
 
 // ---------------------------------------------------------------------------
 // xenia 启动所需的 cvar（上游定义在 xendroid_emu.cpp / app/xenia_main.cc）。
@@ -59,11 +63,18 @@ DEFINE_bool(mount_memory_unit, false, "Enable memory unit (MU) mount",
 DEFINE_bool(apu_aaudio_log_stats, false,
             "Log AAudio stream statistics (Android-only; no-op on OHOS).",
             "APU");
+// 上游定义在 xendroid_emu.cpp（Android 专用）；OHOS 侧在 ui/presenter.cc 里没有，
+// 由这里补上，供 Phase 5.5 的覆盖层开关与设置页使用。
+DEFINE_bool(show_touch_overlay, true,
+            "Draw the on-screen controller overlay.", "HID");
 
 DECLARE_bool(host_present_from_non_ui_thread);
+DECLARE_bool(show_debug_overlay);
+DECLARE_bool(show_touch_overlay);
 DECLARE_path(log_file);
 DECLARE_bool(log_append);
 DECLARE_bool(log_to_stdout);
+DECLARE_string(logged_profile_slot_0_xuid);
 
 #define HXLOG(...) OH_LOG_INFO(LOG_APP, __VA_ARGS__)
 #define HXLOGE(...) OH_LOG_ERROR(LOG_APP, __VA_ARGS__)
@@ -111,19 +122,41 @@ void BootThread() {
   HXLOG("HX360E boot: thread start");
   xe::threading::set_name("hx360e-boot");
 
-  // 所有退出路径（包括中途 return）都要释放 Emulator：它持有 4.5GB 的 guest
-  // 地址空间映射，留着会让下一次启动的 Memory::Initialize() 在固定地址上
-  // MapViews 失败并触发 assert_always() -> SIGTRAP（实测：第二次按「启动」）。
-  struct EmulatorResetGuard {
-    ~EmulatorResetGuard() {
-      std::lock_guard<std::mutex> lock(g_mutex);
-      if (g_emulator) {
-        HXLOG("HX360E boot: releasing emulator (guest address space)");
-        g_emulator.reset();
+  // 所有退出路径（包括中途 return）都必须做完整收尾：
+  //   1) 先释放 Emulator：它持有 4.5GB guest 地址空间，留着会让下一次启动的
+  //      Memory::Initialize() 在固定地址 MapViews 失败 -> assert_always ->
+  //      SIGTRAP（实测：第二次按「启动」）。
+  //   2) 再让 UI 线程退出主循环并 join。window/app_context 必须由 UI 线程自己
+  //      销毁 —— WindowedAppContext 的析构断言 IsInUIThread()，在别的线程销毁
+  //      会 raise(SIGTRAP)（实测：首次启动失败后再点启动）。
+  //   3) 最后才置 g_booting=false，避免上一次收尾未完成时下一次 Boot 重入。
+  struct BootTeardownGuard {
+    ~BootTeardownGuard() {
+      {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        if (g_emulator) {
+          HXLOG("HX360E boot: releasing emulator (guest address space)");
+          g_emulator.reset();
+        }
       }
+      OhosWindowedAppContext* context = nullptr;
+      {
+        std::lock_guard<std::mutex> lock(g_ui_mutex);
+        context = g_app_context.get();
+      }
+      if (context) {
+        // 任意线程可调；UI 循环已退出时入队会被丢弃，不会死等。
+        context->RequestDeferredQuit();
+      }
+      if (g_ui_thread.joinable()) {
+        g_ui_thread.join();
+      }
+      g_running.store(false);
+      g_booting.store(false);
+      HXLOG("HX360E boot: teardown complete");
     }
-  } emulator_reset_guard;
-  (void)emulator_reset_guard;
+  } boot_teardown_guard;
+  (void)boot_teardown_guard;
 
   static std::once_flag parse_args_once;
   std::call_once(parse_args_once, [&]() {
@@ -148,7 +181,6 @@ void BootThread() {
   std::filesystem::path storage = cvars::storage_root;
   if (storage.empty()) {
     HXLOGE("HX360E boot: storage_root is empty; call setupLaunchArgs first");
-    g_booting.store(false);
     return;
   }
   storage = std::filesystem::absolute(storage);
@@ -250,6 +282,13 @@ void BootThread() {
     ready_cv.notify_all();
     context->MainLoop();
     HXLOG("HX360E boot: UI thread exited");
+    // 必须由 UI 线程自己销毁：WindowedAppContext 的析构断言 IsInUIThread()。
+    {
+      std::lock_guard<std::mutex> lock(g_ui_mutex);
+      g_window.reset();
+      g_app_context.reset();
+    }
+    HXLOG("HX360E boot: UI window/context destroyed");
   });
   {
     std::unique_lock<std::mutex> lock(ready_mutex);
@@ -262,6 +301,32 @@ void BootThread() {
     std::lock_guard<std::mutex> lock(g_ui_mutex);
     window = g_window.get();
     app_context = g_app_context.get();
+  }
+
+  // ---- 档案：XBLA/GOD 等标题要求已登录档案，否则 guest 会弹
+  // "no gamer profile signed in"。若 content 下无档案则创建一个默认档案，
+  // 并让 slot 0 自动登录（ProfileManager 在 Emulator::Setup 期间构造，构造时
+  // 读 logged_profile_slot_0_xuid cvar）。 ----
+  {
+    std::vector<xe::kernel::xam::StandaloneProfile> profiles =
+        xe::kernel::xam::ListStandaloneProfiles(content);
+    std::string xuid_hex;
+    if (profiles.empty()) {
+      // language=1(en), country=103(US)，与 Kotlin 的 XConfig 列表一致。
+      xuid_hex = xe::kernel::xam::CreateStandaloneProfile(content, "Player", 1,
+                                                          103);
+      HXLOG("HX360E boot: created default profile xuid=%{public}s",
+            xuid_hex.c_str());
+    } else {
+      xuid_hex = fmt::format("{:016X}", profiles[0].xuid);
+      HXLOG("HX360E boot: using existing profile xuid=%{public}s",
+            xuid_hex.c_str());
+    }
+    if (!xuid_hex.empty()) {
+      cvars::logged_profile_slot_0_xuid = xuid_hex;
+    } else {
+      HXLOGE("HX360E boot: no profile available; XBLA/GOD may ask to sign in");
+    }
   }
 
   // ---- 用窗口创建并启动内核 ----
@@ -280,14 +345,12 @@ void BootThread() {
   if (XFAILED(result)) {
     HXLOGE("HX360E boot: emulator Setup failed: 0x%{public}u",
            static_cast<unsigned>(result));
-    g_booting.store(false);
     return;
   }
   result = emulator->SetupSubsystems();
   if (XFAILED(result)) {
     HXLOGE("HX360E boot: SetupSubsystems failed: 0x%{public}u",
            static_cast<unsigned>(result));
-    g_booting.store(false);
     return;
   }
 
@@ -305,13 +368,15 @@ void BootThread() {
   });
   g_running.store(true);
 
+  // guest 提示（键盘/对话框/换盘）：guest 线程会阻塞等宿主回答，ArkTS 侧轮询
+  // 取请求、回填结果（Phase 5.3）。必须在 LaunchPath 之前安装。
+  xendroid::InstallAllPromptProviders();
+
   if (!g_game_path.empty()) {
     result = g_emulator->LaunchPath(std::filesystem::path(g_game_path));
     if (XFAILED(result)) {
       HXLOGE("HX360E boot: LaunchPath failed: 0x%{public}u",
              static_cast<unsigned>(result));
-      g_running.store(false);
-      g_booting.store(false);
       return;
     }
   }
@@ -319,20 +384,8 @@ void BootThread() {
   HXLOG("HX360E boot: title launched, entering WaitUntilExit");
   g_emulator->WaitUntilExit();
   HXLOG("HX360E boot: emulator exited");
-  g_running.store(false);
-  g_booting.store(false);
-
-  // 退出 UI 循环。
-  app_context->CallInUIThreadSynchronous(
-      [&]() { app_context->QuitFromUIThread(); });
-  if (g_ui_thread.joinable()) {
-    g_ui_thread.join();
-  }
-  {
-    std::lock_guard<std::mutex> lock(g_ui_mutex);
-    g_window.reset();
-    g_app_context.reset();
-  }
+  // 收尾（释放 Emulator + 退出并 join UI 线程 + 由 UI 线程销毁 window/context）
+  // 统一由函数开头的 boot_teardown_guard 完成，覆盖所有 return 路径。
 }
 
 }  // namespace
@@ -363,8 +416,17 @@ void SetNativeWindow(void* native_window) {
   }
 }
 
-void Boot() {
-  HXLOG("HX360E Boot() called, booting=%{public}d", g_booting.load() ? 1 : 0);
+void OnSurfaceResized() {
+  HXLOG("HX360E: OnSurfaceResized");
+  std::lock_guard<std::mutex> lock(g_ui_mutex);
+  if (g_app_context && g_window) {
+    OhosWindowedAppContext* context = g_app_context.get();
+    OhosWindow* window = g_window.get();
+    context->CallInUIThread([window]() { window->UpdateSurface(); });
+  }
+}
+
+void Boot() {  HXLOG("HX360E Boot() called, booting=%{public}d", g_booting.load() ? 1 : 0);
   bool expected = false;
   if (!g_booting.compare_exchange_strong(expected, true)) {
     HXLOG("HX360E boot: already booting/running, ignored");
@@ -458,6 +520,72 @@ std::string DeviceInfo() {
   info += " storage=";
   info += cvars::storage_root.string();
   return info;
+}
+
+// ---------------------------------------------------------------------------
+// 状态 / 调试（Phase 5.5）。
+// ---------------------------------------------------------------------------
+void ChangeSurface(int width, int height) {
+  HXLOG("HX360E changeSurface: %{public}dx%{public}d", width, height);
+  OnSurfaceResized();
+}
+
+float LastFrameTimeMs() {
+  float instant_ms = 0.f;
+  float avg_ms = 0.f;
+  float fps = 0.f;
+  xe::GetFrameStats(instant_ms, avg_ms, fps);
+  return instant_ms;
+}
+
+float InstantFps() {
+  float instant_ms = 0.f;
+  float avg_ms = 0.f;
+  float fps = 0.f;
+  xe::GetFrameStats(instant_ms, avg_ms, fps);
+  return instant_ms > 0.f ? (1000.0f / instant_ms) : 0.f;
+}
+
+float AverageFps() {
+  float instant_ms = 0.f;
+  float avg_ms = 0.f;
+  float fps = 0.f;
+  xe::GetFrameStats(instant_ms, avg_ms, fps);
+  return fps;
+}
+
+std::string DebugOverlayText() {
+  if (!cvars::show_debug_overlay) {
+    return {};
+  }
+  float instant_ms = 0.f;
+  float avg_ms = 0.f;
+  float fps = 0.f;
+  xe::GetFrameStats(instant_ms, avg_ms, fps);
+  const uint32_t compiling = xe::shader_compiles_in_flight_count();
+
+  char buf[256];
+  const int n = std::snprintf(buf, sizeof(buf), "FPS %.0f\n%.1f ms (avg %.1f ms)",
+                              fps, instant_ms, avg_ms);
+  if (compiling > 0 && n > 0 && n < static_cast<int>(sizeof(buf))) {
+    std::snprintf(buf + n, sizeof(buf) - n, "\ncompiling %u", compiling);
+  }
+  return std::string(buf);
+}
+
+bool ShowDebugOverlay() { return cvars::show_debug_overlay; }
+
+bool ShowTouchOverlay() { return cvars::show_touch_overlay; }
+
+void SetShowTouchOverlay(bool value) { cvars::show_touch_overlay = value; }
+
+void FlushGpuCaches() {
+  // 与上游一致：当前 xenia 基线没有 GraphicsSystem::FlushPipelineCache，
+  // 保留接口占位（拿到 graphics_system 只为将来接上）。
+  std::lock_guard<std::mutex> lock(g_mutex);
+  if (g_emulator && g_emulator->graphics_system()) {
+    // g_emulator->graphics_system()->FlushPipelineCache(1500);
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 import { hilog } from '@kit.PerformanceAnalysisKit';
-import { picker, fileIo as fs } from '@kit.CoreFileKit';
+import { picker, fileIo as fs, fileUri } from '@kit.CoreFileKit';
 import { util } from '@kit.ArkTS';
 import testNapi from 'libentry.so';
 
@@ -56,6 +56,17 @@ struct Index {
   @State padVisible: boolean = true;
   @State padPhysical: boolean = false;
   @State exportStatus: string = '';
+  // ---- guest 提示（Phase 5.3）：'' | 'keyboard' | 'msgbox' | 'disc' ----
+  @State promptKind: string = '';
+  @State promptTitle: string = '';
+  @State promptMessage: string = '';
+  @State promptInput: string = '';
+  @State promptButtons: string[] = [];
+  @State promptDiscLabels: string[] = [];
+  @State promptDiscPaths: string[] = [];
+  private promptId: bigint = BigInt(0);
+  private lastSurfaceId: string = '';
+  private promptTimer: number = -1;
   private pollTimer: number = -1;
   private attachTimer: number = -1;
   private xcompController: XComponentController = new XComponentController();
@@ -71,33 +82,27 @@ struct Index {
     this.restoreInstalled();
     this.attachTimer = setInterval(() => this.tryAttach(), 200);
     this.pollTimer = setInterval(() => this.refresh(), 500);
+    this.promptTimer = setInterval(() => this.pollPrompt(), 150);
   }
 
-  // 启动时扫描沙箱内已安装的游戏（games/<id>/game*），恢复 gamePath。
+  // 启动时恢复沙箱内的「当前游戏」（单槽位：games/current/game*）。
   restoreInstalled(): void {
     try {
       const ctx = getContext(this);
-      const gamesDir: string = `${ctx.filesDir}/games`;
-      if (!fs.accessSync(gamesDir)) {
+      const dir: string = `${ctx.filesDir}/games/current`;
+      if (!fs.accessSync(dir)) {
         return;
       }
-      const ids: string[] = fs.listFileSync(gamesDir);
-      for (const id of ids) {
-        const dir: string = `${gamesDir}/${id}`;
-        const files: string[] = fs.listFileSync(dir);
-        for (const f of files) {
-          if (f.startsWith('game')) {
-            this.gamePath = `${dir}/${f}`;
-            this.installStatus = `已安装：${this.gamePath}`;
-            hilog.info(DOMAIN, TAG, 'restored game: %{public}s', this.gamePath);
-            try {
-              hilog.info(DOMAIN, TAG, 'probe: %{public}s',
-                testNapi.emulator.probeFile(this.gamePath));
-            } catch (e) {
-              hilog.error(DOMAIN, TAG, 'probe failed: %{public}s', JSON.stringify(e));
-            }
-            return;
-          }
+      const target: string = this.resolveLaunchTarget(dir, 0);
+      if (target !== '') {
+        this.gamePath = target;
+        this.installStatus = `已安装：${this.gamePath}`;
+        hilog.info(DOMAIN, TAG, 'restored game: %{public}s', this.gamePath);
+        try {
+          hilog.info(DOMAIN, TAG, 'probe: %{public}s',
+            testNapi.emulator.probeFile(this.gamePath));
+        } catch (e) {
+          hilog.error(DOMAIN, TAG, 'probe failed: %{public}s', JSON.stringify(e));
         }
       }
     } catch (e) {
@@ -114,6 +119,100 @@ struct Index {
       clearInterval(this.attachTimer);
       this.attachTimer = -1;
     }
+    if (this.promptTimer >= 0) {
+      clearInterval(this.promptTimer);
+      this.promptTimer = -1;
+    }
+    this.cancelAllPrompts();
+  }
+
+  // ---- guest 提示（Phase 5.3）----
+
+  // ArkTS 侧 150ms 轮询 guest 的键盘/对话框/换盘请求（DESIGN.md §9.3）。
+  pollPrompt(): void {
+    if (this.promptKind !== '') {
+      return;
+    }
+    try {
+      const kb = testNapi.prompt.keyboardRequest();
+      if (kb !== null) {
+        this.promptId = kb.id;
+        this.promptTitle = kb.title;
+        this.promptMessage = kb.description;
+        this.promptInput = kb.defaultText;
+        this.promptKind = 'keyboard';
+        return;
+      }
+      const mb = testNapi.prompt.msgboxRequest();
+      if (mb !== null) {
+        this.promptId = mb.id;
+        this.promptTitle = mb.title;
+        this.promptMessage = mb.text;
+        this.promptButtons = mb.buttons;
+        this.promptKind = 'msgbox';
+        return;
+      }
+      const d = testNapi.prompt.discRequest();
+      if (d !== null) {
+        this.promptId = d.id;
+        this.promptTitle = '请更换光盘';
+        this.promptMessage = d.message;
+        this.promptDiscLabels = d.discLabels;
+        this.promptDiscPaths = d.discPaths;
+        this.promptKind = 'disc';
+      }
+    } catch (e) {
+      // 模块未就绪时忽略
+    }
+  }
+
+  clearPrompt(): void {
+    this.promptKind = '';
+    this.promptTitle = '';
+    this.promptMessage = '';
+    this.promptInput = '';
+    this.promptButtons = [];
+    this.promptDiscLabels = [];
+    this.promptDiscPaths = [];
+  }
+
+  submitKeyboard(accepted: boolean): void {
+    try {
+      testNapi.prompt.keyboardSubmit(this.promptId, accepted, this.promptInput);
+    } catch (e) {
+      hilog.error(DOMAIN, TAG, 'keyboardSubmit failed: %{public}s', JSON.stringify(e));
+    }
+    this.clearPrompt();
+  }
+
+  submitMsgbox(index: number): void {
+    try {
+      testNapi.prompt.msgboxSubmit(this.promptId, index);
+    } catch (e) {
+      hilog.error(DOMAIN, TAG, 'msgboxSubmit failed: %{public}s', JSON.stringify(e));
+    }
+    this.clearPrompt();
+  }
+
+  submitDisc(accepted: boolean, path: string): void {
+    try {
+      testNapi.prompt.discSubmit(this.promptId, accepted, path);
+    } catch (e) {
+      hilog.error(DOMAIN, TAG, 'discSubmit failed: %{public}s', JSON.stringify(e));
+    }
+    this.clearPrompt();
+  }
+
+  // 退出/卸载时释放所有阻塞在提示上的 guest 线程。
+  cancelAllPrompts(): void {
+    try {
+      testNapi.prompt.keyboardCancelAll();
+      testNapi.prompt.msgboxCancelAll();
+      testNapi.prompt.discCancelAll();
+    } catch (e) {
+      // 忽略
+    }
+    this.clearPrompt();
   }
 
   // Phase 0.1：JIT 可执行内存探测
@@ -126,18 +225,16 @@ struct Index {
     }
   }
 
-  // 取 surfaceId 并交给 native（Phase 0.2 呈现链路）
+  // 取 surfaceId 并交给 native（Phase 0.2 呈现链路）。持续轮询：surface 在窗口
+  // 尺寸变化时可能被重建并换新 id，需要重新 attach（否则放大窗口会卡死）。
   tryAttach(): void {
     try {
       const id: string = this.xcompController.getXComponentSurfaceId();
-      if (id === '' || id === '0') {
+      if (id === '' || id === '0' || id === this.lastSurfaceId) {
         return;
       }
-      if (this.attachTimer >= 0) {
-        clearInterval(this.attachTimer);
-        this.attachTimer = -1;
-      }
       const ok: boolean = testNapi.attachSurface(id);
+      this.lastSurfaceId = id;
       hilog.info(DOMAIN, TAG, 'attachSurface(%{public}s) -> %{public}d', id, ok ? 1 : 0);
     } catch (e) {
       hilog.error(DOMAIN, TAG, 'attach failed: %{public}s', JSON.stringify(e));
@@ -160,30 +257,58 @@ struct Index {
     }
   }
 
-  // 选文件 → 复制到沙箱
-  async pickAndInstall(): Promise<void> {
+  // 选游戏（文件或文件夹）→ 复制到沙箱单槽位 games/current/。
+  // folder=true 用「文件夹」模式（GOD / 多 data 文件包必须用它）。
+  async pickAndInstall(folder: boolean): Promise<void> {
     if (this.busy) {
       return;
     }
     this.busy = true;
-    this.installStatus = '请选择游戏文件…';
+    this.installStatus = folder ? '请选择游戏文件夹…' : '请选择游戏文件…';
     try {
       const ctx = getContext(this);
       const docPicker = new picker.DocumentViewPicker(ctx);
       const options = new picker.DocumentSelectOptions();
       options.maxSelectNumber = 1;
+      if (folder) {
+        options.selectMode = picker.DocumentSelectMode.FOLDER;
+      }
       const uris: string[] = await docPicker.select(options);
       if (uris.length === 0) {
         this.installStatus = '已取消';
         return;
       }
       const uri: string = uris[0];
-      hilog.info(DOMAIN, TAG, 'install: uri=%{public}s', uri);
+      const srcPath: string = this.uriToPath(uri);
+      hilog.info(DOMAIN, TAG,
+        'install: uri=%{public}s path=%{public}s folder=%{public}d',
+        uri, srcPath, folder ? 1 : 0);
       this.installStatus = '复制到沙箱中…（大文件请耐心等待）';
-      const dest: string = await this.copyToSandbox(ctx.filesDir, uri);
+      const dir: string = this.prepareCurrentDir(ctx.filesDir);
+      let count: number = 0;
+      if (folder) {
+        count = await this.copyRecursive(srcPath, uri, dir);
+      } else {
+        const name: string = this.uriBaseName(srcPath);
+        const dot: number = name.lastIndexOf('.');
+        const ext: string = dot >= 0 ? name.substring(dot) : '';
+        const bytes: number = await this.copyFileAny(srcPath, uri,
+          `${dir}/game${ext}`);
+        count = bytes > 0 ? 1 : 0;
+      }
+      const dest: string = this.resolveLaunchTarget(dir, 0);
+      if (dest === '') {
+        this.gamePath = '';
+        this.installStatus = '已复制但未找到可启动文件（default.xex / STFS / game*）';
+        hilog.error(DOMAIN, TAG, 'install: no launch target in %{public}s', dir);
+        return;
+      }
       this.gamePath = dest;
-      this.installStatus = `已安装：${dest}`;
-      hilog.info(DOMAIN, TAG, 'installed to %{public}s', dest);
+      this.installStatus = `已安装（${count} 个文件）：${dest}`;
+      hilog.info(DOMAIN, TAG, 'installed to %{public}s (files=%{public}d)',
+        dest, count);
+      hilog.info(DOMAIN, TAG, 'install: target head=%{public}s',
+        this.readHeadHex(dest, 16));
     } catch (e) {
       this.installStatus = '安装失败（见 hilog）';
       hilog.error(DOMAIN, TAG, 'install failed: %{public}s', JSON.stringify(e));
@@ -192,75 +317,240 @@ struct Index {
     }
   }
 
-  async copyToSandbox(filesDir: string, uri: string): Promise<string> {
-    const src = fs.openSync(uri, fs.OpenMode.READ_ONLY);
+  // 递归删除目录（@ohos.file.fs 的 rmdirSync 只能删空目录）。
+  removeDirRecursive(path: string): void {
     try {
-      const srcStat = fs.statSync(src.fd);
-      hilog.info(DOMAIN, TAG, 'install: src size=%{public}d isDir=%{public}d',
-        srcStat.size, srcStat.isDirectory() ? 1 : 0);
-      if (srcStat.isDirectory()) {
-        throw new Error('选择的是文件夹，请选择游戏镜像文件');
+      if (!fs.accessSync(path)) {
+        return;
       }
-      let name: string = uri.substring(uri.lastIndexOf('/') + 1);
-      try {
-        name = decodeURIComponent(name);
-      } catch (e) {
-        // URI 未编码时保持原样
-      }
-      const dot: number = name.lastIndexOf('.');
-      const ext: string = dot >= 0 ? name.substring(dot) : '';
-      const base: string = dot >= 0 ? name.substring(0, dot) : name;
-      const installId: string = base.replace(/[^A-Za-z0-9._-]/g, '_');
-      const dir: string = `${filesDir}/games/${installId}`;
-      if (!fs.accessSync(dir)) {
-        fs.mkdirSync(dir, true);
-      }
-      const dest: string = `${dir}/game${ext}`;
-      // 重复安装同一文件时目标已存在，先删除再拷贝。
-      if (fs.accessSync(dest)) {
-        fs.unlinkSync(dest);
-      }
-
-      // 源文件前 32 字节（用独立 fd，避免影响拷贝 fd 的读取位置）。
-      try {
-        const hf = fs.openSync(uri, fs.OpenMode.READ_ONLY);
-        const hb = new ArrayBuffer(32);
-        const hn = fs.readSync(hf.fd, hb, { length: 32 });
-        fs.closeSync(hf);
-        const hu = new Uint8Array(hb);
-        let hx: string = '';
-        for (let i = 0; i < hn; i++) {
-          hx += hu[i].toString(16).padStart(2, '0');
+      const entries: string[] = fs.listFileSync(path);
+      for (const name of entries) {
+        const child: string = `${path}/${name}`;
+        if (fs.statSync(child).isDirectory()) {
+          this.removeDirRecursive(child);
+        } else {
+          fs.unlinkSync(child);
         }
-        hilog.info(DOMAIN, TAG, 'install: src head=%{public}s', hx);
-      } catch (e) {
-        hilog.error(DOMAIN, TAG, 'install: src head read failed: %{public}s',
-          JSON.stringify(e));
       }
-
-      // 分块拷贝：本设备上 fs.copyFile(fd, dest) 会写出全 0 文件，改用
-      // 顺序 read/write（fd 位置自动前进，不传 offset 以免歧义）。
-      const dst = fs.openSync(dest,
-        fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
-      const chunk: number = 4 * 1024 * 1024;
-      const buf = new ArrayBuffer(chunk);
-      let copied: number = 0;
-      while (copied < srcStat.size) {
-        const want: number = Math.min(chunk, srcStat.size - copied);
-        const rd: number = fs.readSync(src.fd, buf, { length: want });
-        if (rd <= 0) {
-          break;
-        }
-        fs.writeSync(dst.fd, buf, { length: rd });
-        copied += rd;
-      }
-      fs.closeSync(dst);
-      hilog.info(DOMAIN, TAG, 'install: copied=%{public}d/%{public}d',
-        copied, srcStat.size);
-      return dest;
-    } finally {
-      fs.closeSync(src);
+      fs.rmdirSync(path);
+    } catch (e) {
+      hilog.error(DOMAIN, TAG, 'removeDirRecursive failed: %{public}s : %{public}s',
+        path, JSON.stringify(e));
+      throw new Error(`removeDirRecursive ${path} ${JSON.stringify(e)}`);
     }
+  }
+
+  // 建目录（本设备 mkdirSync(path, true) 对已存在目录会抛 EEXIST 13900015）。
+  ensureDir(path: string): void {
+    if (!fs.accessSync(path)) {
+      fs.mkdirSync(path, true);
+    }
+  }
+
+  // 单槽位：清空 games/ 下的旧目录并创建 games/current，返回其沙箱路径。
+  prepareCurrentDir(filesDir: string): string {
+    const gamesDir: string = `${filesDir}/games`;
+    if (fs.accessSync(gamesDir)) {
+      const olds: string[] = fs.listFileSync(gamesDir);
+      hilog.info(DOMAIN, TAG, 'prepare: cleaning %{public}d old entries',
+        olds.length);
+      for (const old of olds) {
+        this.removeDirRecursive(`${gamesDir}/${old}`);
+      }
+    }
+    const dir: string = `${gamesDir}/current`;
+    this.ensureDir(dir);
+    return dir;
+  }
+
+  // picker 的 docs URI → 真实路径。fs 的目录接口（listFileSync/statSync）只接受
+  // 路径：直接传 URI 会 13900019(ENOTDIR)/13900002(ENOENT)。
+  uriToPath(uri: string): string {
+    try {
+      return new fileUri.FileUri(uri).path;
+    } catch (e) {
+      return uri;
+    }
+  }
+
+  // 读取文件开头 length 字节的十六进制串（诊断用）。
+  readHeadHex(path: string, length: number): string {
+    try {
+      const f = fs.openSync(path, fs.OpenMode.READ_ONLY);
+      try {
+        const buf = new ArrayBuffer(length);
+        const n: number = fs.readSync(f.fd, buf, { offset: 0, length: length });
+        const u = new Uint8Array(buf);
+        let hex: string = '';
+        for (let i = 0; i < n; i++) {
+          hex += u[i].toString(16).padStart(2, '0');
+        }
+        return hex;
+      } finally {
+        fs.closeSync(f);
+      }
+    } catch (e) {
+      return `(read failed: ${JSON.stringify(e)})`;
+    }
+  }
+
+  // 复制单个文件到沙箱。源优先用 picker URI（单文件实测可用），失败退回真实路径。
+  // 本设备上 copyFile 会写出全 0，且不显式传 offset 的 read/write 不可靠，
+  // 因此源和目标都显式指定文件 offset。
+  async copyFileAny(srcPath: string, srcUri: string,
+                    destPath: string): Promise<number> {
+    let srcFd: number = -1;
+    try {
+      srcFd = fs.openSync(srcUri, fs.OpenMode.READ_ONLY).fd;
+    } catch (e1) {
+      hilog.error(DOMAIN, TAG, 'open src uri failed: %{public}s : %{public}s',
+        srcUri, JSON.stringify(e1));
+      try {
+        srcFd = fs.openSync(srcPath, fs.OpenMode.READ_ONLY).fd;
+      } catch (e2) {
+        hilog.error(DOMAIN, TAG, 'open src path failed: %{public}s : %{public}s',
+          srcPath, JSON.stringify(e2));
+        throw new Error(`open src failed: ${srcPath} ${JSON.stringify(e2)}`);
+      }
+    }
+    try {
+      const size: number = fs.statSync(srcFd).size;
+      let dstFd: number = -1;
+      try {
+        dstFd = fs.openSync(destPath,
+          fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC).fd;
+      } catch (e) {
+        hilog.error(DOMAIN, TAG, 'open dst failed: %{public}s : %{public}s',
+          destPath, JSON.stringify(e));
+        throw new Error(`open dst failed: ${destPath} ${JSON.stringify(e)}`);
+      }
+      try {
+        const chunk: number = 4 * 1024 * 1024;
+        const buf = new ArrayBuffer(chunk);
+        let copied: number = 0;
+        while (copied < size) {
+          const want: number = Math.min(chunk, size - copied);
+          const rd: number = fs.readSync(srcFd, buf,
+            { offset: copied, length: want });
+          if (rd <= 0) {
+            break;
+          }
+          fs.writeSync(dstFd, buf, { offset: copied, length: rd });
+          copied += rd;
+        }
+        if (copied !== size) {
+          hilog.error(DOMAIN, TAG,
+            'copy short: %{public}s %{public}d/%{public}d',
+            destPath, copied, size);
+        }
+        return copied;
+      } finally {
+        fs.closeSync(dstFd);
+      }
+    } finally {
+      fs.closeSync(srcFd);
+    }
+  }
+
+  // 递归复制目录/文件到沙箱，返回文件数。srcPath 为真实路径，srcUri 为对应 URI
+  // （文件打开优先 URI）。destPath 是**本条目**在沙箱中的目标路径（目录或文件）。
+  async copyRecursive(srcPath: string, srcUri: string,
+                      destPath: string): Promise<number> {
+    let isDir: boolean = true;
+    let names: string[] = [];
+    try {
+      names = fs.listFileSync(srcPath);
+    } catch (e1) {
+      try {
+        names = fs.listFileSync(srcUri);
+      } catch (e2) {
+        isDir = false;
+      }
+    }
+    if (!isDir) {
+      const bytes: number = await this.copyFileAny(srcPath, srcUri, destPath);
+      hilog.info(DOMAIN, TAG, 'install: file %{public}s (%{public}d bytes)',
+        this.uriBaseName(srcPath), bytes);
+      return 1;
+    }
+    this.ensureDir(destPath);
+    hilog.info(DOMAIN, TAG, 'install: dir %{public}s (%{public}d entries)',
+      this.uriBaseName(srcPath), names.length);    let count: number = 0;
+    for (const name of names) {
+      count += await this.copyRecursive(`${srcPath}/${name}`,
+        `${srcUri}/${name}`, `${destPath}/${name}`);
+    }
+    return count;
+  }
+
+  uriBaseName(uri: string): string {
+    let name: string = uri.substring(uri.lastIndexOf('/') + 1);
+    try {
+      name = decodeURIComponent(name);
+    } catch (e) {
+      // URI 未编码时保持原样
+    }
+    return name;
+  }
+
+  // 在已安装目录中找可启动文件。优先级：default.xex > 精确 game >
+  // 有同名 .data 目录的文件（多文件 STFS/SVOD 头）> 16~40 位十六进制文件名
+  // （STFS 内容 ID）> game* > 递归子目录 > 第一个文件。
+  resolveLaunchTarget(dir: string, depth: number): string {
+    try {
+      if (depth > 8 || !fs.accessSync(dir)) {
+        return '';
+      }
+      const names: string[] = fs.listFileSync(dir);
+      for (const n of names) {
+        if (n.toLowerCase() === 'default.xex') {
+          return `${dir}/${n}`;
+        }
+      }
+      for (const n of names) {
+        if (n === 'game' && !fs.statSync(`${dir}/${n}`).isDirectory()) {
+          return `${dir}/${n}`;
+        }
+      }
+      // 多文件 SVOD/STFS：头部文件旁边有同名 <name>.data 目录。
+      for (const n of names) {
+        if (fs.statSync(`${dir}/${n}`).isDirectory()) {
+          continue;
+        }
+        const dataDir: string = `${dir}/${n}.data`;
+        if (fs.accessSync(dataDir) && fs.statSync(dataDir).isDirectory()) {
+          return `${dir}/${n}`;
+        }
+      }
+      const hexName = new RegExp('^[0-9A-Fa-f]{16,40}$');
+      for (const n of names) {
+        if (!fs.statSync(`${dir}/${n}`).isDirectory() && hexName.test(n)) {
+          return `${dir}/${n}`;
+        }
+      }
+      for (const n of names) {
+        if (n.startsWith('game') && !fs.statSync(`${dir}/${n}`).isDirectory()) {
+          return `${dir}/${n}`;
+        }
+      }
+      for (const n of names) {
+        if (fs.statSync(`${dir}/${n}`).isDirectory()) {
+          const t: string = this.resolveLaunchTarget(`${dir}/${n}`, depth + 1);
+          if (t !== '') {
+            return t;
+          }
+        }
+      }
+      for (const n of names) {
+        if (!fs.statSync(`${dir}/${n}`).isDirectory()) {
+          return `${dir}/${n}`;
+        }
+      }
+    } catch (e) {
+      hilog.error(DOMAIN, TAG, 'resolveLaunchTarget failed: %{public}s',
+        JSON.stringify(e));
+    }
+    return '';
   }
 
   // 启动内核（headless：null GPU + nop 音频/输入）
@@ -526,8 +816,11 @@ struct Index {
 
       Column({ space: 8 }) {
         Row({ space: 8 }) {
-          this.actionButton('选择并安装', () => {
-            this.pickAndInstall();
+          this.actionButton('安装文件', () => {
+            this.pickAndInstall(false);
+          })
+          this.actionButton('安装文件夹', () => {
+            this.pickAndInstall(true);
           })
           this.actionButton('启动', () => {
             this.bootGame();
@@ -542,6 +835,7 @@ struct Index {
             }
           })
           this.actionButton('退出', () => {
+            this.cancelAllPrompts();
             testNapi.emulator.quit();
           })
         }
@@ -596,6 +890,68 @@ struct Index {
         // None：覆盖层容器自身不参与命中测试，只有里面的手柄按钮响应，
         // 下层「启动/暂停」按钮仍可点击。
         .hitTestBehavior(HitTestMode.None)
+      }
+
+      // guest 提示模态层（Phase 5.3）：键盘 / 对话框 / 换盘。
+      if (this.promptKind !== '') {
+        Column() {
+          Column({ space: 10 }) {
+            Text(this.promptTitle)
+              .fontSize(16)
+              .fontColor('#fff')
+              .width('100%')
+            Text(this.promptMessage)
+              .fontSize(13)
+              .fontColor('#ddd')
+              .width('100%')
+
+            if (this.promptKind === 'keyboard') {
+              TextInput({ placeholder: '请输入…', text: this.promptInput })
+                .width('100%')
+                .onChange((value: string) => {
+                  this.promptInput = value;
+                })
+              Row({ space: 8 }) {
+                Button('确定')
+                  .layoutWeight(1)
+                  .onClick(() => this.submitKeyboard(true))
+                Button('取消')
+                  .layoutWeight(1)
+                  .onClick(() => this.submitKeyboard(false))
+              }
+              .width('100%')
+            } else if (this.promptKind === 'msgbox') {
+              Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Center }) {
+                ForEach(this.promptButtons, (label: string, index: number) => {
+                  Button(label)
+                    .margin(4)
+                    .onClick(() => this.submitMsgbox(index))
+                })
+              }
+              .width('100%')
+            } else {
+              Column({ space: 6 }) {
+                ForEach(this.promptDiscLabels, (label: string, index: number) => {
+                  Button(label)
+                    .width('100%')
+                    .onClick(() => this.submitDisc(true, this.promptDiscPaths[index]))
+                })
+                Button('取消')
+                  .width('100%')
+                  .onClick(() => this.submitDisc(false, ''))
+              }
+              .width('100%')
+            }
+          }
+          .width('80%')
+          .padding(16)
+          .backgroundColor('#ee202020')
+          .borderRadius(10)
+        }
+        .width('100%')
+        .height('100%')
+        .justifyContent(FlexAlign.Center)
+        .backgroundColor('#66000000')
       }
     }
     .width('100%')

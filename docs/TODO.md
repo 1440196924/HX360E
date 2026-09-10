@@ -1,7 +1,8 @@
 # HX360E 开发任务清单（TODO）
 
 > 关联文档：[DESIGN.md](./DESIGN.md)（实施设计）、[鸿蒙移植可行性分析报告](./鸿蒙移植可行性分析报告.md)（可行性论证）、[phase0-result.md](./phase0-result.md)（Phase 0 实测）
-> 最后更新：2026-09-10（含本轮：画面已出来 + 崩溃修复清单 + 诊断设施，见「交接快照」）
+> 最后更新：2026-09-11（Phase 5 NAPI 完成；安装支持文件/文件夹；进入游戏；横屏/缩放；
+> 修 双击启动 SIGTRAP、着色器翻译爆栈）
 
 ---
 
@@ -34,16 +35,17 @@
 > 以下阶段**本阶段用 nop 或空壳占位**（实际进度见括号）：
 > - Phase 3 音频 → 用 `xenia-apu-nop`（**仍未做；用户判断可能正是 guest 停在"按 Start"的原因之一**）
 > - Phase 4 输入 → ~~用 `xenia-hid-nop` + `keyEvent` 空壳~~（**已提前实现**：GameControllerKit 物理手柄 + 屏幕覆盖层）
-> - Phase 5 完整 NAPI → 只实现 2.5 列出的最小集（**未做 config / 内容管理 / 提示轮询**）
+> - Phase 5 完整 NAPI → 只实现 2.5 列出的最小集（**已完成**：config / meta / prompt / content 全部原生桥接 + ArkTS 提示 UI，见 Phase 5）
 > - Phase 6 安装器 → 用 picker 选文件直接启动（临时）
 > - Phase 7 完整 UI → 只做 2.5 的最小页面
 >
 > 验收标准：**画面出现并持续呈现，FPS 可测量**。
 >
-> **当前实际状态（2026-09-10）**：画面已出现（Xbox logo / 游戏标题 / 加载画面），
+> **当前实际状态（2026-09-11）**：画面已出现（Xbox logo / 游戏标题 / 加载画面），
 > 整类崩溃已修完；**唯一阻塞是 guest 按 Start 后不再前进**（被 park 在轮询循环里等
-> 一个永不产生的值）。因此下一步会同时展开：**Phase 3 音频**、**Phase 5 的 config/内容
-> NAPI**、以及 GPU 写回/中断链路的排查 —— 见「交接快照 D/F」。
+> 一个永不产生的值）。Phase 5 的 NAPI 桥接（config / meta / prompt / content）与
+> guest 提示 UI 已完成；下一步是 **Phase 3 音频**、以及 GPU 写回/中断链路的排查
+> —— 见「交接快照 D/F」。
 
 ---
 
@@ -53,11 +55,11 @@
 | --- | --- | --- | --- | --- |
 | **0** | 技术验证 | 5 项 spike 通过 | 2–4 周 | `[~]`（0.1 / 0.2 通过；0.3–0.5 未做） |
 | **1** | 工程骨架 + 内核编译 | `libhx360e.so` 能编译、dlopen、加载 XEX | 1–1.5 人月 | `[~]`（编译/boot/加载均已跑通） |
-| **2** | **图形跑通（当前焦点）** | 游戏画面持续呈现 | 1.5–2 人月 | `[~]`（画面已出来；2.6 未过） |
+| **2** | **图形跑通** | 游戏画面持续呈现 | 1.5–2 人月 | `[~]`（已能进入游戏画面；横屏/缩放已处理，待多机型/多游戏打磨） |
 | **3** | 音频 | 有声音、无爆音 | 1 人月 | `[ ]`（当前 `--apu=nop`） |
 | **4** | 输入 | 手柄 + 触摸可操作 | 1 人月 | `[~]`（物理手柄 + 覆盖层基础版已完成，待真手柄实测） |
-| **5** | NAPI 完整桥接 | 配置 / 内容 / 提示全通 | 1 人月 | `[ ]` |
-| **6** | 安装器 + 存储 | 安装 → 游玩 → 卸载闭环 | 1–1.5 人月 | `[ ]` |
+| **5** | NAPI 完整桥接 | 配置 / 内容 / 提示全通 | 1 人月 | `[~]`（config/meta/prompt/content 原生桥接 + 提示 UI 已完成；设置/内容页面属 Phase 7） |
+| **6** | 安装器 + 存储 | 安装 → 游玩 → 卸载闭环 | 1–1.5 人月 | `[~]`（临时单槽位安装器：文件/文件夹，已可用；进度/原子落定/空间管理待做） |
 | **7** | 完整 UI | 全部页面可用 | 2–3 人月 | `[ ]` |
 | **8** | 优化与发布 | 上架 | 2–4 人月 | `[ ]` |
 
@@ -70,9 +72,12 @@
 
 ### A. 一句话状态
 
-**内核已在鸿蒙真机编译、boot，并跑通 Limbo 到「按 Start」画面；Vulkan 呈现链路端到端打通
-（真机上已看到 Xbox logo 与游戏标题界面）。此前的一整类崩溃已全部修掉。
-当前唯一阻塞：guest 主线程被 park 在轮询循环里等一个永不产生的值 —— 按 Start 后无法继续。**
+**内核已在鸿蒙真机编译、boot；Vulkan 呈现链路端到端打通；已能真正进入游戏**
+（Limbo 到标题画面、拳皇13 GOD 多文件版进入游戏）。此前整类崩溃（取指权限、guest 写权限、
+信号处理器、双击启动、着色器翻译爆栈）已全部修掉。**Phase 5 NAPI 桥接完成**；游戏安装支持
+**文件与文件夹**（单槽位覆盖），多文件 STFS/GOD 可用；启动时**自动创建并登录默认档案**
+（解决 XBLA/GOD 的 "no gamer profile signed in"；此前「按 Start 卡住」疑似即 guest 在等 sign-in）。
+当前无阻塞性 bug；待办：Phase 3 音频、放大窗口/比例的进一步打磨、fork 补丁归档。
 
 ### B. 工程与源码布局（关键）
 
@@ -107,25 +112,36 @@
 - **Phase 4（输入，提前完成基础版）**：`OhosInputDriver`（OHOS GameControllerKit 物理手柄：
   14 按键 + 5 组轴注册、摇杆死区、扳机模拟量）+ NAPI `keyEvent/padReleaseAll/padStartPhysical/
   padStopPhysical` + ArkTS 屏幕覆盖层（D-Pad/ABXY/LB·RB/LT·RT/Back·Start/L3·R3/双摇杆）。
+- **Phase 5（NAPI 完整桥接，2026-09-11）**：`config` / `meta` / `prompt` / `content`
+  四个子对象 + `emulator` 状态/调试方法全部实现（见 Phase 5）。guest 提示 provider 已在
+  启动时安装，ArkTS 侧 150ms 轮询 + 模态弹窗应答（键盘/对话框/换盘）。
+- **安装器（临时版，Phase 6 雏形）**：单槽位 `games/current/`，支持**选文件**与**选文件夹**；
+  文件夹递归复制（多文件 STFS/GOD 必需），启动目标自动解析（default.xex / 有同名 `.data`
+  目录的头文件 / 16–40 位十六进制 / game\*）。
+- **档案**：启动时若 `content` 下无档案，自动创建默认档案 `Player` 并让 slot 0 登录
+  （`logged_profile_slot_0_xuid`），解决 XBLA/GOD "no gamer profile signed in"。
 - **诊断设施**：crash-safe `native_fault.log`（信号处理器内只用 `write(2)`，不丢行；下次启动
   回显到 hilog）+ 应用内「导出日志到 Download」按钮（合并 `native_fault.log` 尾 256KB 与
   `xe.log` 尾 4MB，走系统另存为）。
 
 ### D. 已知问题（当前焦点）
 
-1. **guest 停在「按 Start」**（唯一阻塞）：
+1. ~~**guest 停在「按 Start」**（原唯一阻塞）~~ —— **疑似已解决**：在「自动创建并登录
+   默认档案」+ Phase 5 提示 provider + 多文件安装之后，拳皇13 已能正常进入游戏。此前
+   guest 很可能就是在等一个 sign-in / 宿主人机交互（watchdog 报 "every fiber waiting on
+   something none of them is producing"）。保留原证据备查：
    - watchdog 原话：`no guest frame presented in 2000 watchdog ticks ... Every fiber below is
      waiting on something none of them is producing`；
    - 主线程 guest `lr≈0x824EB77C` 空转，其余线程阻塞在事件上（deadline 22 / -1 / -1）；
    - `MemoryPollPark` 被 park 的循环：guest `0x82521C4C`(×60)、`0x8219FA68`、`0x821C7BD0`、
      `0x82138900`、`0x8219F9B0`、`0x821C7B18`；
    - 协作信号里周期发生的只有 host 侧 `F8000024`（by_tid=0xFFFFFFFF）与线程 `F800001C` 的
-     `F8000034` → guest 在等一个没人产生的值（大概率 GPU fence/写回）。
-   - **注意**：此前"按 Start 闪一下回标题"的那批崩溃已修掉（见 E 的修复清单），现在不再崩溃，
-     是**稳定的卡住**。
+     `F8000034`。
+   > 若后续又复现，再按 F 的 GPU 写回/中断方向排查。
 2. **尚未实现的机制**（怀疑会影响 guest 行为）：
    - Phase 3 音频未做（`--apu=nop`）；XMA/音频时钟；
-   - Phase 5 的 config / 内容管理 / guest 提示轮询 NAPI 未做；
+   - ~~Phase 5 的 config / 内容管理 / guest 提示轮询 NAPI 未做~~（**已完成**：见 Phase 5；
+     guest 提示 provider 已在启动时安装，ArkTS 侧 150ms 轮询并弹窗应答）；
    - 部分内核导出仍是 stub。
 3. **次要/待确认**：
    - `MapFileView failed: base=... prot=0x3 flags=0x11 errno=14`（1 条，需确认是否当前运行产生）；
@@ -174,17 +190,58 @@
 7. 输入（新增文件）：`xendroid_ohos/ohos_input_driver.{h,cc}`；CMake 链接
    `libohgame_controller.z.so`。
 8. `entry/build-profile.json5`：debug 的 `nativeLib.debugSymbol.strip = false`。
+9. `kernel/xobject.cc` 的 `XObject::Wait` 主机线程路径（2026-09-11）：
+   - `WaitExit()` 里 `XThread::GetCurrentThread()` 换成 `GetCurrentFiberThread()`。
+     `WaitEnter` 早已用 `IsInThread()` 守卫，`WaitExit` 没有 → 在主机线程（如
+     `~Emulator` → `GraphicsSystem::Shutdown` → `CommandProcessor::Shutdown`
+     → `XObject::Wait`）触发 `assert_always` → `raise(SIGTRAP)`。
+10. `xendroid_ohos/ohos_emulator.cc` 收尾重构（2026-09-11，**修「第二次按启动崩溃」**）：
+   - 原 `EmulatorResetGuard` 只在函数返回时释放 Emulator，**早期 return（Setup /
+     LaunchPath 失败）会跳过 UI 线程收尾**，留下 stale 的 window/app_context；
+     第二次 Boot 在**新的 UI 线程**上 `g_app_context = ...` 会析构旧 context，
+     而 `WindowedAppContext::~WindowedAppContext()` 断言 `IsInUIThread()` →
+     `raise(SIGTRAP)`。
+   - 改为 `BootTeardownGuard`：覆盖所有 return 路径，顺序为 ①释放 Emulator →
+     ②`RequestDeferredQuit()` + join UI 线程 → ③置 `g_booting=false`（避免收尾
+     未完成时重入）。
+   - `window`/`app_context` 改为**在 UI 线程内销毁**（`MainLoop()` 返回后），
+     满足基类析构的 `IsInUIThread()` 断言。
+11. `third_party/glslang/SPIRV/InReadableOrder.cpp`（2026-09-11）：把
+   `ReadableOrderTraverser::visit` 从**每块递归**改为**显式栈迭代**。`Function::dump`
+   → `inReadableOrder` 的递归深度 = CFG 基本块数，大着色器会爆掉 32 MiB 翻译线程栈
+   （`SIGSEGV SEGV_MAPERR` 在 `spv::Function/Block/Instruction::dump`）。迭代版保持
+   原访问顺序、merge/continue 延迟与 `ReachReason` 语义。
+12. 档案自动创建/登录（HX360E 侧 `ohos_emulator.cc`，2026-09-11）：`BootThread` 在创建
+   Emulator 前，若 `content` 下无档案则 `CreateStandaloneProfile(content,"Player",1,103)`，
+   并置 `cvars::logged_profile_slot_0_xuid`（`ProfileManager` 构造时读它登录 slot 0）。
+13. 安装器重写（HX360E 侧 `Index.ets`，2026-09-11）：
+   - 单槽位覆盖：安装前清空 `games/*`，写入 `games/current/`（原来按文件名分目录、不删旧，
+     `restoreInstalled` 取到的旧目录顺序不定）；
+   - 支持**选文件夹**（`DocumentSelectMode.FOLDER`）递归复制（多文件 STFS/GOD 必需）；
+   - `fs.copyFile` 在本设备写全 0、不传 offset 的 read/write 不可靠 → 源/目标都显式
+     `offset` 分块读写；
+   - picker 目录 URI 不能直接喂 `listFileSync`/`statSync`（`13900002/13900019`）→
+     先用 `fileUri.FileUri(uri).path` 转真实路径，URI 作兜底；
+   - `mkdirSync(path,true)` 对已存在目录抛 `EEXIST(13900015)` → 统一 `ensureDir()`；
+   - `resolveLaunchTarget()`：default.xex > 精确 game > 有同名 `.data` 目录的头文件
+     > 16–40 位十六进制 > game\* > 递归 > 第一个文件。
+14. 画面比例与窗口缩放（HX360E 侧，2026-09-11）：
+   - `module.json5` 的 `EntryAbility` 加 `"orientation":"landscape"`（原来竖屏窗口
+     1324×2090 → 16:9 画面比例异常）；
+   - `OnSurfaceChanged` 原为空实现 → 现 `OnSurfaceResized()` 让 presenter 重新查询尺寸并
+     重建 swapchain（否则放大窗口卡死）；ArkTS `tryAttach` 改为持续轮询，surface 换新 id
+     时重新 `attachSurface`。
 
 ### F. 下一步（建议顺序）
 
-1. **试 `--park_memory_poll_loops=false`**（`Index.ets` 的 `bootGame()` 加参数，一轮增量构建）：
-   判断是"park 机制把 guest 锁死"还是"guest 真在等 GPU 永不产生的值"。
-2. 若仍自旋 ⇒ 查 GPU 写回/中断链：presenter 的 present 时机、`VdSwap` 完成路径、
-   `VdSetGraphicsInterruptCallback` / GPU 中断是否触发、swapchain acquire/present。
-3. 对照 Android（`XE_PLATFORM_xendroid` 分支在 OHOS 同样生效，见附录 D 的对照清单）核对
-   未实现机制：audio（Android 用 aaudio，我们 nop）、xma、以及 config/content NAPI。
-4. 补 Phase 3（OHAudio）与 Phase 5 的 config / 内容管理 NAPI，再看 guest 是否继续。
-5. 收尾：重新导出 `patches/harmony/*.diff`；清理或保留临时诊断（D.4）。
+1. **Phase 3 音频**（当前 `--apu=nop`）：`ohaudio_audio_driver` + 时钟对齐，见 Phase 3。
+2. **打磨**：多分辨率/多次缩放窗口；验证 guest 提示弹窗（键盘/对话框/换盘）；再跑几个
+   不同格式标题（ISO / XEX 目录 / 单文件 STFS / 多文件 GOD）确认安装与启动目标解析。
+3. **Phase 6 正式安装器**：安装进度、`.tmp` + `rename` 原子落定、空间预检、多文件包选择、
+   残留清理（现在是最简单的单槽位覆盖版）。
+4. **归档**：重新导出 `patches/harmony/*.diff`（含本轮 `xobject.cc`、glslang
+   `InReadableOrder.cpp`、`vulkan_pipeline_cache.cc` 等 fork 改动）；清理或明确保留临时诊断
+   日志（D.4）。
 
 
 ---
@@ -549,39 +606,67 @@ mprotect(PROT_READ|PROT_EXEC)                      // 切 RX
 ## Phase 5：NAPI 完整桥接
 
 > 目标：把上游约 40 个 JNI 方法全部补齐。参考 DESIGN.md §9。
+>
+> **进展（2026-09-11）**：原生桥接已全部完成并在真机验证模块可加载（无崩溃）。
+> 新增文件：`napi_bridge.h`（共享辅助）、`napi_config.cc`、`napi_meta.cc`、
+> `napi_prompt.cc`、`napi_content.cc`、`prompt_providers.{h,cc}`（迁移自上游
+> `xe_android_*`，逻辑逐行一致）。`napi_init.cpp` 注册 `config` / `meta` /
+> `prompt` / `content` 四个子对象，并给 `emulator` 加上状态/调试方法。
+> ArkTS 侧 `Index.ets` 已加 150ms 提示轮询 + 模态 UI（键盘/对话框/换盘）。
+>
+> **待补**：ArkTS 的 `ConfigStore`/`ConfigHandle` 封装类与设置页、内容管理页
+> 属 Phase 7（原生接口已就绪，见 Phase 7.1/7.2）。
 
-### 5.1 配置 `[P1]`
+### 5.1 配置 `[P1]` ✅ 原生完成
 
-- [ ] `config.open` / `close` / `loadEntry` / `saveEntry` / `saveToFile` / `free`
-- [ ] 句柄用 `bigint` 传 C++ 指针，ArkTS 侧封装 `ConfigHandle` 类保证配对释放
-- [ ] `ConfigStore` / `ConfigHandle` 重写（对应上游 `ConfigStore.kt` / `ConfigHandle.kt`）
+- [x] `config.open(path)` / `openString(text)` → 返回 `bigint` 句柄（失败 0）
+- [x] `config.loadEntry(handle, "Section|name")` → `string | null`
+- [x] `config.saveEntry(handle, tag, value)`（按值形态推断 bool/int/double/string）
+- [x] `config.saveToFile(handle, path)`（保留句柄）/ `serialize(handle)`
+- [x] `config.close(handle)` → 序列化 + 释放，返回 TOML 文本
+- [x] `config.free(handle)` → 直接释放（不序列化）
+- [x] 句柄用 `bigint` 传 C++ 指针（`toml::table*`），ArkTS 侧须配对 close/free
+- [ ] ArkTS `ConfigHandle` 类 + `ConfigStore`（对应上游 `ConfigHandle.kt` /
+      `ConfigStore.kt`）——归 Phase 7 设置页
 
-### 5.2 元数据 `[P1]`
+### 5.2 元数据 `[P1]` ✅
 
-- [ ] `meta.titleIdFromPath` / `meta.metaFromPath` / `meta.metaInfoFromGodPath`
-- [ ] DTO 用 `napi_create_object` 逐字段构造（替代 JNI 的 `NewObject` + `SetField`）
-- [ ] 图标用 `ArrayBuffer` 传
+- [x] `meta.titleIdFromPath(path, format)`（0=ISO / 1=XEX 目录 / 2=ZAR）
+- [x] `meta.metaFromPath(path, format)` → `GameInfo | null`
+- [x] `meta.metaInfoFromGodPath(path)`（STFS/GOD）→ `GameInfo | null`
+- [x] DTO 用 `napi_create_object` 逐字段构造（替代 JNI `NewObject` + `SetField`）
+- [x] 图标用 `ArrayBuffer` 传
+- [x] 迁移上游 `extract_xex_meta`（含 SPA 有界读取、解压路径三重边界保护）
+- [x] 安全：`metaFromPath` 在游戏运行中直接返回 null（避免 `xe::Memory`
+      进程单例冲突；上游靠独立进程，我们靠该守卫 + 库页在未运行时扫描）
 
-### 5.3 Guest 提示轮询 `[P1]`
+### 5.3 Guest 提示轮询 `[P1]` ✅
 
-- [ ] `prompt.keyboardRequest` / `keyboardSubmit` / `keyboardCancelAll`
-- [ ] `prompt.msgboxRequest` / `msgboxSubmit` / `msgboxCancelAll`
-- [ ] `prompt.discRequest` / `discSubmit` / `discCancelAll` / `discSetKnown`
-- [ ] 字符串用 UTF-16（`napi_create_string_utf16`），与上游一致
-- [ ] ArkTS 侧 150ms 轮询（对应上游 `EmulatorHostActivity.kt:317-395`）
+- [x] `prompt.keyboardRequest` / `keyboardSubmit` / `keyboardCancelAll`
+- [x] `prompt.msgboxRequest` / `msgboxSubmit` / `msgboxCancelAll`
+- [x] `prompt.discRequest` / `discSubmit` / `discCancelAll` / `discSetKnown`
+- [x] 字符串用 UTF-16（`napi_create_string_utf16` + `xe::to_utf16/to_utf8`）
+- [x] `prompt_providers.cc`：三个 host provider（自动安装于 BootThread 的
+      `LaunchPath` 之前）
+- [x] ArkTS 侧 150ms 轮询 + 模态 UI（键盘 TextInput / 对话框按钮 / 换盘列表 /
+      取消）；退出与页面销毁时 `*CancelAll` 释放阻塞的 guest 线程
 
-### 5.4 内容管理 `[P2]`
+### 5.4 内容管理 `[P2]` ✅ 原生完成
 
-- [ ] `content.installContent` / `listDiscContent` / `installDiscContent`
-- [ ] `content.contentHeader` / `listContent` / `deleteContent`
-- [ ] `content.listProfiles` / `createProfile` / `renameProfile`
-- [ ] 进度：`installProgress` / `compressProgress`
+- [x] `content.installContent` / `listDiscContent` / `installDiscContent`
+- [x] `content.contentHeader` / `listContent` / `deleteContent`
+- [x] `content.listProfiles` / `createProfile` / `renameProfile`
+- [x] 进度：`installProgress` / `compressProgress` + `compressIsoToZar`
+- [ ] 内容管理页面（`ContentManagerPage`）——归 Phase 7.3
 
-### 5.5 调试与状态 `[P2]`
+### 5.5 调试与状态 `[P2]` ✅
 
-- [ ] `emulator.debugOverlayText`
-- [ ] `emulator.showDebugOverlayEnabled` / `setShowTouchOverlay`
-- [ ] `emulator.flushGpuCaches`
+- [x] `emulator.debugOverlayText` / `lastFrameTimeMs` / `instantFps` / `averageFps`
+- [x] `emulator.showDebugOverlayEnabled` / `showTouchOverlayEnabled` /
+      `setShowTouchOverlay`
+- [x] `emulator.changeSurface(w, h)`
+- [x] `emulator.flushGpuCaches`（当前基线无 `FlushPipelineCache`，占位）
+
 
 ---
 
@@ -761,6 +846,7 @@ mprotect(PROT_READ|PROT_EXEC)                      // 切 RX
 | Q12 | guest 被 park 在轮询循环、按 Start 无法前进 | 2.6 | 先试 `--park_memory_poll_loops=false`；再查 GPU 写回/中断（见交接快照 F） |
 | Q13 | 文件映射上的 `mprotect(PROT_EXEC)` 被拒（`EACCES`） | 2.x | 已确认：双视图方案不可行，改用单块匿名 + 页对齐（已实施） |
 | Q14 | 未实现机制（audio=nop、config/content NAPI）是否影响 guest | 2.6 / 3.x / 5.x | 对照 Android（`XE_PLATFORM_xendroid` 分支在 OHOS 同样生效）逐项核对 |
+| Q15 | 启动失败「游戏没运行」 | 2.6 / 6.1 | 2026-09-11 实测为**镜像文件问题**，非内核问题：① 多文件 STFS/GOD 只拷了主文件（`game`），缺 `game.data` → `STFS container is multi-file, but ... game.data does not exist`；② 非 Xbox 360 镜像（如 PS3 ISO）→ `Failed to verify disc image header: -30`、`GetFileSignature: (00000000)`。**Phase 6 安装器必须支持多文件包（整目录/全部 part）**；picker 目前单选单文件 |
 
 ## 附录 D：XenDroid fork 补丁清单（**未提交，务必保留**）
 
@@ -831,8 +917,12 @@ mprotect(PROT_READ|PROT_EXEC)                      // 切 RX
 - `base/exception_handler.h`：上述两个 sink 接口声明。
 - `base/logging.cc`：OHOS 分支补回**文件 sink**（原来 `#elif` 导致 `xe.log` 从未写入）。
 - `gpu/vulkan/vulkan_pipeline_cache.cc`：着色器翻译线程栈 4 MiB → **32 MiB**。
-- `xendroid_ohos/`（HX360E 侧，不在 fork）：`ohos_emulator.cc` 的 Emulator 释放、
-  `SetupConfig` 顺序、`native_fault.log` 回显；新增 `ohos_input_driver.{h,cc}`。
+- `kernel/xobject.cc`：`WaitExit()` 用 `GetCurrentFiberThread()`（原 `GetCurrentThread()`
+  在主机线程 teardown 时 `assert_always` → SIGTRAP）。
+- `third_party/glslang/SPIRV/InReadableOrder.cpp`：`ReadableOrderTraverser::visit` 递归 → **显式栈迭代**
+  （`Function::dump` 的 CFG 遍历按块递归，大着色器爆翻译线程栈）。
+- `xendroid_ohos/`（HX360E 侧，不在 fork）：`ohos_emulator.cc` 的 BootTeardownGuard、
+  档案自动创建/登录、`OnSurfaceResized`；`napi_*.cc` / `prompt_providers.*`；`Index.ets` 安装器重写。
 - `entry/build-profile.json5`（HX360E 侧）：debug `nativeLib.debugSymbol.strip=false`。
 
 > **预生成产物**（git-ignored，换机需重新生成）：
@@ -844,17 +934,23 @@ mprotect(PROT_READ|PROT_EXEC)                      // 切 RX
 ```
 entry/src/main/cpp/
 ├── CMakeLists.txt                 # 集成 xenia；XE_XENDROID_ROOT；链接 xenia-gpu-vulkan + libohgame_controller
-├── napi_init.cpp                  # NAPI 模块 + XComponent 桥接 + emulator 对象 + memfd 双视图探针
+├── napi_init.cpp                  # NAPI 模块 + XComponent 桥接 + emulator 对象（生命周期/输入/状态）+ memfd 探针
 ├── jit_probe.cpp/.h               # Phase 0 JIT 探测 + `RunMemfdTwoViewProbe()`
 ├── vulkan_context.cpp/.h          # Phase 0 呈现 spike（Phase 2 起不用于游戏画面）
-├── types/libentry/Index.d.ts      # NAPI 类型声明（含 emulator.keyEvent/pad* ）
+├── types/libentry/Index.d.ts      # NAPI 类型声明（emulator / config / meta / prompt / content）
 └── xendroid_ohos/
-    ├── ohos_emulator.h/.cc        # 启动层：UI 线程 + Emulator Setup/Launch + native_fault.log
+    ├── ohos_emulator.h/.cc        # 启动层：UI 线程 + Emulator Setup/Launch + native_fault.log + 状态/调试
     ├── ohos_window.h/.cc          # OhosWindow + OhosWindowedAppContext + OHNativeWindow surface
     ├── ohos_input_driver.h/.cc    # OhosInputDriver（GameControllerKit 物理手柄）+ OhosPadKey 索引表
+    ├── napi_bridge.h              # Phase 5 NAPI 共享辅助（字符串/数组/bigint 句柄）
+    ├── napi_config.cc             # Phase 5.1 TOML 配置句柄
+    ├── napi_meta.cc               # Phase 5.2 镜像元数据（ISO/XEX/ZAR/STFS）
+    ├── napi_prompt.cc             # Phase 5.3 guest 提示轮询
+    ├── napi_content.cc            # Phase 5.4 内容管理/存档/压缩
+    ├── prompt_providers.h/.cc     # Phase 5.3 host provider（迁移自上游 xe_android_*）
     ├── file_picker_ohos.cc        # FilePicker::Create 桩
     └── system_ohos.cc             # ShowSimpleMessageBox/SetProcessPriorityClass 等桩
-entry/src/main/ets/pages/Index.ets # 选文件→安装到沙箱→启动；手柄覆盖层；导出日志到 Download
+entry/src/main/ets/pages/Index.ets # 选文件→安装到沙箱→启动；手柄覆盖层；提示弹窗；导出日志到 Download
 ```
 
 启动参数（`setupLaunchArgs`）：

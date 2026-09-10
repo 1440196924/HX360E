@@ -24,6 +24,10 @@ void SetLaunchArgs(const std::vector<std::string>& args);
 // XComponent(SURFACE) 的 OHNativeWindow 到达时调用（ArkUI 主线程）。
 void SetNativeWindow(void* native_window);
 
+// XComponent surface 尺寸变化时调用（ArkUI 主线程）：让 presenter 重新查询尺寸并
+// 重建 swapchain。不处理会导致放大窗口后卡死。
+void OnSurfaceResized();
+
 // 在独立线程里启动内核（headless）。重复调用会被忽略。
 void Boot();
 
@@ -41,6 +45,26 @@ std::string DeviceInfo();
 
 // 扫描文件头部，报告识别到的镜像格式（诊断用）。
 std::string ProbeFile(const std::string& path);
+
+// ---- 状态 / 调试（Phase 5.5）----
+
+// 通知 surface 尺寸变化（swapchain 在下一次 recreate 时重新查询实际尺寸）。
+void ChangeSurface(int width, int height);
+
+// 最近一帧的呈现间隔（ms）；首帧前 / 暂停后为 0。
+float LastFrameTimeMs();
+// 1000/LastFrameTimeMs（无有效帧时为 0）。
+float InstantFps();
+// ~1s 窗口的平滑帧率。
+float AverageFps();
+// 调试覆盖层文本（"FPS ..\n.. ms (avg .. ms)"）；show_debug_overlay 关闭时为空串。
+std::string DebugOverlayText();
+// 生效的 Display|show_debug_overlay / HID|show_touch_overlay（含 per-game 覆盖）。
+bool ShowDebugOverlay();
+bool ShowTouchOverlay();
+void SetShowTouchOverlay(bool value);
+// 刷新 GPU 管线缓存（当前基线无接口，占位）。
+void FlushGpuCaches();
 
 // ---- 输入（Phase 4）----
 // 喂入一个手柄控件状态。key_index 见 ohos_input_driver.h 的 OhosPadKey

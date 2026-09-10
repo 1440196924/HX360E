@@ -21,6 +21,7 @@
 
 #include "jit_probe.h"
 #include "vulkan_context.h"
+#include "xendroid_ohos/napi_bridge.h"
 #include "xendroid_ohos/ohos_emulator.h"
 
 #define HILOG(...) OH_LOG_INFO(LOG_APP, __VA_ARGS__)
@@ -52,7 +53,8 @@ void OnSurfaceChangedCB(OH_NativeXComponent* component, void* window) {
     }
     HILOG("XComponent: surface changed %ux%u",
           static_cast<uint32_t>(w), static_cast<uint32_t>(h));
-    // spike：尺寸变化暂不重建 swapchain，仅记录
+    // 尺寸变化必须让 presenter 重建 swapchain，否则放大窗口后画面卡死。
+    hx360e::OnSurfaceResized();
 }
 
 void OnSurfaceDestroyedCB(OH_NativeXComponent* component, void* window) {
@@ -336,6 +338,76 @@ napi_value EmulatorPadStopPhysical(napi_env env, napi_callback_info info) {
     return result;
 }
 
+// ---- 状态 / 调试（Phase 5.5）----
+napi_value EmulatorChangeSurface(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value args[2] = {nullptr, nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    int32_t w = 0, h = 0;
+    if (argc >= 1) {
+        napi_get_value_int32(env, args[0], &w);
+    }
+    if (argc >= 2) {
+        napi_get_value_int32(env, args[1], &h);
+    }
+    hx360e::ChangeSurface(w, h);
+    return nullptr;
+}
+
+napi_value EmulatorLastFrameTimeMs(napi_env env, napi_callback_info info) {
+    napi_value result;
+    napi_create_double(env, hx360e::LastFrameTimeMs(), &result);
+    return result;
+}
+
+napi_value EmulatorInstantFps(napi_env env, napi_callback_info info) {
+    napi_value result;
+    napi_create_double(env, hx360e::InstantFps(), &result);
+    return result;
+}
+
+napi_value EmulatorAverageFps(napi_env env, napi_callback_info info) {
+    napi_value result;
+    napi_create_double(env, hx360e::AverageFps(), &result);
+    return result;
+}
+
+napi_value EmulatorDebugOverlayText(napi_env env, napi_callback_info info) {
+    std::string text = hx360e::DebugOverlayText();
+    napi_value result;
+    napi_create_string_utf8(env, text.c_str(), text.size(), &result);
+    return result;
+}
+
+napi_value EmulatorShowDebugOverlay(napi_env env, napi_callback_info info) {
+    napi_value result;
+    napi_get_boolean(env, hx360e::ShowDebugOverlay(), &result);
+    return result;
+}
+
+napi_value EmulatorShowTouchOverlay(napi_env env, napi_callback_info info) {
+    napi_value result;
+    napi_get_boolean(env, hx360e::ShowTouchOverlay(), &result);
+    return result;
+}
+
+napi_value EmulatorSetShowTouchOverlay(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    bool value = false;
+    if (argc >= 1) {
+        napi_get_value_bool(env, args[0], &value);
+    }
+    hx360e::SetShowTouchOverlay(value);
+    return nullptr;
+}
+
+napi_value EmulatorFlushGpuCaches(napi_env env, napi_callback_info info) {
+    hx360e::FlushGpuCaches();
+    return nullptr;
+}
+
 }  // namespace
 
 EXTERN_C_START
@@ -380,12 +452,36 @@ static napi_value Init(napi_env env, napi_value exports) {
          nullptr, napi_default, nullptr},
         {"padStartPhysical", nullptr, EmulatorPadStartPhysical, nullptr,
          nullptr, nullptr, napi_default, nullptr},
-        {"padStopPhysical", nullptr, EmulatorPadStopPhysical, nullptr, nullptr,
+        {"padStopPhysical", nullptr, EmulatorPadStopPhysical, nullptr,
+         nullptr, nullptr, napi_default, nullptr},
+        {"changeSurface", nullptr, EmulatorChangeSurface, nullptr, nullptr,
+         nullptr, napi_default, nullptr},
+        {"lastFrameTimeMs", nullptr, EmulatorLastFrameTimeMs, nullptr, nullptr,
+         nullptr, napi_default, nullptr},
+        {"instantFps", nullptr, EmulatorInstantFps, nullptr, nullptr, nullptr,
+         napi_default, nullptr},
+        {"averageFps", nullptr, EmulatorAverageFps, nullptr, nullptr, nullptr,
+         napi_default, nullptr},
+        {"debugOverlayText", nullptr, EmulatorDebugOverlayText, nullptr,
+         nullptr, nullptr, napi_default, nullptr},
+        {"showDebugOverlayEnabled", nullptr, EmulatorShowDebugOverlay, nullptr,
+         nullptr, nullptr, napi_default, nullptr},
+        {"showTouchOverlayEnabled", nullptr, EmulatorShowTouchOverlay, nullptr,
+         nullptr, nullptr, napi_default, nullptr},
+        {"setShowTouchOverlay", nullptr, EmulatorSetShowTouchOverlay, nullptr,
+         nullptr, nullptr, napi_default, nullptr},
+        {"flushGpuCaches", nullptr, EmulatorFlushGpuCaches, nullptr, nullptr,
          nullptr, napi_default, nullptr},
     };
     napi_define_properties(env, emulator,
                            sizeof(emu_desc) / sizeof(emu_desc[0]), emu_desc);
     napi_set_named_property(env, exports, "emulator", emulator);
+
+    // Phase 5 NAPI 桥接子命名空间。
+    hx360e::RegisterConfig(env, exports);
+    hx360e::RegisterMeta(env, exports);
+    hx360e::RegisterPrompt(env, exports);
+    hx360e::RegisterContent(env, exports);
 
     RegisterXComponent(env, exports);
 
