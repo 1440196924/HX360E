@@ -47,6 +47,17 @@ std::string FormatJitReport(const JitProbeReport& report);
 // 策略名称（用于日志与 UI 展示）
 const char* JitStrategyName(int strategy);
 
+// memfd 双视图探测（代码缓存改双视图方案的前置验证）。
+//
+// 与策略 ② 的区别：执行视图不是 mmap(PROT_EXEC)（鸿蒙会拒），而是
+// 「先 mmap(RW) 再 mprotect(RX)」—— 即 MapFileView 的 OHOS 分支所用的路径。
+// 验证两点：
+//   1) 通过写视图写入、经执行视图执行能成功；
+//   2) 执行视图已经是 RX 之后，再通过写视图写入第二个函数并能执行
+//      （这正是单区域 W^X 方案会丢 X 的场景）。
+// 返回单行报告字符串（hilog 多行会被丢，故合并）。
+std::string RunMemfdTwoViewProbe();
+
 }  // namespace hx360e
 
 #endif  // HX360E_JIT_PROBE_H

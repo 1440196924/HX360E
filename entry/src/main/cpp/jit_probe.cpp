@@ -15,6 +15,7 @@
 #include <csetjmp>
 #include <csignal>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <string>
 
@@ -310,6 +311,110 @@ const char* JitStrategyName(int strategy) {
         case 4: return "AnonExecRwx";
         default: return "None";
     }
+}
+
+std::string RunMemfdTwoViewProbe() {
+    // 每个函数留 64B 槽位：第二个函数是在执行视图**已经是 RX** 之后才写入的，
+    // 这正是单区域 W^X 方案会丢 X 的场景。
+    constexpr size_t kSlotBytes = 64;
+    bool memfd_ok = false;
+    bool write_view_ok = false;
+    bool exec_view_ok = false;
+    bool exec_mprotect_ok = false;
+    bool exec_first_ok = false;
+    bool exec_second_ok = false;
+    int err = 0;
+    const char* fail = nullptr;
+    const char* fail2 = nullptr;
+
+    int fd = -1;
+    void* write_view = MAP_FAILED;
+    void* exec_view = MAP_FAILED;
+
+    InstallProbeHandlers();
+
+    fd = memfd_create("hx360e_memfd2v", 0);
+    if (fd < 0) {
+        err = errno;
+        fail = "memfd_create";
+    } else {
+        memfd_ok = true;
+        if (ftruncate(fd, kPageSize) != 0) {
+            err = errno;
+            fail = "ftruncate";
+        } else {
+            write_view = mmap(nullptr, kPageSize, PROT_READ | PROT_WRITE,
+                              MAP_SHARED, fd, 0);
+            if (write_view == MAP_FAILED) {
+                err = errno;
+                fail = "mmap write view RW";
+            } else {
+                write_view_ok = true;
+                // 与 MapFileView 的 OHOS 分支一致：先 RW 再 mprotect(RX)。
+                exec_view = mmap(nullptr, kPageSize, PROT_READ | PROT_WRITE,
+                                 MAP_SHARED, fd, 0);
+                if (exec_view == MAP_FAILED) {
+                    err = errno;
+                    fail = "mmap exec view RW";
+                } else {
+                    exec_view_ok = true;
+                    if (mprotect(exec_view, kPageSize,
+                                 PROT_READ | PROT_EXEC) != 0) {
+                        err = errno;
+                        fail = "mprotect exec view RW->RX";
+                    } else {
+                        exec_mprotect_ok = true;
+
+                        // 1) 第一次放置：写视图写入 → 执行视图执行。
+                        std::memcpy(write_view, kProbeCode, sizeof(kProbeCode));
+                        ClearInstructionCache(
+                            exec_view,
+                            static_cast<char*>(exec_view) + kSlotBytes);
+                        StrategyResult r1;
+                        exec_first_ok = ExecProbe(exec_view, &r1);
+                        if (!exec_first_ok) {
+                            fail = r1.fail_step ? r1.fail_step : "exec first";
+                        }
+
+                        // 2) 执行视图已是 RX 之后再放置第二个函数。
+                        std::memcpy(
+                            static_cast<char*>(write_view) + kSlotBytes,
+                            kProbeCode, sizeof(kProbeCode));
+                        ClearInstructionCache(
+                            static_cast<char*>(exec_view) + kSlotBytes,
+                            static_cast<char*>(exec_view) + 2 * kSlotBytes);
+                        StrategyResult r2;
+                        exec_second_ok = ExecProbe(
+                            static_cast<char*>(exec_view) + kSlotBytes, &r2);
+                        if (!exec_second_ok) {
+                            fail2 = r2.fail_step ? r2.fail_step : "exec second";
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (exec_view != MAP_FAILED) {
+        munmap(exec_view, kPageSize);
+    }
+    if (write_view != MAP_FAILED) {
+        munmap(write_view, kPageSize);
+    }
+    if (fd >= 0) {
+        close(fd);
+    }
+    RestoreProbeHandlers();
+
+    char report[360];
+    std::snprintf(
+        report, sizeof(report),
+        "memfd2v: memfd=%d write_view=%d exec_view_rw=%d mprot_rx=%d exec1=%d "
+        "exec2_after_rx=%d errno=%d fail=%s/%s",
+        memfd_ok ? 1 : 0, write_view_ok ? 1 : 0, exec_view_ok ? 1 : 0,
+        exec_mprotect_ok ? 1 : 0, exec_first_ok ? 1 : 0,
+        exec_second_ok ? 1 : 0, err, fail ? fail : "-", fail2 ? fail2 : "-");
+    return std::string(report);
 }
 
 }  // namespace hx360e

@@ -1,5 +1,8 @@
 #include "ohos_emulator.h"
 
+#include <fcntl.h>
+#include <unistd.h>
+
 #include <atomic>
 #include <condition_variable>
 #include <cstdio>
@@ -19,11 +22,13 @@
 #define LOG_TAG "HX360E"
 
 #include "ohos_window.h"
+#include "ohos_input_driver.h"
 
 #include "third_party/fmt/include/fmt/format.h"
 
 #include "xenia/apu/nop/nop_audio_system.h"
 #include "xenia/base/cvar.h"
+#include "xenia/base/exception_handler.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/platform_arm64.h"
 #include "xenia/base/threading.h"
@@ -90,16 +95,35 @@ std::unique_ptr<xe::gpu::GraphicsSystem> CreateGraphicsSystem() {
   return std::make_unique<xe::gpu::vulkan::VulkanGraphicsSystem>();
 }
 
+// 输入驱动由 xenia 的 InputSystem 持有，这里只保留裸指针给 NAPI / 覆盖层。
+std::atomic<OhosInputDriver*> g_input_driver{nullptr};
+
 std::vector<std::unique_ptr<xe::hid::InputDriver>> CreateInputDrivers(
     xe::ui::Window* window) {
   std::vector<std::unique_ptr<xe::hid::InputDriver>> drivers;
-  drivers.emplace_back(xe::hid::nop::Create(window, /*window_z_order=*/0));
+  auto pad = std::make_unique<OhosInputDriver>(window, /*window_z_order=*/0);
+  g_input_driver.store(pad.get());
+  drivers.emplace_back(std::move(pad));
   return drivers;
 }
 
 void BootThread() {
   HXLOG("HX360E boot: thread start");
   xe::threading::set_name("hx360e-boot");
+
+  // 所有退出路径（包括中途 return）都要释放 Emulator：它持有 4.5GB 的 guest
+  // 地址空间映射，留着会让下一次启动的 Memory::Initialize() 在固定地址上
+  // MapViews 失败并触发 assert_always() -> SIGTRAP（实测：第二次按「启动」）。
+  struct EmulatorResetGuard {
+    ~EmulatorResetGuard() {
+      std::lock_guard<std::mutex> lock(g_mutex);
+      if (g_emulator) {
+        HXLOG("HX360E boot: releasing emulator (guest address space)");
+        g_emulator.reset();
+      }
+    }
+  } emulator_reset_guard;
+  (void)emulator_reset_guard;
 
   static std::once_flag parse_args_once;
   std::call_once(parse_args_once, [&]() {
@@ -151,14 +175,53 @@ void BootThread() {
 
   std::filesystem::path log_dir = storage.parent_path() / "logs";
   std::filesystem::create_directories(log_dir, ec);
+
+  // 配置必须在日志初始化之前加载：SetupConfig() 会用 xenia-edge.config.toml
+  // 覆盖 cvar（包括 log_append），若先初始化日志，它的打开模式会在之后被改回
+  // false，logging.cc 就会用 "wt" 截断 xe.log —— 于是每次 boot 只剩本次开头，
+  // 上一次运行（尤其是崩溃那次）的日志被丢掉。
+  config::SetupConfig(storage);
   cvars::log_file = (log_dir / "xe.log").string();
   cvars::log_append = true;
   cvars::log_to_stdout = true;
   xe::InitializeLogging("hx360e");
   HXLOG("HX360E boot: logging initialized at %{public}s",
         cvars::log_file.string().c_str());
+  {
+    // 报告日志文件大小：确认确实是追加而不是被截断。
+    std::error_code size_ec;
+    const auto log_size = std::filesystem::file_size(cvars::log_file, size_ec);
+    HXLOG("HX360E boot: log_append=%{public}d log_size=%{public}llu",
+          cvars::log_append ? 1 : 0,
+          size_ec ? 0ull : static_cast<unsigned long long>(log_size));
+  }
 
-  config::SetupConfig(storage);
+  // ---- 崩溃安全诊断（native_fault.log）----
+  // 信号处理器里只写这个 fd（write(2)），因此进程被默认动作杀掉时记录不会丢；
+  // 上次崩溃的内容在这次（健康的）启动时回显到 hilog，之后清空。
+  const std::string fault_log_path = (log_dir / "native_fault.log").string();
+  {
+    FILE* previous = fopen(fault_log_path.c_str(), "rb");
+    if (previous) {
+      char buffer[1024];
+      size_t read_count;
+      while ((read_count = fread(buffer, 1, sizeof(buffer) - 1, previous)) > 0) {
+        buffer[read_count] = '\0';
+        HXLOG("native_fault[prev]: %{public}s", buffer);
+      }
+      fclose(previous);
+      truncate(fault_log_path.c_str(), 0);
+    }
+  }
+  const int fault_fd =
+      open(fault_log_path.c_str(), O_CREAT | O_WRONLY | O_APPEND, 0644);
+  if (fault_fd >= 0) {
+    xe::SetExceptionHandlerDiagnosticFd(fault_fd);
+    // Self-test: proves the sink is wired up before any real fault happens.
+    xe::WriteExceptionDiagnostic("OHOS-diag-selftest\n");
+    HXLOG("HX360E boot: native fault log fd=%{public}d", fault_fd);
+  }
+
   xe::arm64::InitFeatureFlags();
 
   // ---- 启动 UI 线程：创建 app context + window + 主循环 ----
@@ -202,6 +265,14 @@ void BootThread() {
   }
 
   // ---- 用窗口创建并启动内核 ----
+  {
+    // 上一次运行可能还留着实例（例如它没有正常结束），先释放其地址空间。
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (g_emulator) {
+      HXLOG("HX360E boot: tearing down previous emulator before boot");
+      g_emulator.reset();
+    }
+  }
   auto emulator = std::make_unique<xe::Emulator>("", storage, content, cache);
   xe::X_STATUS result = emulator->Setup(
       window, /*imgui_drawer=*/nullptr, /*require_cpu_backend=*/true,
@@ -387,6 +458,47 @@ std::string DeviceInfo() {
   info += " storage=";
   info += cvars::storage_root.string();
   return info;
+}
+
+// ---------------------------------------------------------------------------
+// 输入（Phase 4）：覆盖层 / NAPI 与物理手柄都汇总到 OhosInputDriver。
+// ---------------------------------------------------------------------------
+void PadKey(int key_index, bool pressed, int value) {
+  OhosInputDriver* driver = g_input_driver.load();
+  if (!driver) {
+    return;
+  }
+  if (value < -32768) {
+    value = -32768;
+  } else if (value > 32767) {
+    value = 32767;
+  }
+  driver->OnKey(key_index, pressed, static_cast<short>(value));
+}
+
+void PadReleaseAll() {
+  OhosInputDriver* driver = g_input_driver.load();
+  if (driver) {
+    driver->ReleaseAll();
+  }
+}
+
+bool PadStartPhysical() {
+  OhosInputDriver* driver = g_input_driver.load();
+  if (!driver) {
+    return false;
+  }
+  driver->StartPhysicalGamepad();
+  return true;
+}
+
+bool PadStopPhysical() {
+  OhosInputDriver* driver = g_input_driver.load();
+  if (!driver) {
+    return false;
+  }
+  driver->StopPhysicalGamepad();
+  return true;
 }
 
 }  // namespace hx360e

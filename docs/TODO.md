@@ -1,7 +1,7 @@
 # HX360E 开发任务清单（TODO）
 
 > 关联文档：[DESIGN.md](./DESIGN.md)（实施设计）、[鸿蒙移植可行性分析报告](./鸿蒙移植可行性分析报告.md)（可行性论证）、[phase0-result.md](./phase0-result.md)（Phase 0 实测）
-> 最后更新：2026-09-10
+> 最后更新：2026-09-10（含本轮：画面已出来 + 崩溃修复清单 + 诊断设施，见「交接快照」）
 
 ---
 
@@ -31,14 +31,19 @@
 >
 > UI 只做最简形态：一个 XComponent 全屏 + 一个"选文件并启动"按钮 + FPS 显示。**不做**游戏库、设置、安装器、虚拟手柄等界面。
 >
-> 以下阶段**本阶段全部跳过**，用 nop 或空壳占位：
-> - Phase 3 音频 → 用 `xenia-apu-nop`
-> - Phase 4 输入 → 用 `xenia-hid-nop` + `keyEvent` 空壳
-> - Phase 5 完整 NAPI → 只实现 2.5 列出的最小集
+> 以下阶段**本阶段用 nop 或空壳占位**（实际进度见括号）：
+> - Phase 3 音频 → 用 `xenia-apu-nop`（**仍未做；用户判断可能正是 guest 停在"按 Start"的原因之一**）
+> - Phase 4 输入 → ~~用 `xenia-hid-nop` + `keyEvent` 空壳~~（**已提前实现**：GameControllerKit 物理手柄 + 屏幕覆盖层）
+> - Phase 5 完整 NAPI → 只实现 2.5 列出的最小集（**未做 config / 内容管理 / 提示轮询**）
 > - Phase 6 安装器 → 用 picker 选文件直接启动（临时）
 > - Phase 7 完整 UI → 只做 2.5 的最小页面
 >
 > 验收标准：**画面出现并持续呈现，FPS 可测量**。
+>
+> **当前实际状态（2026-09-10）**：画面已出现（Xbox logo / 游戏标题 / 加载画面），
+> 整类崩溃已修完；**唯一阻塞是 guest 按 Start 后不再前进**（被 park 在轮询循环里等
+> 一个永不产生的值）。因此下一步会同时展开：**Phase 3 音频**、**Phase 5 的 config/内容
+> NAPI**、以及 GPU 写回/中断链路的排查 —— 见「交接快照 D/F」。
 
 ---
 
@@ -46,15 +51,16 @@
 
 | Phase | 目标 | 验收标志 | 预估 | 状态 |
 | --- | --- | --- | --- | --- |
-| **0** | 技术验证 | 5 项 spike 通过 | 2–4 周 | `[ ]` |
-| **1** | 工程骨架 + 内核编译 | `libhx360e.so` 能编译、dlopen、加载 XEX | 1–1.5 人月 | `[~]` |
-| **2** | **图形跑通（当前焦点）** | 游戏画面持续呈现 | 1.5–2 人月 | `[~]` |
-| **3** | 音频 | 有声音、无爆音 | 1 人月 | `[ ]` |
-| **4** | 输入 | 手柄 + 触摸可操作 | 1 人月 | `[ ]` |
+| **0** | 技术验证 | 5 项 spike 通过 | 2–4 周 | `[~]`（0.1 / 0.2 通过；0.3–0.5 未做） |
+| **1** | 工程骨架 + 内核编译 | `libhx360e.so` 能编译、dlopen、加载 XEX | 1–1.5 人月 | `[~]`（编译/boot/加载均已跑通） |
+| **2** | **图形跑通（当前焦点）** | 游戏画面持续呈现 | 1.5–2 人月 | `[~]`（画面已出来；2.6 未过） |
+| **3** | 音频 | 有声音、无爆音 | 1 人月 | `[ ]`（当前 `--apu=nop`） |
+| **4** | 输入 | 手柄 + 触摸可操作 | 1 人月 | `[~]`（物理手柄 + 覆盖层基础版已完成，待真手柄实测） |
 | **5** | NAPI 完整桥接 | 配置 / 内容 / 提示全通 | 1 人月 | `[ ]` |
 | **6** | 安装器 + 存储 | 安装 → 游玩 → 卸载闭环 | 1–1.5 人月 | `[ ]` |
 | **7** | 完整 UI | 全部页面可用 | 2–3 人月 | `[ ]` |
 | **8** | 优化与发布 | 上架 | 2–4 人月 | `[ ]` |
+
 
 ---
 
@@ -64,8 +70,9 @@
 
 ### A. 一句话状态
 
-**内核已在鸿蒙真机上编译、boot、并执行 guest 代码；Vulkan 呈现链路已端到端打通
-（swapchain 建好、GPU 命令处理器在跑）。当前目标：解决「黑屏」与「guest 运行数秒后崩溃」。**
+**内核已在鸿蒙真机编译、boot，并跑通 Limbo 到「按 Start」画面；Vulkan 呈现链路端到端打通
+（真机上已看到 Xbox logo 与游戏标题界面）。此前的一整类崩溃已全部修掉。
+当前唯一阻塞：guest 主线程被 park 在轮询循环里等一个永不产生的值 —— 按 Start 后无法继续。**
 
 ### B. 工程与源码布局（关键）
 
@@ -75,42 +82,110 @@
 | 上游 fork（含全部 OHOS 补丁，**未提交**） | `D:\Code\OpenSource\XenDroid`（main @ `779680a`） |
 | xenia 源码树 | `<fork>/emulator-core/src/main/cpp/xenia` |
 | 集成方式 | `entry/src/main/cpp/CMakeLists.txt` 的 `XE_XENDROID_ROOT` 缓存变量 → `add_subdirectory(... EXCLUDE_FROM_ALL)` |
-| fork 补丁存档 | `patches/harmony/xendroid-ohos-fork.diff` + `patches/harmony/xbyak_aarch64.diff` |
+| fork 补丁存档 | `patches/harmony/xendroid-ohos-fork.diff` + `patches/harmony/xbyak_aarch64.diff`（**已过期，需重新导出**，见附录 D） |
 
-**构建**：`build_project`（hvigor）→ `entry/build/.../libentry.so`；全量约 10–17 分钟，增量几秒。
-顶层 CMake：`entry/src/main/cpp/CMakeLists.txt`；仅 `arm64-v8a`；`cppFlags=--std=c++20`；`XENIA_ENABLE_LTO=OFF`。
+**构建**：`build_project`（hvigor）→ `entry/build/.../libentry.so`；**增量约 7–25 秒**，
+全量（首次 / 清缓存）约 10–17 分钟。debug 构建的 native 编译是 **`-O0 -g`**（见下），
+顶层 CMake：`entry/src/main/cpp/CMakeLists.txt`；仅 `arm64-v8a`；`cppFlags=--std=c++20`；
+`XENIA_ENABLE_LTO=OFF`；`entry/build-profile.json5` 的 debug 已设 `debugSymbol.strip=false`
+（否则设备端崩溃栈没有符号名）。
 
 **真机**：HUAWEI MateBook Pro S（2in1），Maleoon 935，Vulkan 1.3.309，HarmonyOS 6.1.1(24)。
 `hdc -t 192.168.31.208:46435`；设备下载目录 `/storage/media/100/local/files/Docs/Download/`。
 
 ### C. 已完成（详见下方各 Phase）
 
-- **Phase 0**：0.1 JIT（匿名 RW→mprotect RX）、0.2 Vulkan 表面 ✅；0.3/0.4/0.5 未做。
-- **Phase 1**：内核编译/boot、NAPI 启动层、沙箱安装（picker→分块拷贝→启动）；真机跑通 Limbo（STFS/GOD）。
-- **Phase 2（进行中）**：Vulkan 呈现链路打通（`VK_OHOS_surface` + `vkCreateSurfaceOHOS` +
-  `OhosWindow`/`OhosWindowedAppContext` + swapchain `1324x2090`），guest 已进入 GPU 命令处理器并调用 `VdSwap`。
+- **Phase 0**：0.1 JIT（匿名 RW→mprotect RX）、0.2 Vulkan 表面 ✅。0.3 音频 / 0.4 GPU 能力 /
+  0.5 存储 未做（决策门已由 0.1/0.2 通过）。**新结论**：memfd 双视图在本设备不可行
+  （`mprotect(PROT_EXEC)` 对文件映射返回 `EACCES`，见附录 F 的探针）。
+- **Phase 1**：内核编译/boot、NAPI 启动层、沙箱安装（picker→分块拷贝→启动）；
+  真机跑通 Limbo（STFS/GOD）。
+- **Phase 2**：2.1–2.5 实质完成（XComponent 桥接走 `attachSurface` 而非独立
+  `xcomponent_bridge`；`OHOSNativeWindowSurface`、`OhosWindow`/`OhosWindowedAppContext`、
+  Vulkan presenter/swapchain、最小 NAPI+UI）。**已能看到画面**（Xbox logo、游戏标题/加载画面）。
+  2.6 验收未过（见 D）。
+- **Phase 4（输入，提前完成基础版）**：`OhosInputDriver`（OHOS GameControllerKit 物理手柄：
+  14 按键 + 5 组轴注册、摇杆死区、扳机模拟量）+ NAPI `keyEvent/padReleaseAll/padStartPhysical/
+  padStopPhysical` + ArkTS 屏幕覆盖层（D-Pad/ABXY/LB·RB/LT·RT/Back·Start/L3·R3/双摇杆）。
+- **诊断设施**：crash-safe `native_fault.log`（信号处理器内只用 `write(2)`，不丢行；下次启动
+  回显到 hilog）+ 应用内「导出日志到 Download」按钮（合并 `native_fault.log` 尾 256KB 与
+  `xe.log` 尾 4MB，走系统另存为）。
 
 ### D. 已知问题（当前焦点）
 
-1. **黑屏**：swapchain 建好、guest 调了 `VdSwap`，但无画面。
-2. **guest 崩溃**（SIGSEGV SEGV_ACCERR，Guest CPU 0）：
-   - xenia exception handler 已捕获并打印 `Access Violation: read at 0x...` / `Guest crashed at PC 0x...`；
-   - 栈：`GuestFunction::Call`（执行 JIT guest 代码时崩）；
-   - 崩溃前 watchdog：`no guest frame presented in 2000 watchdog ticks`，主线程空转、其余线程阻塞（疑似等 GPU/VBlank 中断）；
-   - **切 null→vulkan GPU 后仍崩**，故不纯是 GPU 后端问题。
+1. **guest 停在「按 Start」**（唯一阻塞）：
+   - watchdog 原话：`no guest frame presented in 2000 watchdog ticks ... Every fiber below is
+     waiting on something none of them is producing`；
+   - 主线程 guest `lr≈0x824EB77C` 空转，其余线程阻塞在事件上（deadline 22 / -1 / -1）；
+   - `MemoryPollPark` 被 park 的循环：guest `0x82521C4C`(×60)、`0x8219FA68`、`0x821C7BD0`、
+     `0x82138900`、`0x8219F9B0`、`0x821C7B18`；
+   - 协作信号里周期发生的只有 host 侧 `F8000024`（by_tid=0xFFFFFFFF）与线程 `F800001C` 的
+     `F8000034` → guest 在等一个没人产生的值（大概率 GPU fence/写回）。
+   - **注意**：此前"按 Start 闪一下回标题"的那批崩溃已修掉（见 E 的修复清单），现在不再崩溃，
+     是**稳定的卡住**。
+2. **尚未实现的机制**（怀疑会影响 guest 行为）：
+   - Phase 3 音频未做（`--apu=nop`）；XMA/音频时钟；
+   - Phase 5 的 config / 内容管理 / guest 提示轮询 NAPI 未做；
+   - 部分内核导出仍是 stub。
+3. **次要/待确认**：
+   - `MapFileView failed: base=... prot=0x3 flags=0x11 errno=14`（1 条，需确认是否当前运行产生）；
+   - `BaseHeap::AllocFixed attempting commit on unreserved page` ×3；
+   - `PM4: predicated skip of sync packet opcode=46/54` ×49（多为无害）；
+   - `sched_setscheduler set FIFO failed`（GPU 驱动侧，预期内，见 Q9）。
+4. **临时诊断改动**（收尾时清理或明确保留）：`native_fault.log` 全套记录、`OHOS-*` 日志、
+   `SIG_DFL` 上限（8 次后终止）、`fault-enter` 上限 512、翻译线程栈 32 MiB。
 
-**排查建议**：
-- 拿完整 guest crash report（PC/LR/寄存器/callstack）：`hilog -x | grep -A60 'Guest crashed'`，或从 `filesDir/logs/xe.log` / faultlog 取。
-- 查 presenter 是否真在画：`VulkanPresenter` paint 线程、`RefreshGuestOutput`、swapchain acquire/present。
-- 桌面 Xenia 对照：用 `D:\Code\OpenSource\XenDroid` 跑 Limbo，判断是否上游兼容性问题。
-- 关注 `VdSetGraphicsInterruptCallback` / GPU 中断是否被触发。
+### E. 本轮修复清单（**重要，均已真机验证行为变化**）
 
-### E. 下一步（建议顺序）
+> 这些是 fork 侧的改动，全部未提交到 fork，务必随补丁一起保存（附录 D）。
 
-1. **保存 fork 补丁**（提交 fork 或备份 `patches/harmony/`）——最高优先。
-2. 定位 guest 崩溃（完整 crash report + 桌面对照）。
-3. 定位黑屏（presenter paint / swapchain / GPU 中断）。
-4. 回到 Phase 2.6 验收（画面持续呈现、FPS、前后台切换）。
+1. `cpu/backend/code_cache_base.h`
+   - `EnsureCommitted()`：OHOS 下走 RWX 分支会把整段代码缓存重保护、抹掉已放置代码的 X →
+     OHOS 下改为 no-op；
+   - `PlaceGuestCode`/`PlaceData`：**每次放置从新页开始**（页对齐），保证 W→X 翻转不会摘掉
+     正在被其它线程执行的页的 X（这是 `SIGSEGV SEGV_ACCERR`、ESR `EC=0x20` 取指异常的根因）；
+   - OHOS 分支补一条 crash-safe 的 `OHOS-regions:` 记录（代码缓存/间接表基址）。
+2. `memory.cc`
+   - `PhysicalHeap::TriggerCallbacks`：`!any_watched` 且簿记说 RW 时，返回"重试"前**主动恢复
+     宿主机 RW**；
+   - **`host_address_offset()` 漏算（三处）**：`TriggerCallbacks` 的 unprotect 块、
+     `EnableAccessCallbacksInner`（上锁侧）、read-watch 降级块。vE0000000 的
+     `host_address_offset` 就是那个 **4KB 偏移**，漏算会保护/解除"错一页"，导致
+     `any_watched=false` 但页确实只读 → fault 循环（`OHOS-TC-refuse guest_access=3`）；
+   - `Memory::AccessViolationCallback`：`LookupHeap` 对 GPU 写回窗口 `[0x7F000000,0x80000000)`
+     返回 nullptr → 信号处理器里空指针解引用；改为重定向到 `vA0000000` 别名，并把窗口自身页
+     `mprotect(RW)`。
+3. `base/exception_handler_posix.cc`
+   - 新增 crash-safe 诊断 sink（`SetExceptionHandlerDiagnosticFd` /
+     `WriteExceptionDiagnostic`，纯 `write(2)`）；
+   - 兜底不再无限链式（超过上限走 `SIG_DFL`），避免无限刷平台 DFX；
+   - 信号处理器路径**移除会 malloc 的 XELOG**（曾疑似造成 musl `malloc` 堆破坏）。
+4. `base/logging.cc`：OHOS 是 `#elif` 分支，`#else` 的文件/标准输出 sink **根本没编译**
+   → `xe.log` 一直没写（只有旧构建残留）。现补上文件 sink，`xe.log` 恢复写入。
+5. `gpu/vulkan/vulkan_pipeline_cache.cc`：着色器翻译线程栈 4 MiB → **32 MiB**（`-O0` 构建帧大，
+   glslang `Builder::dump` 递归遍历 CFG 会爆栈，表现为 `SEGV_MAPERR` 在
+   `spv::Instruction::dump`）。
+6. `xendroid_ohos/ohos_emulator.cc`
+   - 所有退出路径释放 `Emulator`（它持有 4.5GB guest 地址空间；否则第二次按「启动」会在
+     `Memory::Initialize()` 的 `MapViews` 上 `assert_always()` → `SIGTRAP`）；
+   - `config::SetupConfig()` 提到日志初始化**之前**（否则它会把 `log_append` 覆盖回 false，
+     每次 boot 截断 `xe.log`）；
+   - 启动时回显上次的 `native_fault.log`。
+7. 输入（新增文件）：`xendroid_ohos/ohos_input_driver.{h,cc}`；CMake 链接
+   `libohgame_controller.z.so`。
+8. `entry/build-profile.json5`：debug 的 `nativeLib.debugSymbol.strip = false`。
+
+### F. 下一步（建议顺序）
+
+1. **试 `--park_memory_poll_loops=false`**（`Index.ets` 的 `bootGame()` 加参数，一轮增量构建）：
+   判断是"park 机制把 guest 锁死"还是"guest 真在等 GPU 永不产生的值"。
+2. 若仍自旋 ⇒ 查 GPU 写回/中断链：presenter 的 present 时机、`VdSwap` 完成路径、
+   `VdSetGraphicsInterruptCallback` / GPU 中断是否触发、swapchain acquire/present。
+3. 对照 Android（`XE_PLATFORM_xendroid` 分支在 OHOS 同样生效，见附录 D 的对照清单）核对
+   未实现机制：audio（Android 用 aaudio，我们 nop）、xma、以及 config/content NAPI。
+4. 补 Phase 3（OHAudio）与 Phase 5 的 config / 内容管理 NAPI，再看 guest 是否继续。
+5. 收尾：重新导出 `patches/harmony/*.diff`；清理或保留临时诊断（D.4）。
+
 
 ---
 
@@ -332,33 +407,38 @@ mprotect(PROT_READ|PROT_EXEC)                      // 切 RX
 > - presenter 连接、**swapchain 创建成功**（`1324x2090`，format 37，present mode 1）
 > - guest 已进入 GPU 命令处理器（`CP: scratch writeback`），并调用 `VdSwap`
 >
-> 待解决：画面仍黑屏、guest 运行数秒后崩溃（guest 内存读违规）。watchdog 显示
-> guest 主线程在事件循环里空转、其余线程阻塞——疑似 GPU 中断/VBlank 或同步语义问题。
+> **进展（2026-09-10 后续）**：**画面已出来**（真机看到 Xbox logo 与游戏标题/加载画面）；
+> 此前的整类崩溃已修完 —— 取指权限错误（代码缓存 W^X）、guest 内存写权限（
+> `host_address_offset` 漏算）、glslang SPIR-V dump 爆栈、重复启动 `SIGTRAP`，详见
+> 「交接快照 E. 本轮修复清单」。
+>
+> **待解决（唯一阻塞）**：按 Start 后 guest 不再前进 —— watchdog 报"每个 fiber 都在等没人
+> 产生的东西"，主线程被 `MemoryPollPark` 停在 guest `0x82521C4C` 等轮询循环里。
+> 不是崩溃，是稳定的卡住。详见「交接快照 D. 已知问题」。
 
-### 2.1 XComponent 桥接 `[P0]`
+### 2.1 XComponent 桥接 `[P0]` ✅（改用 surfaceId 方案）
 
-- [ ] `xendroid_ohos/xcomponent_bridge.h/.cc`：
-  - [ ] `napi_get_named_property(env, exports, OH_NATIVE_XCOMPONENT_OBJ, ...)` 拿到原生对象
-  - [ ] `napi_unwrap` 取 `OH_NativeXComponent*`
-  - [ ] 注册 `OH_NativeXComponent_Callback`（Created / Changed / Destroyed / DispatchTouchEvent）
-  - [ ] `OnSurfaceCreated`：保存 `OHNativeWindow*`
-  - [ ] `OnSurfaceChanged`：`OH_NativeXComponent_GetXComponentSize` 取宽高
-  - [ ] `OnSurfaceDestroyed`：**同步**等待 GPU 排空后销毁 surface
-- [ ] ArkTS 侧：`XComponent({ id, type: XComponentType.SURFACE, libraryname: 'hx360e' })`
+- [x] 不新建 `xcomponent_bridge`，改为 ArkTS 侧 `XComponentController.getXComponentSurfaceId()`
+      → NAPI `attachSurface(id)` → native `OH_NativeWindow_CreateNativeWindowFromSurfaceId`
+      （Phase 0.2 已验证该路径比回调 `window` 参数可靠）
+- [x] `OnSurfaceCreated` 等价物：`AttachSurface` 保存 `OHNativeWindow*`（`HX360E: AttachSurface: window=…`）
+- [x] 尺寸：`OH_NativeWindow_NativeWindowHandleOpt(..., GET_BUFFER_GEOMETRY, ...)`（实测 `1324x2090`）
+- [ ] `OnSurfaceDestroyed`：同步等待 GPU 排空后销毁 surface（前后台切换，见 2.6）
+- [x] ArkTS：`XComponent({ id, type: XComponentType.SURFACE, controller })`
 
-### 2.2 Surface 实现 `[P0]`
+### 2.2 Surface 实现 `[P0]` ✅
 
-- [ ] **补丁 0006a**：`ui/surface.h` 新增 `kTypeIndex_OHOSNativeWindow`
-- [ ] `xendroid_ohos/surface_ohos.h/.cc`：`OHOSNativeWindowSurface : Surface`，实现 `GetSizeImpl`（参考上游 `surface_android.*`）
+- [x] **补丁 0006a**：`ui/surface.h` 新增 `kTypeIndex_OHOSNativeWindow`
+- [x] `ui/surface_ohos.h/.cc`（fork 内）：`OHOSNativeWindowSurface : Surface` + `GetSizeImpl`
 
-### 2.3 窗口与事件循环 `[P0]`
+### 2.3 窗口与事件循环 `[P0]` ✅
 
-- [ ] `xendroid_ohos/window_ohos.h/.cc`：
-  - [ ] `OhosWindow : xe::ui::Window`，实现 `OpenImpl` / `CreateSurfaceImpl` / `RequestPaintImpl`
-  - [ ] `OhosWindowedAppContext : xe::ui::WindowedAppContext`，`std::mutex` + `condition_variable` + 待执行队列
-  - [ ] `CallInUIThread()` 语义与上游一致（`NotifyUILoopOfPendingFunctions` 同步）
-  - [ ] `surface_attach` / `surface_detach` 的编组逻辑（参考上游 `xendroid_emu.cpp:861-925`）
-- [ ] 确认 `host_present_from_non_ui_thread` 的取值（上游强制 `true`，`xendroid_emu.cpp:335`）
+- [x] `xendroid_ohos/ohos_window.h/.cc`：
+  - [x] `OhosWindow : xe::ui::Window`（`OpenImpl` / `CreateSurfaceImpl` / `RequestPaintImpl`）
+  - [x] `OhosWindowedAppContext : xe::ui::WindowedAppContext`（mutex + condvar + 待执行队列）
+  - [x] `CallInUIThread()` 语义（`NotifyUILoopOfPendingFunctions`）
+  - [x] `UpdateSurface()`（surface 晚到时补 `OnSurfaceChanged` + `OnActualSizeUpdate`）
+- [x] `host_present_from_non_ui_thread = true`（presenter 自线程上屏，`RequestPaintImpl` 为空实现）
 
 ### 2.4 Vulkan 呈现 `[P0]`
 
@@ -366,25 +446,28 @@ mprotect(PROT_READ|PROT_EXEC)                      // 切 RX
 - [x] **补丁 0006c**：`ui/vulkan/vulkan_presenter.cc` 新增 `kTypeIndex_OHOSNativeWindow` case → `vkCreateSurfaceOHOS` + 类型探测
 - [x] CMake 加 `-DVK_USE_PLATFORM_OHOS`，链接 `xenia-gpu-vulkan` / `glslang-spirv`
 - [x] 验证 swapchain 创建（真机 `1324x2090` format 37）与 presenter 连接
-- [ ] 验证呈现循环（guest 调用了 `VdSwap`，但画面仍黑屏，待查）
+- [x] 验证呈现循环：**画面已出来**（Xbox logo、游戏标题/加载画面）—— 真机确认
+- [ ] FPS 可测量（`emulator.lastFrameTimeMs/instantFps/averageFps` 尚未实现，见 2.5）
 
-### 2.5 最小 NAPI 与 UI `[P0]`
+### 2.5 最小 NAPI 与 UI `[P0]` ✅（FPS 接口除外）
 
-- [ ] NAPI 最小集：
-  - [ ] `emulator.setupGamePath(path)`
-  - [ ] `emulator.setupLaunchArgs(args)`（含 `--storage_root` / `--config` / `--log_file`）
-  - [ ] `emulator.boot()` / `pause()` / `resume()` / `quit()`
-  - [ ] `emulator.isRunning()` / `isPaused()`
+- [x] NAPI 最小集：
+  - [x] `emulator.setupGamePath(path)`
+  - [x] `emulator.setupLaunchArgs(args)`
+  - [x] `emulator.boot()` / `pause()` / `resume()` / `quit()`
+  - [x] `emulator.isRunning()` / `isPaused()`
+  - [x] `emulator.deviceInfo()`（GPU / 驱动 / JIT 策略报告）
+  - [x] `emulator.probeFile(path)`（镜像头识别，诊断用）
+  - [x] `emulator.keyEvent(key, pressed, value)` + `padReleaseAll/padStartPhysical/padStopPhysical`
+        （**Phase 4 已实现**，不再是空壳）
   - [ ] `emulator.changeSurface(w, h)`
-  - [ ] `emulator.keyEvent(key, pressed, value)`（空壳，Phase 4 实现）
-  - [ ] `emulator.deviceInfo()`（GPU / 驱动 / JIT 策略报告）
   - [ ] `emulator.lastFrameTimeMs()` / `instantFps()` / `averageFps()`
-- [ ] `types/libhx360e/Index.d.ts` 最小声明
-- [ ] 最小 ArkTS 页面：
-  - [ ] 一个按钮 → picker 选文件（临时方案，Phase 6 换成正式安装器）
-  - [ ] 一个 XComponent 全屏
-  - [ ] 启动 / 暂停 / 退出按钮
-  - [ ] FPS 显示（验证渲染在跑）
+- [x] `types/libentry/Index.d.ts` 声明
+- [x] 最小 ArkTS 页面：
+  - [x] 按钮 → picker 选文件（临时方案，Phase 6 换成正式安装器）
+  - [x] XComponent 全屏
+  - [x] 启动 / 暂停 / 退出按钮、手柄覆盖层开关、**导出日志到 Download**
+  - [ ] FPS 显示（当前显示的是 Phase 0 的 `vulkanStatus()`，非内核帧率）
 
 ### 2.6 验收 `[P0]`
 
@@ -422,17 +505,26 @@ mprotect(PROT_READ|PROT_EXEC)                      // 切 RX
 
 > 目标：手柄 + 触摸可操作。参考 DESIGN.md §8。
 
-### 4.1 手柄 `[P1]`
+### 4.1 手柄 `[P1]` ✅ 基础完成
 
-- [ ] `xendroid_ohos/gamepad_ohos.h/.cc`：`OH_GamePad_*_RegisterButtonInputMonitor` / `RegisterAxisInputMonitor`
-- [ ] 逐按键注册 → 映射表 → `InputDriver::OnKey(idx, pressed, value)`
-- [ ] 复用 `xe_android_input_driver.cpp`（299 行，无 Android API 依赖），改名 `xe_ohos_input_driver.*`
-- [ ] 验证 XInput 语义映射（数字键 0–15 / 模拟半轴 16–23）
+- [x] `xendroid_ohos/ohos_input_driver.h/.cc`（不用单独 `gamepad_ohos`）：OHOS
+      `GameControllerKit`（`libohgame_controller.z.so`，API 21+）逐控件注册
+      —— 14 个按键 monitor + 5 组轴 monitor（D-Pad / 左右摇杆 / 左右扳机）
+- [x] 逐按键注册 → 映射表 → `InputDriver::OnKey(idx, pressed, value)`
+- [x] 按 `xe_android_input_driver.cpp` 结构移植（`OhosInputDriver : xe::hid::InputDriver`，
+      `EnumerateDevices()` 上报 1 个"始终存在"的手柄，让 InputSystem 自动绑定 P1）；
+      摇杆带死区、扳机给模拟量（`GetState` 里 `left/right_trigger` 用模拟值）
+- [x] NAPI：`emulator.keyEvent(keyIndex, pressed, value)` / `padReleaseAll` /
+      `padStartPhysical` / `padStopPhysical`
+- [ ] 验证 XInput 语义映射（数字键 0–15 / 模拟半轴 16–23）—— 需要真手柄 + 进游戏实测
 
-### 4.2 触摸与虚拟手柄 `[P1]`
+### 4.2 触摸与虚拟手柄 `[P1]`（简化版完成）
 
-- [ ] ArkTS Canvas 虚拟手柄（对应上游 `GamepadOverlay.kt` 643 行）
-- [ ] `GamepadEmitter.ets`：`emitDigital(code, pressed)` / `emitAxis(code, value)` → NAPI
+- [x] ArkTS 屏幕覆盖层（不用 Canvas）：D-Pad / ABXY / LB·RB / LT·RT / Back·Start /
+      L3·R3 / 左右摇杆 4 向，触摸 `Down/Up/Cancel` 直接驱动 `keyEvent`
+- [x] `键位索引表`：ArkTS `XPadKey` 与 native `OhosPadKey`（`ohos_input_driver.h`）顺序必须一致
+- [x] 覆盖层开关（`HitTestMode.None`，避免挡住下层按钮）
+- [ ] 摇杆模拟量（当前是 4 向满偏近似）
 - [ ] 多点触控 claim 机制、命中测试
 - [ ] 布局编辑模式（对应 `GamepadEditorScreen.kt` 328 行）`[P2]`
 
@@ -666,11 +758,17 @@ mprotect(PROT_READ|PROT_EXEC)                      // 切 RX
 | Q9 | `SCHED_FIFO` 实时优先级 | 1.x | 静默降级 |
 | Q10 | `/proc` 可见性 | 1.4 | 不可用则替代实现 |
 | Q11 | 上架审核 | 8.4 | 提前沟通 |
+| Q12 | guest 被 park 在轮询循环、按 Start 无法前进 | 2.6 | 先试 `--park_memory_poll_loops=false`；再查 GPU 写回/中断（见交接快照 F） |
+| Q13 | 文件映射上的 `mprotect(PROT_EXEC)` 被拒（`EACCES`） | 2.x | 已确认：双视图方案不可行，改用单块匿名 + 页对齐（已实施） |
+| Q14 | 未实现机制（audio=nop、config/content NAPI）是否影响 guest | 2.6 / 3.x / 5.x | 对照 Android（`XE_PLATFORM_xendroid` 分支在 OHOS 同样生效）逐项核对 |
 
 ## 附录 D：XenDroid fork 补丁清单（**未提交，务必保留**）
 
 > 已存档为 `patches/harmony/xendroid-ohos-fork.diff`（36 个修改 + 5 个新增）与
 > `patches/harmony/xbyak_aarch64.diff`（子模块内修复）。
+>
+> ⚠️ **该存档已过期**：2026-09-10 又改了一批（见 D.5），收尾时必须重新导出
+> （`git -C D:\Code\OpenSource\XenDroid diff > patches/harmony/xendroid-ohos-fork.diff`）。
 
 ### D.1 CMake / 平台选择
 
@@ -715,6 +813,28 @@ mprotect(PROT_READ|PROT_EXEC)                      // 切 RX
   （C++20 ranges / jthread / atomic_ref / clang15 结构化绑定 / AttributeKey 等）。
 - `tools/build/compile_shader_spirv.py`：`glslang_validator` 兼容 + `spirv-opt/dis` 可选降级。
 
+### D.5 崩溃修复 / 诊断（2026-09-10 追加，**未存档**）
+
+> 详细原因与证据见「交接快照 E. 本轮修复清单」，这里只列改动落点。
+
+- `cpu/backend/code_cache_base.h`：`EnsureCommitted` OHOS no-op；`PlaceGuestCode`/`PlaceData`
+  **页对齐**（每次放置从新页开始）；新增 crash-safe `OHOS-regions:` 记录。
+- `memory.cc`：`TriggerCallbacks` 无 watch 时强制恢复 RW；**`host_address_offset()` 补漏（3 处：
+  `TriggerCallbacks` unprotect 块、`EnableAccessCallbacksInner`、read-watch 降级块）**；
+  `AccessViolationCallback` 对 GPU 写回窗口 `[0x7F000000,0x80000000)` 的 `LookupHeap == nullptr`
+  做重定向 + 窗口页 mprotect(RW)；新增 crash-safe 诊断记录（`OHOS-TC-hit/refuse`、
+  `OHOS-forceRW`、`OHOS-AV-repeat`、`OHOS-window`）。
+- `base/exception_handler_posix.cc`：新增 crash-safe 诊断 sink
+  （`SetExceptionHandlerDiagnosticFd` / `WriteExceptionDiagnostic`，纯 `write(2)`）；
+  兜底超过 8 次走 `SIG_DFL`；入口/兜底/链式记录（`OHOS-fault-enter` 上限 512）；
+  **移除信号处理器内会 malloc 的 XELOG**。
+- `base/exception_handler.h`：上述两个 sink 接口声明。
+- `base/logging.cc`：OHOS 分支补回**文件 sink**（原来 `#elif` 导致 `xe.log` 从未写入）。
+- `gpu/vulkan/vulkan_pipeline_cache.cc`：着色器翻译线程栈 4 MiB → **32 MiB**。
+- `xendroid_ohos/`（HX360E 侧，不在 fork）：`ohos_emulator.cc` 的 Emulator 释放、
+  `SetupConfig` 顺序、`native_fault.log` 回显；新增 `ohos_input_driver.{h,cc}`。
+- `entry/build-profile.json5`（HX360E 侧）：debug `nativeLib.debugSymbol.strip=false`。
+
 > **预生成产物**（git-ignored，换机需重新生成）：
 > `gpu/shaders/bytecode/vulkan_spirv/`（214 个）+ `ui/shaders/bytecode/vulkan_spirv/`（12 个），
 > 用 OHOS SDK 的 `glslang_validator.exe` 跑 `gen_android_spirv.py` 生成。
@@ -723,17 +843,18 @@ mprotect(PROT_READ|PROT_EXEC)                      // 切 RX
 
 ```
 entry/src/main/cpp/
-├── CMakeLists.txt                 # 集成 xenia；XE_XENDROID_ROOT；链接 xenia-gpu-vulkan
-├── napi_init.cpp                  # NAPI 模块 + XComponent 桥接 + emulator 对象
-├── jit_probe.cpp/.h               # Phase 0 JIT 探测
+├── CMakeLists.txt                 # 集成 xenia；XE_XENDROID_ROOT；链接 xenia-gpu-vulkan + libohgame_controller
+├── napi_init.cpp                  # NAPI 模块 + XComponent 桥接 + emulator 对象 + memfd 双视图探针
+├── jit_probe.cpp/.h               # Phase 0 JIT 探测 + `RunMemfdTwoViewProbe()`
 ├── vulkan_context.cpp/.h          # Phase 0 呈现 spike（Phase 2 起不用于游戏画面）
-├── types/libentry/Index.d.ts      # NAPI 类型声明
+├── types/libentry/Index.d.ts      # NAPI 类型声明（含 emulator.keyEvent/pad* ）
 └── xendroid_ohos/
-    ├── ohos_emulator.h/.cc        # 启动层：UI 线程 + Emulator Setup/Launch
+    ├── ohos_emulator.h/.cc        # 启动层：UI 线程 + Emulator Setup/Launch + native_fault.log
     ├── ohos_window.h/.cc          # OhosWindow + OhosWindowedAppContext + OHNativeWindow surface
+    ├── ohos_input_driver.h/.cc    # OhosInputDriver（GameControllerKit 物理手柄）+ OhosPadKey 索引表
     ├── file_picker_ohos.cc        # FilePicker::Create 桩
     └── system_ohos.cc             # ShowSimpleMessageBox/SetProcessPriorityClass 等桩
-entry/src/main/ets/pages/Index.ets # 选文件→安装到沙箱→启动；扫描恢复已安装游戏
+entry/src/main/ets/pages/Index.ets # 选文件→安装到沙箱→启动；手柄覆盖层；导出日志到 Download
 ```
 
 启动参数（`setupLaunchArgs`）：
@@ -742,17 +863,41 @@ entry/src/main/ets/pages/Index.ets # 选文件→安装到沙箱→启动；扫�
 --storage_root=<filesDir>/storage
 --content_root=<storage>/content
 --cache_root=<storage>/cache
---gpu=vulkan        # 排查黑屏时可临时切 --gpu=null
---apu=nop
---hid=nop
+--gpu=vulkan        # 排查呈现问题时可临时切 --gpu=null
+--apu=nop           # Phase 3 未做
+--hid=nop           # 实际输入驱动由 CreateInputDrivers() 直接提供（nop 仅占位）
 ```
 
 ## 附录 F：常用命令
 
 ```powershell
-build_project                                   # 构建（或 hvigor assembleHap）
+# ---- 构建 / 运行 ----
+build_project                                   # 构建（或 hvigor assembleHap）；增量约 7–25 秒
 start_app --hvd "HUAWEI MateBook Pro S"         # 安装启动
+hdc -t <sn> shell "aa start -a EntryAbility -b com.sddswsf.hx360e"   # 重启应用（不重装）
 hdc -t <sn> shell "aa force-stop com.sddswsf.hx360e"
 hdc -t <sn> shell "hilog -r"                    # 清日志后重跑（排查崩溃）
-& "<BiSheng>\bin\llvm-addr2line.exe" -f -C -e libentry.so 0xADDR ...   # 符号化崩溃栈
+
+# ---- 看上游内核日志（xe.log 已恢复写入；也可直接看 hilog）----
+hdc -t <sn> shell "hilog -x" | Select-String 'sddswsf.hx360e/HX360E'
+# 行内 i>/w>/!> 为级别，`f:0000000 F8000008` 为函数 id + guest 线程 handle
+
+# ---- 崩溃符号化（用未 strip 的 .so；设备端栈也已带符号）----
+& "<DevEco>\sdk\default\openharmony\native\llvm\bin\llvm-addr2line.exe" -f -C -e `
+  "entry\build\default\intermediates\cmake\default\obj\arm64-v8a\libentry.so" 0xADDR ...
+
+# ---- 取"导出日志"（应用内第 4 行按钮写的文件；Download 可被 shell 读取）----
+hdc -t <sn> shell "ls -t /storage/media/100/local/files/Docs/Download/ | grep hx360e-log"
+hdc -t <sn> file recv "/storage/media/100/local/files/Docs/Download/hx360e-log-<ts>.txt" .
+
+# ---- 应用内 diagnostics 记录（crash-safe，信号处理器内 write(2)）----
+# native_fault.log 关键记录：OHOS-regions / OHOS-TC-hit / OHOS-TC-refuse /
+# OHOS-forceRW / OHOS-AV-repeat / OHOS-window / OHOS-fault-enter / OHOS-unhandled
 ```
+
+**JIT / 可执行内存探针结论（真机实测，重要）**
+- 可用：匿名 `mmap(RW)` → 写 → `mprotect(PROT_READ|PROT_EXEC)` → 执行（Phase 0 策略①）。
+- **不可用**：`mmap(PROT_EXEC)` 匿名（`EINVAL`，需 `MAP_EXECUTABLE`，而后者会被内核剥离 W）；
+  **文件映射（memfd）上的 `mprotect(PROT_EXEC)` 返回 `EACCES`（errno 13）** ⇒ 上游"独立 RW 写视图 +
+  RX 执行视图"的双视图方案在本设备**不可行**（应用内 `RunMemfdTwoViewProbe()` 每次启动都会打印
+  `memfd2v: ...` 结果，可直接查看）。

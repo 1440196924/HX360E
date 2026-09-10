@@ -32,6 +32,11 @@ export interface EmulatorApi {
   isPaused(): boolean;
   deviceInfo(): string;
   probeFile(path: string): string;
+  /** keyIndex 见 XPadKey；value 为摇杆 [-32767,32767] 或扳机 [0,255]。 */
+  keyEvent(keyIndex: number, pressed: boolean, value: number): void;
+  padReleaseAll(): void;
+  padStartPhysical(): boolean;
+  padStopPhysical(): boolean;
 }
 
 export const jitProbe: () => JitProbeResult;

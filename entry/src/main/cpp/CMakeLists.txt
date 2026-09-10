@@ -49,6 +49,7 @@ add_library(entry SHARED
         jit_probe.cpp
         vulkan_context.cpp
         xendroid_ohos/ohos_emulator.cc
+        xendroid_ohos/ohos_input_driver.cc
         xendroid_ohos/ohos_window.cc
         xendroid_ohos/file_picker_ohos.cc
         xendroid_ohos/system_ohos.cc
@@ -68,6 +69,9 @@ target_link_libraries(entry PUBLIC
         libnative_vsync.so
         libvulkan.so
         libhilog_ndk.z.so
+        # GameControllerKit（物理手柄，OHOS API 21+）。设备不支持时注册函数
+        # 返回错误码，不影响启动。
+        libohgame_controller.z.so
 
         # ---- XenDroid / Xenia 内核（Phase 1：null GPU 后端）----
         xenia-apu

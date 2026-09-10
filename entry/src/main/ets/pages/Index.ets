@@ -1,9 +1,40 @@
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { picker, fileIo as fs } from '@kit.CoreFileKit';
+import { util } from '@kit.ArkTS';
 import testNapi from 'libentry.so';
 
 const DOMAIN = 0x0000;
 const TAG = 'HX360E';
+
+/**
+ * 手柄控件索引，顺序必须与 native 侧 OhosPadKey（ohos_input_driver.h）一致。
+ */
+class XPadKey {
+  static readonly DpadLeft: number = 0;
+  static readonly DpadUp: number = 1;
+  static readonly DpadRight: number = 2;
+  static readonly DpadDown: number = 3;
+  static readonly A: number = 4;
+  static readonly B: number = 5;
+  static readonly X: number = 6;
+  static readonly Y: number = 7;
+  static readonly Back: number = 8;
+  static readonly Start: number = 9;
+  static readonly LShoulder: number = 10;
+  static readonly RShoulder: number = 11;
+  static readonly LThumbPress: number = 12;
+  static readonly RThumbPress: number = 13;
+  static readonly LTrigger: number = 14;
+  static readonly RTrigger: number = 15;
+  static readonly LThumbLeft: number = 16;
+  static readonly LThumbUp: number = 17;
+  static readonly LThumbRight: number = 18;
+  static readonly LThumbDown: number = 19;
+  static readonly RThumbLeft: number = 20;
+  static readonly RThumbUp: number = 21;
+  static readonly RThumbRight: number = 22;
+  static readonly RThumbDown: number = 23;
+}
 
 /**
  * Phase 1.7 页面：把本地游戏文件复制到沙箱，然后启动内核（headless，无画面）。
@@ -22,6 +53,9 @@ struct Index {
   @State running: boolean = false;
   @State paused: boolean = false;
   @State busy: boolean = false;
+  @State padVisible: boolean = true;
+  @State padPhysical: boolean = false;
+  @State exportStatus: string = '';
   private pollTimer: number = -1;
   private attachTimer: number = -1;
   private xcompController: XComponentController = new XComponentController();
@@ -256,6 +290,124 @@ struct Index {
     }
   }
 
+  // ---- 手柄输入（Phase 4）----
+
+  // 摇杆方向 / 扳机需要带模拟值，其余按键只需按下与否。
+  private keyValue(key: number): number {
+    if (key === XPadKey.LTrigger || key === XPadKey.RTrigger) {
+      return 255;
+    }
+    if (key === XPadKey.LThumbLeft || key === XPadKey.LThumbDown ||
+      key === XPadKey.RThumbLeft || key === XPadKey.RThumbDown) {
+      return -32767;
+    }
+    if (key === XPadKey.LThumbRight || key === XPadKey.LThumbUp ||
+      key === XPadKey.RThumbRight || key === XPadKey.RThumbUp) {
+      return 32767;
+    }
+    return 0;
+  }
+
+  padPress(key: number, pressed: boolean): void {
+    try {
+      testNapi.emulator.keyEvent(key, pressed, this.keyValue(key));
+    } catch (e) {
+      hilog.error(DOMAIN, TAG, 'keyEvent failed: %{public}s', JSON.stringify(e));
+    }
+  }
+
+  padTogglePhysical(): void {
+    try {
+      if (this.padPhysical) {
+        testNapi.emulator.padStopPhysical();
+        this.padPhysical = false;
+      } else {
+        this.padPhysical = testNapi.emulator.padStartPhysical();
+      }
+    } catch (e) {
+      hilog.error(DOMAIN, TAG, 'gamepad toggle failed: %{public}s', JSON.stringify(e));
+    }
+  }
+
+  // ---- 日志导出（沙箱内的运行日志 → 用户选择的目录，默认 Download）----
+
+  // 读取文件尾部 maxBytes 字节。按块显式给 offset 读（本设备上不传 offset 的
+  // 读语义不可靠），并在首行写出真实文件大小，便于确认拿到的确实是尾部。
+  readLogTail(path: string, maxBytes: number): string {
+    try {
+      if (!fs.accessSync(path)) {
+        return `(no such file: ${path})\n`;
+      }
+      const f = fs.openSync(path, fs.OpenMode.READ_ONLY);
+      try {
+        const size: number = fs.statSync(f.fd).size;
+        const want: number = Math.min(maxBytes, size);
+        const decoder = util.TextDecoder.create('utf-8');
+        const chunkSize: number = 64 * 1024;
+        const buf = new ArrayBuffer(chunkSize);
+        const parts: string[] = [];
+        let offset: number = size - want;
+        let read: number = 0;
+        while (read < want) {
+          const len: number = Math.min(chunkSize, want - read);
+          const n: number = fs.readSync(f.fd, buf, { offset: offset, length: len });
+          if (n <= 0) {
+            break;
+          }
+          parts.push(decoder.decodeToString(new Uint8Array(buf, 0, n)));
+          read += n;
+          offset += n;
+        }
+        return `# ${path} size=${size} tail=${read}\n${parts.join('')}`;
+      } finally {
+        fs.closeSync(f);
+      }
+    } catch (e) {
+      hilog.error(DOMAIN, TAG, 'readLogTail failed: %{public}s', JSON.stringify(e));
+      return `(read failed: ${path})\n`;
+    }
+  }
+
+  async exportLogs(): Promise<void> {
+    if (this.busy) {
+      return;
+    }
+    this.busy = true;
+    this.exportStatus = '正在导出日志…';
+    try {
+      const ctx = getContext(this);
+      const logDir: string = `${ctx.filesDir}/logs`;
+      let text: string = `HX360E logs ${new Date().toISOString()}\n`;
+      text += '===== native_fault.log (tail 256KB) =====\n';
+      text += this.readLogTail(`${logDir}/native_fault.log`, 256 * 1024);
+      text += '\n===== xe.log (tail 4MB) =====\n';
+      text += this.readLogTail(`${logDir}/xe.log`, 4 * 1024 * 1024);
+
+      const options = new picker.DocumentSaveOptions();
+      options.newFileNames = [`hx360e-log-${Date.now()}.txt`];
+      const savePicker = new picker.DocumentViewPicker(ctx);
+      const uris: string[] = await savePicker.save(options);
+      if (uris.length === 0) {
+        this.exportStatus = '已取消导出';
+        return;
+      }
+      const out = fs.openSync(uris[0],
+        fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC);
+      try {
+        fs.writeSync(out.fd, text);
+      } finally {
+        fs.closeSync(out);
+      }
+      this.exportStatus = `已导出 ${text.length} 字符 → ${uris[0]}`;
+      hilog.info(DOMAIN, TAG, 'exportLogs: %{public}s', uris[0]);
+    } catch (e) {
+      this.exportStatus = '导出失败（见 hilog）';
+      hilog.error(DOMAIN, TAG, 'exportLogs failed: %{public}s', JSON.stringify(e));
+    } finally {
+      this.busy = false;
+    }
+  }
+
   @Builder
   actionButton(label: string, action: () => void) {
     Button(label)
@@ -264,6 +416,88 @@ struct Index {
       .layoutWeight(1)
       .enabled(!this.busy)
       .onClick(action)
+  }
+
+  // 按住生效的手柄按钮（触摸 Down/Up，而不是点击）。
+  @Builder
+  padBtn(label: string, key: number) {
+    Button(label)
+      .fontSize(11)
+      .fontColor('#fff')
+      .backgroundColor('#6600aaff')
+      .borderRadius(6)
+      .width(46)
+      .height(34)
+      .padding(0)
+      .onTouch((e: TouchEvent) => {
+        if (e.type === TouchType.Down) {
+          this.padPress(key, true);
+        } else if (e.type === TouchType.Up || e.type === TouchType.Cancel) {
+          this.padPress(key, false);
+        }
+      })
+  }
+
+  @Builder
+  dpadPad() {
+    Column({ space: 2 }) {
+      Row() {
+        this.padBtn('D↑', XPadKey.DpadUp)
+      }
+      .justifyContent(FlexAlign.Center)
+      .width('100%')
+
+      Row({ space: 2 }) {
+        this.padBtn('D←', XPadKey.DpadLeft)
+        this.padBtn('D↓', XPadKey.DpadDown)
+        this.padBtn('D→', XPadKey.DpadRight)
+      }
+    }
+    .width(132)
+  }
+
+  @Builder
+  facePad() {
+    Column({ space: 2 }) {
+      Row() {
+        this.padBtn('Y', XPadKey.Y)
+      }
+      .justifyContent(FlexAlign.Center)
+      .width('100%')
+
+      Row({ space: 2 }) {
+        this.padBtn('X', XPadKey.X)
+        this.padBtn('B', XPadKey.B)
+        this.padBtn('A', XPadKey.A)
+      }
+    }
+    .width(132)
+  }
+
+  // 摇杆用 4 向按钮近似（满偏），够跑通输入链路；模拟量后续再做。
+  @Builder
+  stickPad(isLeft: boolean) {
+    Column({ space: 2 }) {
+      Row() {
+        this.padBtn('↑', isLeft ? XPadKey.LThumbUp : XPadKey.RThumbUp)
+      }
+      .justifyContent(FlexAlign.Center)
+      .width('100%')
+
+      Row({ space: 2 }) {
+        this.padBtn('←', isLeft ? XPadKey.LThumbLeft : XPadKey.RThumbLeft)
+        this.padBtn(isLeft ? 'L3' : 'R3',
+          isLeft ? XPadKey.LThumbPress : XPadKey.RThumbPress)
+        this.padBtn('→', isLeft ? XPadKey.LThumbRight : XPadKey.RThumbRight)
+      }
+
+      Row() {
+        this.padBtn('↓', isLeft ? XPadKey.LThumbDown : XPadKey.RThumbDown)
+      }
+      .justifyContent(FlexAlign.Center)
+      .width('100%')
+    }
+    .width(132)
   }
 
   build() {
@@ -284,6 +518,7 @@ struct Index {
         Text(this.running ? (this.paused ? '内核：已暂停' : '内核：运行中') : '内核：未运行')
           .fontSize(11)
           .fontColor('#f9a')
+        Text(this.exportStatus).fontSize(11).fontColor('#9cf')
       }
       .width('100%')
       .padding(6)
@@ -310,11 +545,58 @@ struct Index {
             testNapi.emulator.quit();
           })
         }
+        Row({ space: 8 }) {
+          this.actionButton(this.padVisible ? '隐藏手柄' : '显示手柄', () => {
+            this.padVisible = !this.padVisible;
+            if (!this.padVisible) {
+              testNapi.emulator.padReleaseAll();
+            }
+          })
+          this.actionButton(this.padPhysical ? '物理手柄:开' : '物理手柄:关', () => {
+            this.padTogglePhysical();
+          })
+        }
+        Row({ space: 8 }) {
+          this.actionButton('导出日志到 Download', () => {
+            this.exportLogs();
+          })
+        }
       }
       .width('100%')
       .padding(10)
       .position({ x: 0, y: '100%' })
-      .translate({ y: -110 })
+      .translate({ y: -192 })
+
+      if (this.padVisible) {
+        Column() {
+          Row({ space: 6 }) {
+            this.padBtn('LB', XPadKey.LShoulder)
+            this.padBtn('LT', XPadKey.LTrigger)
+            this.padBtn('BK', XPadKey.Back)
+            this.padBtn('ST', XPadKey.Start)
+            this.padBtn('RT', XPadKey.RTrigger)
+            this.padBtn('RB', XPadKey.RShoulder)
+          }
+          .justifyContent(FlexAlign.Center)
+          .width('100%')
+
+          Row({ space: 8 }) {
+            this.stickPad(true)
+            this.dpadPad()
+            this.facePad()
+            this.stickPad(false)
+          }
+          .justifyContent(FlexAlign.Center)
+          .width('100%')
+        }
+        .width('100%')
+        .height('100%')
+        .justifyContent(FlexAlign.End)
+        .padding({ bottom: 160 })
+        // None：覆盖层容器自身不参与命中测试，只有里面的手柄按钮响应，
+        // 下层「启动/暂停」按钮仍可点击。
+        .hitTestBehavior(HitTestMode.None)
+      }
     }
     .width('100%')
     .height('100%')

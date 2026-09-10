@@ -42,6 +42,19 @@ std::string DeviceInfo();
 // 扫描文件头部，报告识别到的镜像格式（诊断用）。
 std::string ProbeFile(const std::string& path);
 
+// ---- 输入（Phase 4）----
+// 喂入一个手柄控件状态。key_index 见 ohos_input_driver.h 的 OhosPadKey
+// （与 ArkTS 侧 XPadKey 一一对应）；value 为摇杆有符号值 [-32767,32767]
+// 或扳机 [0,255]。可在任意线程调用。
+void PadKey(int key_index, bool pressed, int value);
+
+// 释放全部按键（覆盖层消失 / 游戏退出时调用）。
+void PadReleaseAll();
+
+// 打开/关闭物理手柄（OHOS GameControllerKit）监听。
+bool PadStartPhysical();
+bool PadStopPhysical();
+
 }  // namespace hx360e
 
 #endif  // HX360E_XENDROID_OHOS_OHOS_EMULATOR_H_

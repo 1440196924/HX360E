@@ -296,6 +296,46 @@ napi_value EmulatorProbeFile(napi_env env, napi_callback_info info) {
     return result;
 }
 
+// ---- 输入（Phase 4）----
+// keyEvent(keyIndex, pressed, value)：keyIndex 为 OhosPadKey，
+// value 为摇杆 [-32767,32767] 或扳机 [0,255]（布尔量传 0 即可）。
+napi_value EmulatorKeyEvent(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value args[3] = {nullptr, nullptr, nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    int32_t key_index = -1;
+    bool pressed = false;
+    int32_t value = 0;
+    if (argc >= 1) {
+        napi_get_value_int32(env, args[0], &key_index);
+    }
+    if (argc >= 2) {
+        napi_get_value_bool(env, args[1], &pressed);
+    }
+    if (argc >= 3) {
+        napi_get_value_int32(env, args[2], &value);
+    }
+    hx360e::PadKey(key_index, pressed, value);
+    return nullptr;
+}
+
+napi_value EmulatorPadReleaseAll(napi_env env, napi_callback_info info) {
+    hx360e::PadReleaseAll();
+    return nullptr;
+}
+
+napi_value EmulatorPadStartPhysical(napi_env env, napi_callback_info info) {
+    napi_value result;
+    napi_get_boolean(env, hx360e::PadStartPhysical(), &result);
+    return result;
+}
+
+napi_value EmulatorPadStopPhysical(napi_env env, napi_callback_info info) {
+    napi_value result;
+    napi_get_boolean(env, hx360e::PadStopPhysical(), &result);
+    return result;
+}
+
 }  // namespace
 
 EXTERN_C_START
@@ -334,6 +374,14 @@ static napi_value Init(napi_env env, napi_value exports) {
          napi_default, nullptr},
         {"probeFile", nullptr, EmulatorProbeFile, nullptr, nullptr, nullptr,
          napi_default, nullptr},
+        {"keyEvent", nullptr, EmulatorKeyEvent, nullptr, nullptr, nullptr,
+         napi_default, nullptr},
+        {"padReleaseAll", nullptr, EmulatorPadReleaseAll, nullptr, nullptr,
+         nullptr, napi_default, nullptr},
+        {"padStartPhysical", nullptr, EmulatorPadStartPhysical, nullptr,
+         nullptr, nullptr, napi_default, nullptr},
+        {"padStopPhysical", nullptr, EmulatorPadStopPhysical, nullptr, nullptr,
+         nullptr, napi_default, nullptr},
     };
     napi_define_properties(env, emulator,
                            sizeof(emu_desc) / sizeof(emu_desc[0]), emu_desc);
@@ -346,6 +394,10 @@ static napi_value Init(napi_env env, napi_value exports) {
     HILOG("HX360E: JIT probe done, firstWorking=%{public}d (%{public}s)",
           report.first_working,
           hx360e::JitStrategyName(report.first_working));
+    // memfd 双视图（写视图 RW + 执行视图 RW→mprotect(RX)）探测：代码缓存
+    // 改双视图方案的前置验证。
+    std::string memfd_report = hx360e::RunMemfdTwoViewProbe();
+    HILOG("HX360E: %{public}s", memfd_report.c_str());
     return exports;
 }
 EXTERN_C_END
