@@ -11,6 +11,16 @@
     "deliveryWithInstall": true,
     "installationFree": false,
     "pages": "$profile:main_pages",
+    // 沉浸光感应用级开关（API 26 / HarmonyOS 7.0 起生效；低版本 SDK 会忽略该项）。
+    // enable：Navigation 标题栏、底部 Tabs 悬浮页签等组件按系统默认材质开启沉浸光感。
+    // 装上 API 26 SDK 并把 targetSdkVersion 升到 7.0.0(26) 后即自动生效，
+    // 组件级再用 NavigationTitleOptions.systemMaterial 精调。
+    "metadata": [
+      {
+        "name": "ohos.arkui.UIMaterial.state",
+        "value": "enable"
+      }
+    ],
     // ==========================================================================
     // JIT（可执行内存）权限
     //
@@ -82,8 +92,8 @@
         "startWindowIcon": "$media:startIcon",
         "startWindowBackground": "$color:start_window_background",
         "exported": true,
-        // 游戏为 16:9，竖屏窗口会导致画面比例异常；锁定横屏。
-        "orientation": "landscape",
+        // 主页/设置页竖屏；游戏页由 GamePage 在运行时请求横屏。
+        "orientation": "portrait",
         "skills": [
           {
             "entities": [

@@ -1,7 +1,9 @@
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { display } from '@kit.ArkUI';
+import { common } from '@kit.AbilityKit';
 import testNapi from 'libentry.so';
 import { XPadKey } from '../common/PadKey';
+import { Orientation } from '../common/Orientation';
 
 const DOMAIN = 0x0000;
 const TAG = 'HX360E';
@@ -29,6 +31,8 @@ struct GamePage {
   private xcompController: XComponentController = new XComponentController();
   // 画面源分辨率固定 1280x720；用统一系数放大到窗口（contain：保持比例、不裁边、不拉伸）。
   @State fitScale: number = 1;
+  // 虚拟手柄覆盖层开关（设置 → 高级选项 → 显示虚拟手柄）。
+  @State showPad: boolean = true;
 
   // contain：横纵取较小的系数，画面完整放进窗口且不变形（不足处留黑边）。
   updateFitScale(stageW: number, stageH: number): void {
@@ -39,11 +43,29 @@ struct GamePage {
   }
 
   aboutToAppear(): void {
+    // 游戏是 16:9 横屏：进入本页请求横屏，离开时由 aboutToDisappear 切回竖屏。
+    try {
+      const ctx = getContext(this) as common.Context;
+      Orientation.landscape(ctx);
+    } catch (e) {
+      hilog.error(DOMAIN, TAG, 'landscape failed: %{public}s', JSON.stringify(e));
+    }
+    try {
+      this.showPad = testNapi.emulator.showTouchOverlayEnabled();
+    } catch (e) {
+      this.showPad = true;
+    }
     this.attachTimer = setInterval(() => this.tryAttach(), 200);
     this.promptTimer = setInterval(() => this.pollPrompt(), 150);
   }
 
   aboutToDisappear(): void {
+    try {
+      const ctx = getContext(this) as common.Context;
+      Orientation.portrait(ctx);
+    } catch (e) {
+      // 忽略
+    }
     if (this.attachTimer >= 0) {
       clearInterval(this.attachTimer);
       this.attachTimer = -1;
@@ -301,34 +323,36 @@ struct GamePage {
             Math.round(old.width as number), Math.round(old.height as number));
         })
 
-      // 虚拟手柄覆盖层（始终显示）。
-      Column() {
-        Row({ space: 6 }) {
-          this.padBtn('LB', XPadKey.LShoulder)
-          this.padBtn('LT', XPadKey.LTrigger)
-          this.padBtn('BK', XPadKey.Back)
-          this.padBtn('ST', XPadKey.Start)
-          this.padBtn('RT', XPadKey.RTrigger)
-          this.padBtn('RB', XPadKey.RShoulder)
-        }
-        .justifyContent(FlexAlign.Center)
-        .width('100%')
+      // 虚拟手柄覆盖层（可在 设置 → 高级选项 里关闭）。
+      if (this.showPad) {
+        Column() {
+          Row({ space: 6 }) {
+            this.padBtn('LB', XPadKey.LShoulder)
+            this.padBtn('LT', XPadKey.LTrigger)
+            this.padBtn('BK', XPadKey.Back)
+            this.padBtn('ST', XPadKey.Start)
+            this.padBtn('RT', XPadKey.RTrigger)
+            this.padBtn('RB', XPadKey.RShoulder)
+          }
+          .justifyContent(FlexAlign.Center)
+          .width('100%')
 
-        Row({ space: 8 }) {
-          this.stickPad(true)
-          this.dpadPad()
-          this.facePad()
-          this.stickPad(false)
+          Row({ space: 8 }) {
+            this.stickPad(true)
+            this.dpadPad()
+            this.facePad()
+            this.stickPad(false)
+          }
+          .justifyContent(FlexAlign.Center)
+          .width('100%')
         }
-        .justifyContent(FlexAlign.Center)
         .width('100%')
+        .height('100%')
+        .justifyContent(FlexAlign.End)
+        .padding({ bottom: 40 })
+        // None：覆盖层容器自身不参与命中测试，只有里面的手柄按钮响应。
+        .hitTestBehavior(HitTestMode.None)
       }
-      .width('100%')
-      .height('100%')
-      .justifyContent(FlexAlign.End)
-      .padding({ bottom: 40 })
-      // None：覆盖层容器自身不参与命中测试，只有里面的手柄按钮响应。
-      .hitTestBehavior(HitTestMode.None)
 
       // guest 提示模态层（仅在有请求时出现）。
       if (this.promptKind !== '') {

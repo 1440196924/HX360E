@@ -22,15 +22,31 @@ export default class EntryAbility extends UIAbility {
     // Main window is created, set main page for this ability
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onWindowStageCreate');
 
-    windowStage.loadContent('pages/Index', (err) => {
+    windowStage.loadContent('pages/Home', (err) => {
       if (err.code) {
         hilog.error(DOMAIN, 'testTag', 'Failed to load the content. Cause: %{public}s', JSON.stringify(err));
         return;
       }
       hilog.info(DOMAIN, 'testTag', 'Succeeded in loading the content.');
     });
-    // 横屏由 module.json5 的 ability.orientation=landscape 声明即可，运行时
-    // 不再强制旋转（用户实测：窗口本来就是横屏）。
+
+    // 沉浸式：布局全屏，页面里再对需要的组件用 expandSafeArea 延伸到状态栏下方。
+    // 同时按当前深浅色设置状态栏文字颜色，保证可读。
+    windowStage.getMainWindow().then((win: window.Window) => {
+      try {
+        win.setWindowLayoutFullScreen(true);
+        const dark: boolean =
+          this.context.config.colorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK;
+        win.setWindowSystemBarProperties({
+          statusBarContentColor: dark ? '#FFFFFF' : '#000000',
+        });
+        hilog.info(DOMAIN, 'testTag', 'immersive on, dark=%{public}d', dark ? 1 : 0);
+      } catch (e) {
+        hilog.error(DOMAIN, 'testTag', 'fullscreen failed: %{public}s', JSON.stringify(e));
+      }
+    }).catch((e: Error) => {
+      hilog.error(DOMAIN, 'testTag', 'getMainWindow failed: %{public}s', e.message);
+    });
   }
 
   onWindowStageDestroy(): void {

@@ -3,6 +3,54 @@
     {
       "name": "start_window_background",
       "value": "#000000"
+    },
+    {
+      "name": "page_bg",
+      "value": "#0E0E12"
+    },
+    {
+      "name": "card_bg",
+      "value": "#1C1C26"
+    },
+    {
+      "name": "bar_bg",
+      "value": "#B81C1C1E"
+    },
+    {
+      "name": "text_primary",
+      "value": "#F0F0F0"
+    },
+    {
+      "name": "text_secondary",
+      "value": "#AAAAAA"
+    },
+    {
+      "name": "text_hint",
+      "value": "#777777"
+    },
+    {
+      "name": "accent",
+      "value": "#317AF7"
+    },
+    {
+      "name": "divider",
+      "value": "#1AFFFFFF"
+    },
+    {
+      "name": "chip_bg",
+      "value": "#26FFFFFF"
+    },
+    {
+      "name": "danger",
+      "value": "#FF6B6B"
+    },
+    {
+      "name": "scroll_mask",
+      "value": "#660E0E12"
+    },
+    {
+      "name": "tab_inactive",
+      "value": "#FFFFFF"
     }
   ]
 }

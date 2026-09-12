@@ -1,13 +1,22 @@
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { picker, fileIo as fs, fileUri } from '@kit.CoreFileKit';
-import { util } from '@kit.ArkTS';
+import { common } from '@kit.AbilityKit';
+import { GameLibrary, GameMeta } from '../common/GameLibrary';
+import { LogExport } from '../common/LogExport';
 import testNapi from 'libentry.so';
 
 const DOMAIN = 0x0000;
 const TAG = 'HX360E';
 
+/** 本次安装占用的槽位（一个游戏 = games/<id>/）。 */
+class InstallSlot {
+  id: string = '';
+  dir: string = '';
+}
+
 /**
- * 主页：安装游戏（文件/文件夹）、启动内核、查看状态、导出日志。
+ * 导入页（原 demo 首页，保留）：安装游戏（文件/文件夹）、启动内核、查看状态、
+ * 导出日志。安装到 games/<id>/ 多槽位，游戏列表见主页 pages/Home。
  * 点「启动」后跳转到独立游戏页 GamePage（只显示游戏 + 虚拟手柄）。
  */
 @Entry
@@ -36,25 +45,24 @@ struct Index {
     this.pollTimer = setInterval(() => this.refresh(), 500);
   }
 
-  // 启动时恢复沙箱内的「当前游戏」（单槽位：games/current/game*）。
+  // 启动时恢复游戏库里最近安装的那个游戏（多槽位，最新在前）。
   restoreInstalled(): void {
     try {
-      const ctx = getContext(this);
-      const dir: string = `${ctx.filesDir}/games/current`;
-      if (!fs.accessSync(dir)) {
+      const ctx = getContext(this) as common.Context;
+      const list: GameMeta[] = GameLibrary.list(ctx.filesDir);
+      if (list.length === 0) {
         return;
       }
-      const target: string = this.resolveLaunchTarget(dir, 0);
-      if (target !== '') {
-        this.gamePath = target;
-        this.installStatus = `已安装：${this.gamePath}`;
-        hilog.info(DOMAIN, TAG, 'restored game: %{public}s', this.gamePath);
-        try {
-          hilog.info(DOMAIN, TAG, 'probe: %{public}s',
-            testNapi.emulator.probeFile(this.gamePath));
-        } catch (e) {
-          hilog.error(DOMAIN, TAG, 'probe failed: %{public}s', JSON.stringify(e));
-        }
+      const newest: GameMeta = list[0];
+      const target: string = GameLibrary.toAbsolute(ctx.filesDir, newest);
+      this.gamePath = target;
+      this.installStatus = `已安装：${newest.name} → ${target}`;
+      hilog.info(DOMAIN, TAG, 'restored game: %{public}s', this.gamePath);
+      try {
+        hilog.info(DOMAIN, TAG, 'probe: %{public}s',
+          testNapi.emulator.probeFile(this.gamePath));
+      } catch (e) {
+        hilog.error(DOMAIN, TAG, 'probe failed: %{public}s', JSON.stringify(e));
       }
     } catch (e) {
       hilog.error(DOMAIN, TAG, 'restoreInstalled failed: %{public}s', JSON.stringify(e));
@@ -134,29 +142,42 @@ struct Index {
         'install: uri=%{public}s path=%{public}s folder=%{public}d',
         uri, srcPath, folder ? 1 : 0);
       this.installStatus = '复制到沙箱中…（大文件请耐心等待）';
-      const dir: string = this.prepareCurrentDir(ctx.filesDir);
+      const displayName: string = this.uriBaseName(srcPath);
+      const slot: InstallSlot = this.prepareNewGameDir(ctx.filesDir, displayName);
+      const dir: string = slot.dir;
       let count: number = 0;
       if (folder) {
         count = await this.copyRecursive(srcPath, uri, dir);
       } else {
-        const name: string = this.uriBaseName(srcPath);
-        const dot: number = name.lastIndexOf('.');
-        const ext: string = dot >= 0 ? name.substring(dot) : '';
+        const dot: number = displayName.lastIndexOf('.');
+        const ext: string = dot >= 0 ? displayName.substring(dot) : '';
         const bytes: number = await this.copyFileAny(srcPath, uri,
           `${dir}/game${ext}`);
         count = bytes > 0 ? 1 : 0;
       }
-      const dest: string = this.resolveLaunchTarget(dir, 0);
+      const dest: string = GameLibrary.resolveTarget(dir, 0);
       if (dest === '') {
         this.gamePath = '';
         this.installStatus = '已复制但未找到可启动文件（default.xex / STFS / game*）';
         hilog.error(DOMAIN, TAG, 'install: no launch target in %{public}s', dir);
+        GameLibrary.remove(ctx.filesDir, slot.id);
         return;
       }
+      // 写元数据：主页的「游戏库」列表据此显示。
+      const meta = new GameMeta();
+      meta.id = slot.id;
+      meta.name = this.displayNameFor(displayName);
+      meta.titleId = this.titleIdFor(dest);
+      meta.target = GameLibrary.toRelative(dir, dest);
+      meta.kind = folder ? 'folder' : 'file';
+      meta.fileCount = count;
+      meta.sizeBytes = GameLibrary.dirSize(dir);
+      meta.installedAt = Date.now();
+      GameLibrary.saveMeta(ctx.filesDir, meta);
       this.gamePath = dest;
-      this.installStatus = `已安装（${count} 个文件）：${dest}`;
-      hilog.info(DOMAIN, TAG, 'installed to %{public}s (files=%{public}d)',
-        dest, count);
+      this.installStatus = `已安装（${count} 个文件）：${meta.name}`;
+      hilog.info(DOMAIN, TAG, 'installed slot=%{public}s target=%{public}s files=%{public}d',
+        slot.id, dest, count);
       hilog.info(DOMAIN, TAG, 'install: target head=%{public}s',
         this.readHeadHex(dest, 16));
     } catch (e) {
@@ -167,50 +188,48 @@ struct Index {
     }
   }
 
-  // 递归删除目录（@ohos.file.fs 的 rmdirSync 只能删空目录）。
-  removeDirRecursive(path: string): void {
+  // 显示名：去掉扩展名。
+  displayNameFor(pickedName: string): string {
+    const dot: number = pickedName.lastIndexOf('.');
+    if (dot > 0) {
+      return pickedName.substring(0, dot);
+    }
+    return pickedName;
+  }
+
+  // 尽量读出 Xbox Title ID；读不出返回空串（列表用显示名兜底）。
+  titleIdFor(path: string): string {
     try {
-      if (!fs.accessSync(path)) {
-        return;
+      const god = testNapi.meta.metaInfoFromGodPath(path);
+      if (god !== null && god.titleId !== null) {
+        return god.titleId;
       }
-      const entries: string[] = fs.listFileSync(path);
-      for (const name of entries) {
-        const child: string = `${path}/${name}`;
-        if (fs.statSync(child).isDirectory()) {
-          this.removeDirRecursive(child);
-        } else {
-          fs.unlinkSync(child);
-        }
-      }
-      fs.rmdirSync(path);
     } catch (e) {
-      hilog.error(DOMAIN, TAG, 'removeDirRecursive failed: %{public}s : %{public}s',
-        path, JSON.stringify(e));
-      throw new Error(`removeDirRecursive ${path} ${JSON.stringify(e)}`);
+      // 非 GOD 包，继续
+    }
+    try {
+      const lower: string = path.toLowerCase();
+      const format: number = lower.endsWith('.iso') ? 0
+        : (lower.endsWith('.zar') ? 2 : 1);
+      const id: string | null = testNapi.meta.titleIdFromPath(path, format);
+      return id ?? '';
+    } catch (e) {
+      return '';
     }
   }
 
-  // 建目录（本设备 mkdirSync(path, true) 对已存在目录会抛 EEXIST 13900015）。
-  ensureDir(path: string): void {
-    if (!fs.accessSync(path)) {
-      fs.mkdirSync(path, true);
-    }
-  }
-
-  // 单槽位：清空 games/ 下的旧目录并创建 games/current，返回其沙箱路径。
-  prepareCurrentDir(filesDir: string): string {
-    const gamesDir: string = `${filesDir}/games`;
-    if (fs.accessSync(gamesDir)) {
-      const olds: string[] = fs.listFileSync(gamesDir);
-      hilog.info(DOMAIN, TAG, 'prepare: cleaning %{public}d old entries',
-        olds.length);
-      for (const old of olds) {
-        this.removeDirRecursive(`${gamesDir}/${old}`);
-      }
-    }
-    const dir: string = `${gamesDir}/current`;
-    this.ensureDir(dir);
-    return dir;
+  // 新建一个游戏槽位 games/<id>/。不再清空 games/，多游戏共存。
+  prepareNewGameDir(filesDir: string, displayName: string): InstallSlot {
+    const gamesDir: string = GameLibrary.gamesDir(filesDir);
+    GameLibrary.ensureDir(gamesDir);
+    const id: string = GameLibrary.makeId(displayName, Date.now());
+    const dir: string = GameLibrary.gameDir(filesDir, id);
+    GameLibrary.ensureDir(dir);
+    const slot = new InstallSlot();
+    slot.id = id;
+    slot.dir = dir;
+    hilog.info(DOMAIN, TAG, 'prepare: new slot %{public}s', id);
+    return slot;
   }
 
   // picker 的 docs URI → 真实路径。fs 的目录接口（listFileSync/statSync）只接受
@@ -323,7 +342,7 @@ struct Index {
         this.uriBaseName(srcPath), bytes);
       return 1;
     }
-    this.ensureDir(destPath);
+    GameLibrary.ensureDir(destPath);
     hilog.info(DOMAIN, TAG, 'install: dir %{public}s (%{public}d entries)',
       this.uriBaseName(srcPath), names.length);    let count: number = 0;
     for (const name of names) {
@@ -341,66 +360,6 @@ struct Index {
       // URI 未编码时保持原样
     }
     return name;
-  }
-
-  // 在已安装目录中找可启动文件。优先级：default.xex > 精确 game >
-  // 有同名 .data 目录的文件（多文件 STFS/SVOD 头）> 16~40 位十六进制文件名
-  // （STFS 内容 ID）> game* > 递归子目录 > 第一个文件。
-  resolveLaunchTarget(dir: string, depth: number): string {
-    try {
-      if (depth > 8 || !fs.accessSync(dir)) {
-        return '';
-      }
-      const names: string[] = fs.listFileSync(dir);
-      for (const n of names) {
-        if (n.toLowerCase() === 'default.xex') {
-          return `${dir}/${n}`;
-        }
-      }
-      for (const n of names) {
-        if (n === 'game' && !fs.statSync(`${dir}/${n}`).isDirectory()) {
-          return `${dir}/${n}`;
-        }
-      }
-      // 多文件 SVOD/STFS：头部文件旁边有同名 <name>.data 目录。
-      for (const n of names) {
-        if (fs.statSync(`${dir}/${n}`).isDirectory()) {
-          continue;
-        }
-        const dataDir: string = `${dir}/${n}.data`;
-        if (fs.accessSync(dataDir) && fs.statSync(dataDir).isDirectory()) {
-          return `${dir}/${n}`;
-        }
-      }
-      const hexName = new RegExp('^[0-9A-Fa-f]{16,40}$');
-      for (const n of names) {
-        if (!fs.statSync(`${dir}/${n}`).isDirectory() && hexName.test(n)) {
-          return `${dir}/${n}`;
-        }
-      }
-      for (const n of names) {
-        if (n.startsWith('game') && !fs.statSync(`${dir}/${n}`).isDirectory()) {
-          return `${dir}/${n}`;
-        }
-      }
-      for (const n of names) {
-        if (fs.statSync(`${dir}/${n}`).isDirectory()) {
-          const t: string = this.resolveLaunchTarget(`${dir}/${n}`, depth + 1);
-          if (t !== '') {
-            return t;
-          }
-        }
-      }
-      for (const n of names) {
-        if (!fs.statSync(`${dir}/${n}`).isDirectory()) {
-          return `${dir}/${n}`;
-        }
-      }
-    } catch (e) {
-      hilog.error(DOMAIN, TAG, 'resolveLaunchTarget failed: %{public}s',
-        JSON.stringify(e));
-    }
-    return '';
   }
 
   // 启动内核并进入独立游戏页。
@@ -438,44 +397,7 @@ struct Index {
     }
   }
 
-  // ---- 日志导出（沙箱内的运行日志 → 用户选择的目录，默认 Download）----
-
-  // 读取文件尾部 maxBytes 字节。按块显式给 offset 读（本设备上不传 offset 的
-  // 读语义不可靠），并在首行写出真实文件大小，便于确认拿到的确实是尾部。
-  readLogTail(path: string, maxBytes: number): string {
-    try {
-      if (!fs.accessSync(path)) {
-        return `(no such file: ${path})\n`;
-      }
-      const f = fs.openSync(path, fs.OpenMode.READ_ONLY);
-      try {
-        const size: number = fs.statSync(f.fd).size;
-        const want: number = Math.min(maxBytes, size);
-        const decoder = util.TextDecoder.create('utf-8');
-        const chunkSize: number = 64 * 1024;
-        const buf = new ArrayBuffer(chunkSize);
-        const parts: string[] = [];
-        let offset: number = size - want;
-        let read: number = 0;
-        while (read < want) {
-          const len: number = Math.min(chunkSize, want - read);
-          const n: number = fs.readSync(f.fd, buf, { offset: offset, length: len });
-          if (n <= 0) {
-            break;
-          }
-          parts.push(decoder.decodeToString(new Uint8Array(buf, 0, n)));
-          read += n;
-          offset += n;
-        }
-        return `# ${path} size=${size} tail=${read}\n${parts.join('')}`;
-      } finally {
-        fs.closeSync(f);
-      }
-    } catch (e) {
-      hilog.error(DOMAIN, TAG, 'readLogTail failed: %{public}s', JSON.stringify(e));
-      return `(read failed: ${path})\n`;
-    }
-  }
+  // ---- 日志导出（共享实现见 common/LogExport.ets）----
 
   async exportLogs(): Promise<void> {
     if (this.busy) {
@@ -484,33 +406,8 @@ struct Index {
     this.busy = true;
     this.exportStatus = '正在导出日志…';
     try {
-      const ctx = getContext(this);
-      const logDir: string = `${ctx.filesDir}/logs`;
-      let text: string = `HX360E logs ${new Date().toISOString()}\n`;
-      text += '===== native_fault.prev.log (上次运行，崩溃现场) =====\n';
-      text += this.readLogTail(`${logDir}/native_fault.prev.log`, 256 * 1024);
-      text += '\n===== native_fault.log (tail 256KB) =====\n';
-      text += this.readLogTail(`${logDir}/native_fault.log`, 256 * 1024);
-      text += '\n===== xe.log (tail 4MB) =====\n';
-      text += this.readLogTail(`${logDir}/xe.log`, 4 * 1024 * 1024);
-
-      const options = new picker.DocumentSaveOptions();
-      options.newFileNames = [`hx360e-log-${Date.now()}.txt`];
-      const savePicker = new picker.DocumentViewPicker(ctx);
-      const uris: string[] = await savePicker.save(options);
-      if (uris.length === 0) {
-        this.exportStatus = '已取消导出';
-        return;
-      }
-      const out = fs.openSync(uris[0],
-        fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC);
-      try {
-        fs.writeSync(out.fd, text);
-      } finally {
-        fs.closeSync(out);
-      }
-      this.exportStatus = `已导出 ${text.length} 字符 → ${uris[0]}`;
-      hilog.info(DOMAIN, TAG, 'exportLogs: %{public}s', uris[0]);
+      const ctx = getContext(this) as common.Context;
+      this.exportStatus = await LogExport.exportLogs(ctx, ctx.filesDir);
     } catch (e) {
       this.exportStatus = '导出失败（见 hilog）';
       hilog.error(DOMAIN, TAG, 'exportLogs failed: %{public}s', JSON.stringify(e));
@@ -531,15 +428,15 @@ struct Index {
 
   build() {
     Column({ space: 12 }) {
-      Text('HX360E').fontSize(20).fontColor('#fff')
-      Text(this.status).fontSize(12).fontColor('#8cf')
-      Text(this.jitInfo).fontSize(11).fontColor('#9f9')
-      Text(this.gpuInfo).fontSize(9).fontColor('#aaa')
-      Text(this.installStatus).fontSize(11).fontColor('#ffd')
+      Text('HX360E').fontSize(20).fontColor($r('app.color.text_primary'))
+      Text(this.status).fontSize(12).fontColor($r('app.color.accent'))
+      Text(this.jitInfo).fontSize(11).fontColor($r('app.color.accent'))
+      Text(this.gpuInfo).fontSize(9).fontColor($r('app.color.text_secondary'))
+      Text(this.installStatus).fontSize(11).fontColor($r('app.color.text_secondary'))
       Text(this.running ? (this.paused ? '内核：已暂停' : '内核：运行中') : '内核：未运行')
         .fontSize(11)
-        .fontColor('#f9a')
-      Text(this.exportStatus).fontSize(11).fontColor('#9cf')
+        .fontColor($r('app.color.accent'))
+      Text(this.exportStatus).fontSize(11).fontColor($r('app.color.accent'))
 
       Row({ space: 8 }) {
         this.actionButton('安装文件', () => {
@@ -579,7 +476,7 @@ struct Index {
     .width('100%')
     .height('100%')
     .padding(16)
-    .backgroundColor('#101018')
+    .backgroundColor($r('app.color.page_bg'))
     .alignItems(HorizontalAlign.Center)
     .justifyContent(FlexAlign.Center)
   }

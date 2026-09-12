@@ -1,6 +1,11 @@
 {
   "src": [
+    "pages/Home",
     "pages/Index",
-    "pages/GamePage"
+    "pages/GamePage",
+    "pages/AdvancedPage",
+    "pages/ControlsPage",
+    "pages/DirectoryPage",
+    "pages/AboutPage"
   ]
 }
