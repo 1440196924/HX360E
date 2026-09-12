@@ -17,6 +17,10 @@
 
 namespace hx360e {
 
+namespace {
+
+}  // namespace
+
 OhosWindowedAppContext::~OhosWindowedAppContext() = default;
 
 void OhosWindowedAppContext::NotifyUILoopOfPendingFunctions() {
@@ -197,7 +201,7 @@ void OhosWindow::UpdateSurface() {
     OHNativeWindow* window_surface =
         static_cast<OhosWindowedAppContext&>(app_context()).window_surface();
     if (window_surface) {
-      int32_t width = 0, height = 0;
+        int32_t width = 0, height = 0;
       // (height, width) - see the note in OpenImpl.
       if (OH_NativeWindow_NativeWindowHandleOpt(window_surface,
                                                 GET_BUFFER_GEOMETRY, &height,
