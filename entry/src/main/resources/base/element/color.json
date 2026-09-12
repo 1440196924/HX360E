@@ -51,6 +51,10 @@
     {
       "name": "tab_inactive",
       "value": "#000000"
+    },
+    {
+      "name": "mask",
+      "value": "#66000000"
     }
   ]
 }

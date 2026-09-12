@@ -9,6 +9,7 @@
 
 #include <native_window/external_window.h>
 
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <memory>
@@ -41,11 +42,21 @@ class OhosWindowedAppContext final : public xe::ui::WindowedAppContext {
   void SetActivityWindow(OhosWindow* window);
   OhosWindow* activity_window() const;
 
+  // 呈现请求（等价于安卓的 PostInvalidateWindowSurface）：任意线程可调，
+  // 回到 UI 线程（MainLoop）里对 activity_window 执行一次 OnPaint。
+  // presenter 只在 PaintMode::kUIThreadOnRequest（FIFO 交换链）下才会调它。
+  void RequestPaintOnUIThread();
+
  private:
   mutable std::mutex mutex_;
   std::condition_variable cond_;
   bool pending_ = false;
   bool quit_ = false;
+  // 已有一次待处理的呈现请求（合并同一帧内的多次请求）。
+  bool paint_requested_ = false;
+  // 诊断：每秒汇报一次「UI 线程 present 次数」与 guest FPS 的比值。
+  uint32_t paint_count_ = 0;
+  std::chrono::steady_clock::time_point probe_report_time_{};
 
   OHNativeWindow* window_surface_ = nullptr;
   OhosWindow* activity_window_ = nullptr;
@@ -60,6 +71,13 @@ class OhosWindow final : public xe::ui::Window {
 
   // XComponent surface created / changed (marshal to the UI thread).
   void UpdateSurface();
+
+  // 由 UI 线程（OhosWindowedAppContext::MainLoop）调用；对应安卓的
+  // AndroidWindow::PaintActivitySurface(bool force_paint) → OnPaint()。
+  // 仅当交换链是 FIFO（paint mode = kUIThreadOnRequest）时才允许调用。
+  void PaintFromUIThread(bool force_paint) {
+    OnPaint(force_paint);
+  }
 
  protected:
   bool OpenImpl() override;

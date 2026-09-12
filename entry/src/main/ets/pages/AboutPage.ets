@@ -9,6 +9,8 @@ const TAG = 'HX360E';
 export struct AboutPage {
   @State deviceInfo: string = '';
   @State jitInfo: string = '';
+  /** XEngine Kit（Maleoon GPU 加速）支持的特性清单。 */
+  @State xengineInfo: string = '';
 
   aboutToAppear(): void {
     try {
@@ -22,6 +24,13 @@ export struct AboutPage {
       this.jitInfo = r.firstWorking >= 0 ? `${r.firstWorkingName}` : '不可用';
     } catch (e) {
       this.jitInfo = '(探测失败)';
+    }
+    try {
+      this.xengineInfo = testNapi.emulator.probeXEngine();
+      hilog.info(DOMAIN, TAG, 'xengine: %{public}s', this.xengineInfo);
+    } catch (e) {
+      this.xengineInfo = '(探测失败)';
+      hilog.error(DOMAIN, TAG, 'probeXEngine failed: %{public}s', JSON.stringify(e));
     }
   }
 
@@ -56,6 +65,7 @@ export struct AboutPage {
           this.infoRow('包名', 'com.sddswsf.hx360e')
           this.infoRow('后端', this.deviceInfo)
           this.infoRow('JIT', this.jitInfo)
+          this.infoRow('XEngine', this.xengineInfo)
 
           Divider().color($r('app.color.divider'))
 

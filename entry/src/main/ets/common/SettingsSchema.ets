@@ -153,13 +153,13 @@ export class SettingsSchema {
         Setting.bool('GPU', 'guest_display_refresh_cap', '限制 guest 刷新率（VSync）',
           true),
         Setting.bool('GPU', 'store_shaders', '保存着色器', true),
-        Setting.list('GPU', 'readback_resolve', '回读解析模式', 'uma', [
+        Setting.list('GPU', 'readback_resolve', '回读解析模式', 'none', [
           opt('uma', 'UMA（直接映射，无拷贝）'),
           opt('fast', 'Fast（拷贝 CPU 读取的解析）'),
           opt('all', 'All（每次解析都拷贝）'),
           opt('none', 'None（关闭）'),
         ]),
-        Setting.list('GPU', 'occlusion_query', '遮挡查询模式', 'fast', [
+        Setting.list('GPU', 'occlusion_query', '遮挡查询模式', 'fake', [
           opt('fake', 'Fake（最快，不查 GPU）'),
           opt('fast', 'Fast（异步查询，不阻塞）'),
           opt('fast-alt', 'Fast-alt（异步，精确零）'),
@@ -301,7 +301,7 @@ export class SettingsSchema {
       ]),
 
       SettingsCategory.of('日志', [
-        Setting.list('Logging', 'log_level', '日志级别', '2', [
+        Setting.list('Logging', 'log_level', '日志级别', '1', [
           opt('0', 'error'), opt('1', 'warning'), opt('2', 'info'),
           opt('3', 'debug'),
         ]),

@@ -29,6 +29,12 @@ class VulkanContext {
     // 设备能力报告（Phase 0.4），用于 UI 展示与日志
     std::string GetDeviceInfo() const;
 
+    // XEngine Kit（Maleoon GPU 加速）能力探测：临时建一个 instance 只为拿到
+    // VkPhysicalDevice，然后用 HMS_XEG_EnumerateDeviceExtensionProperties 查询
+    // 设备支持的 XEG 特性（libxengine.so 用 dlopen，不硬链接）。
+    // 返回可读的特性清单；不支持时返回原因文本。
+    static std::string ProbeXEngineExtensions();
+
 
  private:
     struct Impl;

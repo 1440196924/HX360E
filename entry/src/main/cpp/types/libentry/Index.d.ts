@@ -31,6 +31,8 @@ export interface EmulatorApi {
   isRunning(): boolean;
   isPaused(): boolean;
   deviceInfo(): string;
+  /** XEngine Kit（Maleoon GPU 加速）特性探测；结果同时打到 hilog（HX360E）。 */
+  probeXEngine(): string;
   probeFile(path: string): string;
   /** keyIndex 见 XPadKey；value 为摇杆 [-32767,32767] 或扳机 [0,255]。 */
   keyEvent(keyIndex: number, pressed: boolean, value: number): void;

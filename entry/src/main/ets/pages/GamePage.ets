@@ -1,5 +1,8 @@
 import { hilog } from '@kit.PerformanceAnalysisKit';
-import { display } from '@kit.ArkUI';
+import { display, window } from '@kit.ArkUI';
+import { BusinessError } from '@kit.BasicServicesKit';
+import gamePerformance from '@hms.core.gameservice.gameperformance';
+import { gamePlayer } from '@kit.GameServiceKit';
 import { common } from '@kit.AbilityKit';
 import testNapi from 'libentry.so';
 import { XPadKey } from '../common/PadKey';
@@ -63,6 +66,64 @@ struct GamePage {
     }
   }
 
+  // 游戏页沉浸式：隐藏状态栏与导航条（含底部小横条），让系统按全屏游戏合成，
+  // 也避免系统栏参与每帧合成。离开本页时恢复。
+  private setImmersive(on: boolean): void {
+    try {
+      const ctx = getContext(this) as common.Context;
+      window.getLastWindow(ctx).then((win: window.Window) => {
+        win.setWindowSystemBarEnable(on ? [] : ['status', 'navigation'])
+          .catch((e: Error) => {
+            hilog.error(DOMAIN, TAG, 'setWindowSystemBarEnable failed: %{public}s',
+              e.message);
+          });
+        win.setSpecificSystemBarEnabled('navigationIndicator', !on)
+          .catch((e: Error) => {
+            hilog.error(DOMAIN, TAG, 'setSpecificSystemBarEnabled failed: %{public}s',
+              e.message);
+          });
+      }).catch((e: Error) => {
+        hilog.error(DOMAIN, TAG, 'getLastWindow failed: %{public}s', e.message);
+      });
+    } catch (e) {
+      hilog.error(DOMAIN, TAG, 'immersive failed: %{public}s', JSON.stringify(e));
+    }
+  }
+
+  // 向系统声明"我们正在渲染游戏帧"（Game Service Kit 游戏场景感知）。
+  // 系统据此调整调度/频率策略；失败（例如未在应用市场登记为游戏会返回
+  // Auth failed 1010300002）只记日志，不影响游戏运行。
+  private declareGameScene(): void {
+    // Game Service Kit 的初始化：系统据此把本应用识别为游戏（触发游戏助手/
+    // 游戏级调度）。需要 UIAbilityContext。
+    try {
+      const uiCtx = getContext(this) as common.UIAbilityContext;
+      gamePlayer.init(uiCtx).then(() => {
+        hilog.info(DOMAIN, TAG, 'gamePlayer.init ok');
+      }).catch((e: BusinessError) => {
+        hilog.error(DOMAIN, TAG, 'gamePlayer.init failed: %{public}d %{public}s',
+          e.code, e.message);
+      });
+    } catch (e) {
+      hilog.error(DOMAIN, TAG, 'gamePlayer unavailable: %{public}s', JSON.stringify(e));
+    }
+    try {
+      gamePerformance.init({
+        messageType: 0,
+        bundleName: 'com.sddswsf.hx360e',
+        appVersion: '1.0.0',
+      }).then(() => {
+        hilog.info(DOMAIN, TAG, 'gamePerformance.init ok');
+      }).catch((e: BusinessError) => {
+        hilog.error(DOMAIN, TAG, 'gamePerformance.init failed: %{public}d %{public}s',
+          e.code, e.message);
+      });
+    } catch (e) {
+      hilog.error(DOMAIN, TAG, 'gamePerformance unavailable: %{public}s',
+        JSON.stringify(e));
+    }
+  }
+
   aboutToAppear(): void {
     // 游戏是 16:9 横屏：进入本页请求横屏，离开时由 aboutToDisappear 切回竖屏。
     try {
@@ -71,6 +132,8 @@ struct GamePage {
     } catch (e) {
       hilog.error(DOMAIN, TAG, 'landscape failed: %{public}s', JSON.stringify(e));
     }
+    this.setImmersive(true);
+    this.declareGameScene();
     try {
       this.showPad = testNapi.emulator.showTouchOverlayEnabled();
     } catch (e) {
@@ -125,6 +188,8 @@ struct GamePage {
     } catch (e) {
       // 忽略
     }
+    // 恢复系统栏（离开游戏页）。
+    this.setImmersive(false);
     if (this.debugTimer >= 0) {
       clearInterval(this.debugTimer);
       this.debugTimer = -1;

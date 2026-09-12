@@ -18,6 +18,25 @@
 
 #include <hilog/log.h>
 
+// ---- XEngine Kit（Maleoon GPU 加速）----
+// 有 SDK 头文件就用官方声明，没有（换 SDK / 别的机器）时用本地声明的等价 ABI：
+// 该结构体自 API 12 起稳定，仅用于查询，不参与渲染。
+#include <dlfcn.h>
+#if defined(HX360E_HAVE_XENGINE_HEADERS)
+#include <xengine/xeg_vulkan_extension.h>
+#else
+extern "C" {
+#define XEG_MAX_EXTENSION_NAME_SIZE 256
+typedef struct XEG_ExtensionProperties {
+    char extensionName[XEG_MAX_EXTENSION_NAME_SIZE];
+    uint32_t version;
+} XEG_ExtensionProperties;
+typedef VkResult(VKAPI_PTR* PFN_HMS_XEG_EnumerateDeviceExtensionProperties)(
+    VkPhysicalDevice physicalDevice, uint32_t* pPropertyCount,
+    XEG_ExtensionProperties* pProperties);
+}
+#endif
+
 #define HILOG(...) OH_LOG_INFO(LOG_APP, __VA_ARGS__)
 
 namespace hx360e {
@@ -598,6 +617,87 @@ void VulkanContext::Shutdown() {
     impl_ = nullptr;
     ready_ = false;
     HILOG("VulkanCtx: shutdown OK");
+}
+
+// XEngine Kit 能力探测：只读查询，建临时 instance 拿 physical device 后即销毁。
+// libxengine.so 用 dlopen，避免在非 Maleoon 设备上给 libentry.so 引入硬依赖。
+std::string VulkanContext::ProbeXEngineExtensions() {
+    void* xeg = dlopen("libxengine.so", RTLD_NOW | RTLD_LOCAL);
+    if (xeg == nullptr) {
+        const char* err = dlerror();
+        HILOG("XEngine: libxengine.so unavailable: %{public}s",
+              err != nullptr ? err : "?");
+        return "libxengine.so 不可用（非 Maleoon / 非中国区设备）";
+    }
+    auto enumerate =
+        reinterpret_cast<PFN_HMS_XEG_EnumerateDeviceExtensionProperties>(
+            dlsym(xeg, "HMS_XEG_EnumerateDeviceExtensionProperties"));
+    if (enumerate == nullptr) {
+        HILOG("XEngine: HMS_XEG_EnumerateDeviceExtensionProperties missing");
+        dlclose(xeg);
+        return "libxengine.so 无枚举接口";
+    }
+
+    VkApplicationInfo app_info{};
+    app_info.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+    app_info.pApplicationName = "HX360E";
+    app_info.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
+    app_info.pEngineName = "HX360E";
+    app_info.engineVersion = VK_MAKE_VERSION(1, 0, 0);
+    app_info.apiVersion = VK_API_VERSION_1_0;
+    VkInstanceCreateInfo instance_info{};
+    instance_info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+    instance_info.pApplicationInfo = &app_info;
+    VkInstance instance = VK_NULL_HANDLE;
+    VkResult r = vkCreateInstance(&instance_info, nullptr, &instance);
+    if (r != VK_SUCCESS) {
+        HILOG("XEngine: vkCreateInstance FAIL (%{public}d)", int(r));
+        dlclose(xeg);
+        return "建临时 Vulkan instance 失败";
+    }
+
+    std::string out;
+    uint32_t pd_count = 0;
+    if (vkEnumeratePhysicalDevices(instance, &pd_count, nullptr) == VK_SUCCESS &&
+        pd_count > 0) {
+        std::vector<VkPhysicalDevice> devices(pd_count);
+        vkEnumeratePhysicalDevices(instance, &pd_count, devices.data());
+        for (uint32_t i = 0; i < devices.size(); ++i) {
+            VkPhysicalDeviceProperties dev_props{};
+            vkGetPhysicalDeviceProperties(devices[i], &dev_props);
+            uint32_t count = 0;
+            if (enumerate(devices[i], &count, nullptr) != VK_SUCCESS) {
+                continue;
+            }
+            std::vector<XEG_ExtensionProperties> props(count);
+            if (count > 0) {
+                // VK_INCOMPLETE 也无所谓：拿到多少算多少。
+                enumerate(devices[i], &count, props.data());
+            }
+            if (i > 0) {
+                out += " | ";
+            }
+            out += std::string(dev_props.deviceName) + ": ";
+            if (props.empty()) {
+                out += "(无 XEG 特性)";
+            } else {
+                for (size_t e = 0; e < props.size(); ++e) {
+                    if (e > 0) {
+                        out += ", ";
+                    }
+                    out += std::string(props[e].extensionName) + "(v" +
+                           std::to_string(props[e].version) + ")";
+                }
+            }
+        }
+    }
+    vkDestroyInstance(instance, nullptr);
+    dlclose(xeg);
+    if (out.empty()) {
+        out = "(未查询到 XEG 特性)";
+    }
+    HILOG("XEngine: %{public}s", out.c_str());
+    return out;
 }
 
 }  // namespace hx360e

@@ -38,6 +38,20 @@ set(XE_XENDROID_ROOT "D:/Code/OpenSource/XenDroid/emulator-core/src/main/cpp"
 # 关闭 ThinLTO：OHOS 工具链默认不带 lld，Release 下 -flto=thin -fuse-ld=lld 会失败。
 set(XENIA_ENABLE_LTO OFF CACHE BOOL "" FORCE)
 
+# XEngine Kit（Maleoon GPU 加速）头文件：从编译器路径反推 hms SDK（<hms>/native/BiSheng/bin），
+# 只加 include 目录，运行时用 dlopen("libxengine.so")，不硬链接 —— 保证在非
+# Maleoon / 非中国区设备上 libentry.so 仍能正常加载。找不到头文件就跳过（走本地声明兜底）。
+get_filename_component(_hx360e_compiler_dir "${CMAKE_CXX_COMPILER}" DIRECTORY)
+get_filename_component(_hx360e_xengine_include
+    "${_hx360e_compiler_dir}/../../../native/sysroot/usr/include" ABSOLUTE)
+if(EXISTS "${_hx360e_xengine_include}/xengine/xeg_vulkan_extension.h")
+    set(HX360E_XENGINE_INCLUDE_DIR "${_hx360e_xengine_include}")
+    add_compile_definitions(HX360E_HAVE_XENGINE_HEADERS=1)
+    message(STATUS "XEngine headers: ${_hx360e_xengine_include}")
+else()
+    message(STATUS "XEngine headers not found, using local ABI declarations")
+endif()
+
 # EXCLUDE_FROM_ALL：只构建被 entry 依赖的目标，不编译桌面端 xenia-app 等。
 add_subdirectory("${XE_XENDROID_ROOT}/xenia"
     "${CMAKE_CURRENT_BINARY_DIR}/xendroid-build" EXCLUDE_FROM_ALL)
@@ -68,6 +82,10 @@ target_include_directories(entry PRIVATE
         "${XE_XENDROID_ROOT}/xenia/src"
         "${XE_XENDROID_ROOT}/xenia/third_party"
 )
+
+if(HX360E_XENGINE_INCLUDE_DIR)
+    target_include_directories(entry PRIVATE "${HX360E_XENGINE_INCLUDE_DIR}")
+endif()
 
 target_link_libraries(entry PUBLIC
         libace_napi.z.so

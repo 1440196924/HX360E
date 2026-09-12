@@ -5,7 +5,7 @@ import { fileIo } from '@kit.CoreFileKit';
 import { HdsTabs, HdsTabsController, hdsMaterial } from '@kit.UIDesignKit';
 import testNapi from 'libentry.so';
 import { GameLibrary, GameMeta } from '../common/GameLibrary';
-import { GameInstall } from '../common/GameInstall';
+import { GameInstall, InstallControl, InstallProgress } from '../common/GameInstall';
 import { SettingsStore } from '../common/SettingsStore';
 import { AdvancedPage } from './AdvancedPage';
 import { ControlsPage } from './ControlsPage';
@@ -123,12 +123,63 @@ struct GameCard {
     .padding(12)
     .backgroundColor($r('app.color.card_bg'))
     .borderRadius(12)
+    // 点击卡片直接启动游戏
+    .onClick(() => {
+      this.onStart(this.item);
+    })
     // 长按：系统上下文菜单（IMAGE 预览 = 该项快照保持清晰浮起，背景自动模糊）
     .bindContextMenu(this.menu(), ResponseType.LongPress, {
       preview: MenuPreviewMode.IMAGE,
       previewBorderRadius: 12,
       previewAnimationOptions: { scale: [0.9, 1.0] },
     })
+  }
+}
+
+/**
+ * 列表行：点一下启动，左滑露出删除按钮（红色圆 + 白色垃圾桶，对齐系统闹钟列表）。
+ * List 的子组件只能是 ListItem / ListItemGroup / 自定义组件，所以整行抽成组件，
+ * ListItem 必须是它的根节点；这样 swipeAction 的 builder 也不用带参数。
+ */
+@Component
+struct GameRow {
+  item: GameMeta = new GameMeta();
+  onStart: (item: GameMeta) => void = (item: GameMeta) => {
+  };
+  onDelete: (item: GameMeta) => void = (item: GameMeta) => {
+  };
+
+  @Builder
+  deleteAction() {
+    Row() {
+      Column() {
+        SymbolGlyph($r('sys.symbol.trash_fill'))
+          .fontSize(22)
+          .fontColor([Color.White])
+      }
+      .width(56)
+      .height(56)
+      .borderRadius(28)
+      .backgroundColor($r('app.color.danger'))
+      .justifyContent(FlexAlign.Center)
+      .onClick(() => {
+        this.onDelete(this.item);
+      })
+    }
+    .width(72)
+    .height('100%')
+    .justifyContent(FlexAlign.Center)
+  }
+
+  build() {
+    ListItem() {
+      GameCard({
+        item: this.item,
+        onStart: this.onStart,
+        onDelete: this.onDelete,
+      })
+    }
+    .swipeAction({ end: this.deleteAction() })
   }
 }
 
@@ -152,6 +203,16 @@ struct Home {
   @State statusBarVp: number = 0;
   // 安装中（避免重复触发选择器）。
   @State busy: boolean = false;
+  // 安装进度浮层（复制在后台线程跑，这里只显示进度）。
+  @State installing: boolean = false;
+  @State installCanceling: boolean = false;
+  @State installPercent: number = 0;
+  @State installTitle: string = '正在安装';
+  @State installDetail: string = '';
+  @State installStats: string = '';
+  /** XEngine Kit（Maleoon GPU 加速）特性清单（临时诊断显示，同时见「关于」页）。 */
+  @State xengineInfo: string = '';
+  private installControl: InstallControl = new InstallControl();
   private hdsTabController: HdsTabsController = new HdsTabsController();
   // 官方路由栈：子页（高级选项/控制/目录/关于）以 NavDestination 推入。
   private pathStack: NavPathStack = new NavPathStack();
@@ -161,8 +222,24 @@ struct Home {
     if (ctx !== undefined) {
       Orientation.portrait(ctx);
       this.initSafeArea(ctx);
+      // 首次运行写默认配置；旧版本配置按 CONFIG_SCHEMA_VERSION 迁移。
+      SettingsStore.ensureDefaults(ctx.filesDir);
     }
     this.reloadGames();
+    this.probeXEngine();
+  }
+
+  // XEngine Kit（Maleoon GPU 加速）能力探测，只查一次（临时诊断：显示在游戏库底部）。
+  private probeXEngine(): void {
+    if (this.xengineInfo !== '') {
+      return;
+    }
+    try {
+      this.xengineInfo = `XEngine: ${testNapi.emulator.probeXEngine()}`;
+      hilog.info(DOMAIN, TAG, 'xengine: %{public}s', this.xengineInfo);
+    } catch (e) {
+      this.xengineInfo = 'XEngine: 探测失败';
+    }
   }
 
   // 从别的页面返回时刷新（例如导入完游戏回来 / 从横屏的游戏页返回）。
@@ -257,6 +334,13 @@ struct Home {
       '--gpu=vulkan',
       '--apu=ohaudio',
       '--hid=nop',
+      // 强制 FIFO 呈现（禁掉 IMMEDIATE/MAILBOX/FIFO_RELAXED）：presenter 才会走
+      // PaintMode::kUIThreadOnRequest，由 UI 线程负责 present（对齐安卓行为）。详见
+      // ui/vulkan/vulkan_presenter.cc 的 present mode 选择顺序与
+      // ui/presenter.cc 的 GetDesiredPaintModeFromUIThread。
+      '--vulkan_allow_present_mode_immediate=false',
+      '--vulkan_allow_present_mode_mailbox=false',
+      '--vulkan_allow_present_mode_fifo_relaxed=false',
     ];
     // 高级选项里保存过的设置（稀疏 TOML）：存在才带上，否则用 cvar 默认值。
     try {
@@ -284,10 +368,26 @@ struct Home {
   }
 
   deleteGame(item: GameMeta): void {
+    const dir: string = this.filesDir();
+    if (dir === '') {
+      return;
+    }
     try {
-      GameLibrary.remove(this.filesDir(), item.id);
+      GameLibrary.remove(dir, item.id);
       this.statusText = `已删除 ${item.name}`;
-      this.reloadGames();
+      // 让删掉的那行收起来、后面几行平滑归位：数据变更放在 animateTo 里，
+      // List 会自己做增删过渡（官方左滑删除示例也是这个写法）。
+      const index: number = this.games.findIndex((g: GameMeta) => g.id === item.id);
+      if (index < 0) {
+        this.reloadGames();
+        return;
+      }
+      this.getUIContext().animateTo({
+        duration: 300,
+        curve: Curve.FastOutSlowIn,
+      }, () => {
+        this.games.splice(index, 1);
+      });
     } catch (e) {
       this.statusText = '删除失败（见 hilog）';
       hilog.error(DOMAIN, TAG, 'delete failed: %{public}s', JSON.stringify(e));
@@ -305,18 +405,33 @@ struct Home {
       return;
     }
     this.busy = true;
+    this.installCanceling = false;
+    this.installPercent = 0;
+    this.installControl = new InstallControl();
     try {
       this.statusText = await GameInstall.installFolder(ctx, ctx.filesDir,
-        (text: string) => {
-          this.statusText = text;
-        });
+        (p: InstallProgress) => {
+          this.onInstallProgress(p);
+        },
+        this.installControl);
       this.reloadGames();
     } catch (e) {
       this.statusText = '导入失败（见 hilog）';
       hilog.error(DOMAIN, TAG, 'import failed: %{public}s', JSON.stringify(e));
     } finally {
       this.busy = false;
+      this.installing = false;
+      this.installCanceling = false;
     }
+  }
+
+  // 安装进度回调（复制在 taskpool 线程上，回调回主线程刷新 @State）。
+  private onInstallProgress(p: InstallProgress): void {
+    this.installing = p.active;
+    this.installTitle = p.title;
+    this.installDetail = this.installCanceling ? '正在取消…' : p.detail;
+    this.installStats = p.stats;
+    this.installPercent = p.percent;
   }
 
   async doExportLogs(): Promise<void> {
@@ -442,17 +557,15 @@ struct Home {
       } else {
         List({ space: 8 }) {
           ForEach(this.games, (item: GameMeta) => {
-            ListItem() {
-              GameCard({
-                item: item,
-                onStart: (g: GameMeta) => {
-                  this.startGame(g);
-                },
-                onDelete: (g: GameMeta) => {
-                  this.deleteGame(g);
-                },
-              })
-            }
+            GameRow({
+              item: item,
+              onStart: (g: GameMeta) => {
+                this.startGame(g);
+              },
+              onDelete: (g: GameMeta) => {
+                this.deleteGame(g);
+              },
+            })
           }, (item: GameMeta) => item.id)
         }
         .width('100%')
@@ -465,6 +578,12 @@ struct Home {
         .fontSize(11)
         .fontColor($r('app.color.accent'))
         .maxLines(2)
+        .padding({ left: 16, right: 16, bottom: 104 })
+
+      Text(this.xengineInfo)
+        .fontSize(10)
+        .fontColor($r('app.color.text_hint'))
+        .maxLines(6)
         .padding({ left: 16, right: 16, bottom: 104 })
     }
     .width('100%')
@@ -582,6 +701,81 @@ struct Home {
     })
   }
 
+  // 安装进度浮层：复制跑在后台线程，这里只显示进度 + 取消（遮住整屏防误触）。
+  @Builder
+  installOverlay() {
+    Column() {
+      Column({ space: 12 }) {
+        Row({ space: 10 }) {
+          LoadingProgress()
+            .width(20)
+            .height(20)
+            .color($r('app.color.accent'))
+          Text(this.installTitle)
+            .fontSize(16)
+            .fontWeight(FontWeight.Medium)
+            .fontColor($r('app.color.text_primary'))
+          Blank()
+          Text(`${Math.floor(this.installPercent)}%`)
+            .fontSize(14)
+            .fontColor($r('app.color.accent'))
+        }
+        .width('100%')
+
+        Progress({ value: this.installPercent, total: 100, type: ProgressType.Linear })
+          .width('100%')
+          .color($r('app.color.accent'))
+          .backgroundColor($r('app.color.chip_bg'))
+          .style({ strokeWidth: 6 })
+
+        Text(this.installDetail)
+          .fontSize(12)
+          .fontColor($r('app.color.text_secondary'))
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .width('100%')
+
+        Row() {
+          Text(this.installStats)
+            .fontSize(11)
+            .fontColor($r('app.color.text_hint'))
+            .layoutWeight(1)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+          Button(this.installCanceling ? '正在取消…' : '取消')
+            .fontSize(13)
+            .height(32)
+            .padding({ left: 16, right: 16 })
+            .backgroundColor($r('app.color.chip_bg'))
+            .fontColor($r('app.color.text_primary'))
+            .enabled(!this.installCanceling)
+            .onClick(() => {
+              this.installCanceling = true;
+              this.installDetail = '正在取消…';
+              this.installControl.canceled = true;
+            })
+        }
+        .width('100%')
+      }
+      .width('86%')
+      .padding(18)
+      .backgroundColor($r('app.color.card_bg'))
+      .borderRadius(20)
+      .shadow({
+        radius: 32,
+        color: $r('app.color.mask'),
+        offsetX: 0,
+        offsetY: 8,
+      })
+    }
+    .width('100%')
+    .height('100%')
+    .justifyContent(FlexAlign.Center)
+    .backgroundColor($r('app.color.mask'))
+    .onClick(() => {
+    })
+  }
+
   build() {
     Navigation(this.pathStack) {
       Stack({ alignContent: Alignment.Center }) {
@@ -591,6 +785,9 @@ struct Home {
         .width('100%')
         .height('100%')
 
+        if (this.installing) {
+          this.installOverlay()
+        }
       }
       .width('100%')
       .height('100%')

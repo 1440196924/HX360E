@@ -1,10 +1,30 @@
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import testNapi from 'libentry.so';
-import { Setting } from './SettingsSchema';
+import { Setting, SettingsCategory, SettingsSchema } from './SettingsSchema';
 
 const DOMAIN = 0x0000;
 const TAG = 'HX360E';
+
+/**
+ * 配置结构版本：**改了任何设置的默认值就 +1**，并在 CONFIG_MIGRATIONS 里登记
+ * 「旧默认值 → 新默认值」。启动时 ensureDefaults() 会：
+ *   1. 文件不存在 → 把 schema 全部默认值写进去（对照安卓版启动写 default_config.toml）；
+ *   2. 文件存在但版本落后 → 执行迁移（只替换「还等于旧默认值」的键 = 用户没改过）、
+ *      补齐缺失的键、写入新版本号；
+ *   3. 版本相同 → 直接返回，不碰文件。
+ * 这样默认值的改动能真正生效，又不会覆盖用户自己改过的值。
+ */
+const CONFIG_SCHEMA_VERSION: number = 2;
+const CONFIG_VERSION_TAG: string = 'HX360E|schema_version';
+/** [标签, 旧默认值, 新默认值] */
+const CONFIG_MIGRATIONS: string[][] = [
+  // log_level 默认 info→warning：避免 xenia 日志洪峰触发 hilog 流控、把诊断日志一起丢掉。
+  ['Logging|log_level', '2', '1'],
+  // GPU 成本 A/B：真实遮挡查询→伪造（tiled GPU 上查询易串行化）；回读解析 uma→none。
+  ['GPU|occlusion_query', 'fast', 'fake'],
+  ['GPU|readback_resolve', 'uma', 'none'],
+];
 
 /**
  * 设置的保存/加载：读写 xenia 的全局 TOML 配置（--config 指向它）。
@@ -31,6 +51,97 @@ export class SettingsStore {
   /** 全局配置文件（启动时通过 --config= 传给模拟器）。 */
   static configPath(filesDir: string): string {
     return `${filesDir}/storage/xenia.config.toml`;
+  }
+
+  /**
+   * 启动时确保配置文件存在且为新版本（详见文件头 CONFIG_SCHEMA_VERSION 说明）。
+   * 文件不存在或版本落后才写盘；版本一致时完全不碰文件。
+   */
+  static ensureDefaults(filesDir: string): void {
+    const path: string = SettingsStore.configPath(filesDir);
+    const slash: number = path.lastIndexOf('/');
+    if (slash > 0) {
+      const dir: string = path.substring(0, slash);
+      try {
+        if (!fs.accessSync(dir)) {
+          fs.mkdirSync(dir, true);
+        }
+      } catch (e) {
+        hilog.error(DOMAIN, TAG, 'mkdir storage failed: %{public}s',
+          JSON.stringify(e));
+      }
+    }
+
+    let exists: boolean = false;
+    try {
+      exists = fs.accessSync(path);
+    } catch (e) {
+      exists = false;
+    }
+
+    let handle: bigint = BigInt(0);
+    let storedVersion: string = '(none)';
+    try {
+      handle = exists ? testNapi.config.open(path)
+                      : testNapi.config.openString('');
+      if (handle === BigInt(0)) {
+        hilog.error(DOMAIN, TAG, 'config open failed for %{public}s', path);
+        return;
+      }
+      const v: string | null = exists
+        ? testNapi.config.loadEntry(handle, CONFIG_VERSION_TAG) : null;
+      storedVersion = v === null ? '(none)' : v;
+    } catch (e) {
+      hilog.error(DOMAIN, TAG, 'config read failed: %{public}s', JSON.stringify(e));
+      return;
+    }
+
+    const current: string = `${CONFIG_SCHEMA_VERSION}`;
+    if (exists && storedVersion === current) {
+      hilog.info(DOMAIN, TAG, 'config up to date (v%{public}s)', current);
+      testNapi.config.free(handle);
+      return;
+    }
+
+    try {
+      let updated: number = 0;
+      // 1) 迁移：只替换「还是旧默认值」的键（用户改过的值不动）。
+      for (const m of CONFIG_MIGRATIONS) {
+        const cur: string | null = testNapi.config.loadEntry(handle, m[0]);
+        if (cur !== null && cur === m[1]) {
+          testNapi.config.saveEntry(handle, m[0], m[2]);
+          updated++;
+          hilog.info(DOMAIN, TAG, 'migrate %{public}s: %{public}s → %{public}s',
+            m[0], m[1], m[2]);
+        }
+      }
+      // 2) 补齐缺失的键（默认值）。
+      const cats: SettingsCategory[] = SettingsSchema.categories();
+      let filled: number = 0;
+      for (const cat of cats) {
+        for (const s of cat.settings) {
+          if (s.def === '') {
+            continue;
+          }
+          const cur: string | null = testNapi.config.loadEntry(handle, s.tag());
+          if (cur === null) {
+            testNapi.config.saveEntry(handle, s.tag(), s.def);
+            filled++;
+          }
+        }
+      }
+      testNapi.config.saveEntry(handle, CONFIG_VERSION_TAG, current);
+      testNapi.config.saveToFile(handle, path);
+      const ll: string | null = testNapi.config.loadEntry(handle, 'Logging|log_level');
+      hilog.info(DOMAIN, TAG,
+        'config %{public}s → v%{public}s: %{public}d migrated, %{public}d filled, log_level=%{public}s',
+        exists ? 'migrated' : 'seeded', current, updated, filled,
+        ll === null ? '(unset)' : ll);
+    } catch (e) {
+      hilog.error(DOMAIN, TAG, 'config write failed: %{public}s', JSON.stringify(e));
+    } finally {
+      testNapi.config.free(handle);
+    }
   }
 
   open(filesDir: string): void {

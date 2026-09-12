@@ -1,11 +1,21 @@
 import { picker, fileIo as fs, fileUri } from '@kit.CoreFileKit';
 import { common } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
+import { taskpool } from '@kit.ArkTS';
 import testNapi from 'libentry.so';
 import { GameLibrary, GameMeta } from './GameLibrary';
+import { copyRanges } from './InstallCopy';
 
 const DOMAIN = 0x0000;
 const TAG = 'HX360E';
+/** 一个复制批次最多装多少字节（= 一次 taskpool 任务的工作量）。 */
+const BATCH_BYTES: number = 16 * 1024 * 1024;
+/** 一个批次最多装多少条记录（小文件多时别把批次撑太大）。 */
+const BATCH_ITEMS: number = 32;
+/** 同时挂到任务池上的复制任务数。 */
+const CONCURRENCY: number = 4;
+/** 扫描阶段每发现多少个文件刷新一次 UI。 */
+const SCAN_REPORT_EVERY: number = 256;
 
 /** 从 Xbox 元数据里读到的标题信息。 */
 class TitleMeta {
@@ -14,16 +24,66 @@ class TitleMeta {
   iconBytes: ArrayBuffer | undefined = undefined;
 }
 
+/** 安装进度：主线程持有的普通对象，回调里直接映射成 @State。 */
+export class InstallProgress {
+  /** true = 显示进度浮层（扫描/复制/落元数据阶段）。 */
+  active: boolean = false;
+  title: string = '正在安装';
+  /** 当前动作（扫描中 / 正在复制：xxx）。 */
+  detail: string = '';
+  /** 已复制 / 总量。 */
+  stats: string = '';
+  percent: number = 0;
+  copied: number = 0;
+  total: number = 0;
+}
+
+/** 取消开关：UI 线程置 true，安装循环在下一批任务前检查。 */
+export class InstallControl {
+  canceled: boolean = false;
+}
+
+/** 扫描结果：待复制文件清单（相对路径 / 真实路径 / picker URI / 大小）。 */
+class InstallPlan {
+  rels: string[] = [];
+  srcs: string[] = [];
+  uris: string[] = [];
+  sizes: number[] = [];
+  totalBytes: number = 0;
+}
+
+/** 一个复制批次（并列数组，直接喂给并发函数）。 */
+class CopyBatch {
+  label: string = '';
+  uris: string[] = [];
+  srcs: string[] = [];
+  dsts: string[] = [];
+  offsets: number[] = [];
+  lengths: number[] = [];
+  bytes: number = 0;
+}
+
 /**
- * 游戏安装：调系统文件选择器 → 复制进沙箱槽位 → 解析启动目标 → 写元数据。
- * 逻辑与 Index（demo 页）一致；本设备上 copyFile 会写出全 0、不显式传 offset 的
- * read/write 不可靠，所以源和目标都显式给 offset。
+ * 游戏安装：调系统文件选择器 → 扫描源目录 → 建目标文件 → **后台线程分批复
+ * 制**（taskpool，4 并发，带进度）→ 解析启动目标 → 写元数据。
+ *
+ * 复制放到任务池线程上，主线程只做扫描/建文件/汇总进度，所以复制几 GB 的
+ * 游戏时 UI 不卡、进度条能动、还能取消。每个批次用并列的基础类型数组传参，
+ * 跨线程序列化最省。
+ *
+ * 注意：本设备上 copyFile 会写出全 0、不显式传 offset 的 read/write 不可靠，
+ * 所以源和目标都显式给 offset（在 InstallCopy.copyRanges 里）。
  */
 export class GameInstall {
   /** 选「文件夹」安装（GOD / 多 data 文件包必须用文件夹）。返回状态文案。 */
   static async installFolder(ctx: common.Context, filesDir: string,
-                             onStatus: (text: string) => void): Promise<string> {
-    onStatus('请选择游戏文件夹…');
+                             onProgress: (p: InstallProgress) => void,
+                             control: InstallControl): Promise<string> {
+    const p = new InstallProgress();
+    p.active = false;
+    p.detail = '请选择游戏文件夹…';
+    onProgress(p);
+
     const options = new picker.DocumentSelectOptions();
     options.maxSelectNumber = 1;
     options.selectMode = picker.DocumentSelectMode.FOLDER;
@@ -44,28 +104,97 @@ export class GameInstall {
     const displayName: string = GameInstall.uriBaseName(srcPath);
     hilog.info(DOMAIN, TAG, 'install folder: uri=%{public}s path=%{public}s',
       uri, srcPath);
-    onStatus('复制到沙箱中…（大文件请耐心等待）');
+
+    // 1) 扫描源目录：先拿到文件清单和总字节数，进度条才有分母。
+    p.active = true;
+    p.detail = '正在扫描源文件夹…';
+    p.percent = 0;
+    onProgress(p);
+    const plan: InstallPlan = GameInstall.scan(srcPath, uri, p, onProgress);
+    if (plan.rels.length === 0) {
+      return '文件夹里没有可复制的文件';
+    }
 
     const id: string = GameLibrary.makeId(displayName, Date.now());
     const dir: string = GameLibrary.gameDir(filesDir, id);
     GameLibrary.ensureDir(dir);
 
-    let count: number = 0;
+    // 2) 在主线程把所有目标文件建好（TRUNC），后台线程只做 READ_WRITE。
+    //    这样同一个大文件的多个分段并发写也不会互相截断。
     try {
-      count = await GameInstall.copyRecursive(srcPath, uri, dir);
-    } catch (e) {
-      hilog.error(DOMAIN, TAG, 'copy failed: %{public}s', JSON.stringify(e));
-      try {
-        GameLibrary.remove(filesDir, id);
-      } catch (e2) {
-        // 清理失败不影响结果
+      for (const rel of plan.rels) {
+        const dst: string = `${dir}/${rel}`;
+        const slash: number = dst.lastIndexOf('/');
+        if (slash > 0) {
+          GameLibrary.ensureDir(dst.substring(0, slash));
+        }
+        fs.closeSync(fs.openSync(dst, fs.OpenMode.READ_WRITE
+          | fs.OpenMode.CREATE | fs.OpenMode.TRUNC));
       }
-      return '复制失败（见 hilog）';
+    } catch (e) {
+      hilog.error(DOMAIN, TAG, 'create dest failed: %{public}s', JSON.stringify(e));
+      GameInstall.cleanup(filesDir, id);
+      return '创建目标文件失败（见 hilog）';
     }
 
+    // 3) 后台分批复制。
+    const batches: CopyBatch[] = GameInstall.planBatches(plan, dir);
+    hilog.info(DOMAIN, TAG,
+      'install: %{public}d files / %{public}d bytes / %{public}d batches',
+      plan.rels.length, plan.totalBytes, batches.length);
+    p.total = plan.totalBytes;
+    p.copied = 0;
+    p.percent = 0;
+    p.detail = '正在复制…';
+    p.stats = `${GameLibrary.formatSize(plan.totalBytes)} 待复制`;
+    onProgress(p);
+
+    let copied: number = 0;
+    let next: number = 0;
+    while (next < batches.length) {
+      if (control.canceled) {
+        break;
+      }
+      const wave: CopyBatch[] = batches.slice(next, next + CONCURRENCY);
+      next += wave.length;
+      const group: taskpool.TaskGroup = new taskpool.TaskGroup();
+      for (const b of wave) {
+        group.addTask(new taskpool.Task(copyRanges, b.uris, b.srcs, b.dsts,
+          b.offsets, b.lengths));
+      }
+      try {
+        const ret: Object = await taskpool.execute(group);
+        const nums: number[] = ret as number[];
+        for (const n of nums) {
+          copied += n;
+        }
+      } catch (e) {
+        hilog.error(DOMAIN, TAG, 'copy failed: %{public}s', JSON.stringify(e));
+        GameInstall.cleanup(filesDir, id);
+        return '复制失败（见 hilog）';
+      }
+      p.copied = copied;
+      p.percent = plan.totalBytes > 0
+        ? Math.min(99, copied * 100 / plan.totalBytes) : 99;
+      p.detail = `正在复制：${wave[0].label}`;
+      p.stats = `${GameLibrary.formatSize(copied)} / ` +
+        `${GameLibrary.formatSize(plan.totalBytes)}`;
+      onProgress(p);
+      hilog.info(DOMAIN, TAG, 'install: %{public}d/%{public}d bytes',
+        copied, plan.totalBytes);
+    }
+    if (control.canceled) {
+      GameInstall.cleanup(filesDir, id);
+      return '已取消安装';
+    }
+
+    // 4) 收尾：找启动目标 + 读标题/封面 + 落元数据。
+    p.detail = '正在读取游戏信息…';
+    p.percent = 99;
+    onProgress(p);
     const target: string = GameLibrary.resolveTarget(dir, 0);
     if (target === '') {
-      GameLibrary.remove(filesDir, id);
+      GameInstall.cleanup(filesDir, id);
       return '已复制但未找到可启动文件（default.xex / STFS / game*）';
     }
 
@@ -76,8 +205,8 @@ export class GameInstall {
     meta.titleId = tm.titleId;
     meta.target = GameLibrary.toRelative(dir, target);
     meta.kind = 'folder';
-    meta.fileCount = count;
-    meta.sizeBytes = GameLibrary.dirSize(dir);
+    meta.fileCount = plan.rels.length;
+    meta.sizeBytes = copied;
     meta.installedAt = Date.now();
     if (tm.iconBytes !== undefined && tm.iconBytes.byteLength > 0) {
       const iconPath: string = GameLibrary.iconPathOf(filesDir, id);
@@ -92,13 +221,127 @@ export class GameInstall {
     }
     GameLibrary.saveMeta(filesDir, meta);
     hilog.info(DOMAIN, TAG, 'installed slot=%{public}s target=%{public}s files=%{public}d',
-      id, target, count);
+      id, target, plan.rels.length);
     hilog.info(DOMAIN, TAG, 'install: target head=%{public}s',
       GameInstall.readHeadHex(target, 16));
-    return `已安装：${meta.name}（${count} 个文件）`;
+
+    p.active = false;
+    p.percent = 100;
+    p.copied = copied;
+    p.detail = meta.name;
+    p.stats = `${GameLibrary.formatSize(copied)} · ${plan.rels.length} 个文件`;
+    onProgress(p);
+    return `已安装：${meta.name}（${plan.rels.length} 个文件）`;
   }
 
   // ---- 内部工具 ----
+
+  private static cleanup(filesDir: string, id: string): void {
+    try {
+      GameLibrary.remove(filesDir, id);
+    } catch (e) {
+      // 清理失败不影响结果
+    }
+  }
+
+  // 扫描源目录（只 list/stat，不读内容）。会定期回调刷新「已发现 N 个文件」。
+  private static scan(srcPath: string, srcUri: string, p: InstallProgress,
+                      onProgress: (p: InstallProgress) => void): InstallPlan {
+    const plan = new InstallPlan();
+    GameInstall.walk(srcPath, srcUri, '', plan, p, onProgress, 0);
+    p.detail = `已发现 ${plan.rels.length} 个文件`;
+    p.stats = GameLibrary.formatSize(plan.totalBytes);
+    onProgress(p);
+    return plan;
+  }
+
+  private static walk(srcPath: string, srcUri: string, rel: string,
+                      plan: InstallPlan, p: InstallProgress,
+                      onProgress: (p: InstallProgress) => void,
+                      depth: number): void {
+    if (depth > 16) {
+      return;
+    }
+    let names: string[] = [];
+    let isDir: boolean = true;
+    try {
+      names = fs.listFileSync(srcPath);
+    } catch (e1) {
+      try {
+        names = fs.listFileSync(srcUri);
+      } catch (e2) {
+        isDir = false;
+      }
+    }
+    if (!isDir) {
+      let size: number = 0;
+      try {
+        size = fs.statSync(srcPath).size;
+      } catch (e1) {
+        try {
+          size = fs.statSync(srcUri).size;
+        } catch (e2) {
+          size = 0;
+        }
+      }
+      plan.rels.push(rel);
+      plan.srcs.push(srcPath);
+      plan.uris.push(srcUri);
+      plan.sizes.push(size);
+      plan.totalBytes += size;
+      if (plan.rels.length % SCAN_REPORT_EVERY === 0) {
+        p.detail = `已发现 ${plan.rels.length} 个文件`;
+        p.stats = GameLibrary.formatSize(plan.totalBytes);
+        onProgress(p);
+      }
+      return;
+    }
+    for (const name of names) {
+      const childRel: string = rel === '' ? name : `${rel}/${name}`;
+      GameInstall.walk(`${srcPath}/${name}`, `${srcUri}/${name}`, childRel,
+        plan, p, onProgress, depth + 1);
+    }
+  }
+
+  // 把清单切成复制批次：大文件按段切（每段 4~16MB），小文件攒批。
+  private static planBatches(plan: InstallPlan, dir: string): CopyBatch[] {
+    const out: CopyBatch[] = [];
+    // 目标：整盘大约 128 次进度刷新，所以单段 = 总大小/128，夹在 4~16MB。
+    const seg: number = Math.max(4 * 1024 * 1024,
+      Math.min(BATCH_BYTES, Math.floor(plan.totalBytes / 128)));
+    let cur = new CopyBatch();
+    for (let i = 0; i < plan.rels.length; i++) {
+      const size: number = plan.sizes[i];
+      if (size <= 0) {
+        continue;
+      }
+      const dst: string = `${dir}/${plan.rels[i]}`;
+      for (let off = 0; off < size; off += seg) {
+        const len: number = Math.min(seg, size - off);
+        if (cur.bytes > 0 && cur.bytes + len > BATCH_BYTES) {
+          out.push(cur);
+          cur = new CopyBatch();
+        }
+        if (cur.label === '') {
+          cur.label = plan.rels[i];
+        }
+        cur.uris.push(plan.uris[i]);
+        cur.srcs.push(plan.srcs[i]);
+        cur.dsts.push(dst);
+        cur.offsets.push(off);
+        cur.lengths.push(len);
+        cur.bytes += len;
+        if (cur.bytes >= BATCH_BYTES || cur.lengths.length >= BATCH_ITEMS) {
+          out.push(cur);
+          cur = new CopyBatch();
+        }
+      }
+    }
+    if (cur.lengths.length > 0) {
+      out.push(cur);
+    }
+    return out;
+  }
 
   // picker 的 docs URI → 真实路径（fs 的目录接口只接受路径）。
   private static uriToPath(uri: string): string {
@@ -216,80 +459,6 @@ export class GameInstall {
       }
     } catch (e) {
       return '(read failed)';
-    }
-  }
-
-  // 递归复制目录/文件到沙箱，返回文件数。
-  private static async copyRecursive(srcPath: string, srcUri: string,
-                                     destPath: string): Promise<number> {
-    let isDir: boolean = true;
-    let names: string[] = [];
-    try {
-      names = fs.listFileSync(srcPath);
-    } catch (e1) {
-      try {
-        names = fs.listFileSync(srcUri);
-      } catch (e2) {
-        isDir = false;
-      }
-    }
-    if (!isDir) {
-      const bytes: number = await GameInstall.copyFileAny(srcPath, srcUri, destPath);
-      hilog.info(DOMAIN, TAG, 'install: file %{public}s (%{public}d bytes)',
-        GameInstall.uriBaseName(srcPath), bytes);
-      return 1;
-    }
-    GameLibrary.ensureDir(destPath);
-    let count: number = 0;
-    for (const name of names) {
-      count += await GameInstall.copyRecursive(`${srcPath}/${name}`,
-        `${srcUri}/${name}`, `${destPath}/${name}`);
-    }
-    return count;
-  }
-
-  // 复制单个文件：源优先用 picker URI，失败退回真实路径；两端都显式给 offset。
-  private static async copyFileAny(srcPath: string, srcUri: string,
-                                   destPath: string): Promise<number> {
-    let srcFd: number = -1;
-    try {
-      srcFd = fs.openSync(srcUri, fs.OpenMode.READ_ONLY).fd;
-    } catch (e1) {
-      try {
-        srcFd = fs.openSync(srcPath, fs.OpenMode.READ_ONLY).fd;
-      } catch (e2) {
-        hilog.error(DOMAIN, TAG, 'open src failed: %{public}s', srcPath);
-        throw new Error(`open src failed: ${srcPath}`);
-      }
-    }
-    try {
-      const size: number = fs.statSync(srcFd).size;
-      const dstFd: number = fs.openSync(destPath,
-        fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC).fd;
-      try {
-        const chunk: number = 4 * 1024 * 1024;
-        const buf = new ArrayBuffer(chunk);
-        let copied: number = 0;
-        while (copied < size) {
-          const want: number = Math.min(chunk, size - copied);
-          const rd: number = fs.readSync(srcFd, buf,
-            { offset: copied, length: want });
-          if (rd <= 0) {
-            break;
-          }
-          fs.writeSync(dstFd, buf, { offset: copied, length: rd });
-          copied += rd;
-        }
-        if (copied !== size) {
-          hilog.error(DOMAIN, TAG, 'copy short: %{public}s %{public}d/%{public}d',
-            destPath, copied, size);
-        }
-        return copied;
-      } finally {
-        fs.closeSync(dstFd);
-      }
-    } finally {
-      fs.closeSync(srcFd);
     }
   }
 }

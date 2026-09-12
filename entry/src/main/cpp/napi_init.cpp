@@ -284,6 +284,14 @@ napi_value EmulatorDeviceInfo(napi_env env, napi_callback_info info) {
     return result;
 }
 
+// XEngine Kit（Maleoon GPU 加速）特性探测，结果同时打到 hilog（HX360E）。
+napi_value EmulatorProbeXEngine(napi_env env, napi_callback_info info) {
+    std::string list = hx360e::VulkanContext::ProbeXEngineExtensions();
+    napi_value result;
+    napi_create_string_utf8(env, list.c_str(), NAPI_AUTO_LENGTH, &result);
+    return result;
+}
+
 napi_value EmulatorProbeFile(napi_env env, napi_callback_info info) {
     size_t argc = 1;
     napi_value args[1] = {nullptr};
@@ -456,6 +464,8 @@ static napi_value Init(napi_env env, napi_value exports) {
          napi_default, nullptr},
         {"deviceInfo", nullptr, EmulatorDeviceInfo, nullptr, nullptr, nullptr,
          napi_default, nullptr},
+        {"probeXEngine", nullptr, EmulatorProbeXEngine, nullptr, nullptr,
+         nullptr, napi_default, nullptr},
         {"probeFile", nullptr, EmulatorProbeFile, nullptr, nullptr, nullptr,
          napi_default, nullptr},
         {"keyEvent", nullptr, EmulatorKeyEvent, nullptr, nullptr, nullptr,

@@ -11,6 +11,8 @@
 
 #include "xenia/ui/surface_ohos.h"
 
+#include "ohos_emulator.h"
+
 #define HXLOG(...) OH_LOG_INFO(LOG_APP, __VA_ARGS__)
 
 namespace hx360e {
@@ -34,12 +36,59 @@ void OhosWindowedAppContext::MainLoop() {
     {
       std::unique_lock<std::mutex> lock(mutex_);
       cond_.wait_for(lock, std::chrono::milliseconds(4),
-                     [this] { return pending_ || quit_; });
+                     [this] { return pending_ || paint_requested_ || quit_; });
       pending_ = false;
     }
     ExecutePendingFunctionsFromUIThread();
+    // 呈现请求：presenter 在 PaintMode::kUIThreadOnRequest（FIFO 交换链，见
+    // ui/presenter.cc GetDesiredPaintModeFromUIThread）下靠 Window::RequestPaint
+    // 让 UI 线程 present —— 这里是它的落地处；安卓走
+    // PostInvalidateWindowSurface → Choreographer → PaintActivitySurface。
+    // FIFO present 自身阻塞到 vblank，所以不需要额外 vsync 计时。
+    bool paint = false;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      paint = paint_requested_;
+      paint_requested_ = false;
+    }
+    if (paint) {
+      OhosWindow* window = activity_window();
+      if (window) {
+        window->PaintFromUIThread(false);
+        ++paint_count_;
+      }
+    }
+    // 诊断探针（每秒一条）：UI 线程 present 次数 vs guest FPS。
+    // 若 paints/s ≈ 4 × guestFps，说明一个 guest 帧被 present 了多次，
+    // 每次 FIFO present 阻塞一个 vblank → 正好 4×16.6ms ≈ 66.6ms。
+    // 若 paints/s ≈ guestFps，则 present 节奏正常，瓶颈在别处。
+    {
+      auto now = std::chrono::steady_clock::now();
+      if (probe_report_time_.time_since_epoch().count() == 0) {
+        probe_report_time_ = now;
+      } else if (now - probe_report_time_ >= std::chrono::seconds(1)) {
+        const uint32_t paints = paint_count_;
+        paint_count_ = 0;
+        probe_report_time_ = now;
+        HXLOG("present probe: paints/s=%{public}u guestInstantFps=%{public}.1f "
+              "guestAvgFps=%{public}.1f frameMs=%{public}.1f",
+              paints, hx360e::InstantFps(), hx360e::AverageFps(),
+              hx360e::LastFrameTimeMs());
+      }
+    }
   }
   HXLOG("OhosWindowedAppContext: main loop exited");
+}
+
+void OhosWindowedAppContext::RequestPaintOnUIThread() {
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (paint_requested_) {
+      return;
+    }
+    paint_requested_ = true;
+  }
+  cond_.notify_one();
 }
 
 void OhosWindowedAppContext::SetWindowSurface(OHNativeWindow* window_surface) {
@@ -128,8 +177,11 @@ std::unique_ptr<xe::ui::Surface> OhosWindow::CreateSurfaceImpl(
 }
 
 void OhosWindow::RequestPaintImpl() {
-  // The presenter paints from its own thread (host_present_from_non_ui_thread
-  // is forced true), so there is no platform paint request to make.
+  // 对齐安卓 AndroidWindow::RequestPaintImpl() → PostInvalidateWindowSurface：
+  // presenter 在 PaintMode::kUIThreadOnRequest 下需要 UI 线程来 present。
+  // 启动参数已强制 FIFO 呈现（见 Home.ets），因此这里会走到 UI 线程 paint。
+  auto& context = static_cast<OhosWindowedAppContext&>(app_context());
+  context.RequestPaintOnUIThread();
 }
 
 void OhosWindow::UpdateSurface() {
