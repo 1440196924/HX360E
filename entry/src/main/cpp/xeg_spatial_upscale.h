@@ -61,6 +61,10 @@ class XegSpatialUpscale {
   // 返回值：true 表示符号齐全（不代表本设备一定支持该特性）。
   static bool ProbeSymbols(std::string* detail_out);
 
+  // 运行状态（不依赖日志：日志会被 hilog 的配额/去重整段丢弃）。
+  // 形如 "created 1280x720->2560x1440, renders=123" 或失败原因。
+  static std::string GetStatusForDisplay();
+
   // 创建超分对象。input_size / output_size 必须与后续 Render 传入的
   // VkImageView 尺寸一致（否则驱动行为未定义，可能崩溃）。
   bool Initialize(VkDevice device, VkExtent2D input_size,

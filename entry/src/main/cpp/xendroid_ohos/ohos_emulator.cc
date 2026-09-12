@@ -42,6 +42,7 @@
 #include "xenia/emulator.h"
 #include "xenia/gpu/null/null_graphics_system.h"
 #include "xenia/gpu/vulkan/vulkan_graphics_system.h"
+#include "xenia/ui/presenter.h"
 #include "xenia/hid/nop/nop_hid.h"
 #include "xenia/kernel/xam/profile_standalone.h"
 
@@ -75,6 +76,7 @@ DEFINE_bool(show_touch_overlay, true,
             "Draw the on-screen controller overlay.", "HID");
 
 DECLARE_bool(host_present_from_non_ui_thread);
+DECLARE_bool(hx360e_xeg_spatial_upscale);
 DECLARE_bool(show_debug_overlay);
 DECLARE_bool(show_touch_overlay);
 DECLARE_path(log_file);
@@ -385,6 +387,19 @@ void BootThread() {
     if (graphics_system) {
       window->SetPresenter(graphics_system->presenter());
       HXLOG("HX360E boot: presenter connected");
+      // HX360E: 桌面 app 用 postprocess_scaling_and_sharpening 设 guest 输出
+      // 后处理，我们的移植没有那段代码 —— 这里补上。开启 XEG 空域超分时必须
+      // 走 FSR 链（EASU 那一步被 XEG 替换），否则 presenter 的效果链是单段
+      // bilinear，XEG 无从接入。
+      auto* presenter = graphics_system->presenter();
+      if (presenter && cvars::hx360e_xeg_spatial_upscale) {
+        xe::ui::Presenter::GuestOutputPaintConfig paint_config;
+        paint_config.SetAllowOverscanCutoff(true);
+        paint_config.SetEffect(
+            xe::ui::Presenter::GuestOutputPaintConfig::Effect::kFsr);
+        presenter->SetGuestOutputPaintConfigFromUIThread(paint_config);
+        HXLOG("HX360E boot: guest output paint effect forced to FSR (XEG)");
+      }
     }
   });
   g_running.store(true);

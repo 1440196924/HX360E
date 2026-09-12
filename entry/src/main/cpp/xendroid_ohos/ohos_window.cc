@@ -12,6 +12,7 @@
 #include "xenia/ui/surface_ohos.h"
 
 #include "ohos_emulator.h"
+#include "xeg_spatial_upscale.h"
 
 #define HXLOG(...) OH_LOG_INFO(LOG_APP, __VA_ARGS__)
 
@@ -75,9 +76,10 @@ void OhosWindowedAppContext::MainLoop() {
         paint_count_ = 0;
         probe_report_time_ = now;
         HXLOG("present probe: paints/s=%{public}u guestInstantFps=%{public}.1f "
-              "guestAvgFps=%{public}.1f frameMs=%{public}.1f",
+              "guestAvgFps=%{public}.1f frameMs=%{public}.1f xeg=[%{public}s]",
               paints, hx360e::InstantFps(), hx360e::AverageFps(),
-              hx360e::LastFrameTimeMs());
+              hx360e::LastFrameTimeMs(),
+              hx360e::XegSpatialUpscale::GetStatusForDisplay().c_str());
       }
     }
   }

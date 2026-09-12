@@ -341,6 +341,17 @@ struct Home {
       '--vulkan_allow_present_mode_immediate=true',
       '--vulkan_allow_present_mode_mailbox=true',
       '--vulkan_allow_present_mode_fifo_relaxed=true',
+      // ===== T2/T3 验证：次原生渲染 den=2（dump shader 已加升采样换算）=====
+      '--hx360e_render_scale_den_x=2',
+      '--hx360e_render_scale_den_y=2',
+      // direct-HR 路径对 den 的适配尚未做对（标题层会缩到左上角 1/4）。
+      // 我们靠 EDRAM dump 路径（已加升采样换算）即可，且已稳定 30fps 有余量，
+      // 不需要这条更快的路径。
+      '--vulkan_direct_host_resolve=false',
+      // XEG 空域超分：当前会崩（SIGSEGV）——疑因 guest 输出是 10-bit 打包格式
+      // (A2B10G10R10_UNORM_PACK32)，XEG 可能只支持 R8G8B8A8_UNORM。待加一层
+      // RGBA8 转换图后再开。cvar 默认已是 false。
+      '--hx360e_xeg_spatial_upscale=true',
     ];
     // 高级选项里保存过的设置（稀疏 TOML）：存在才带上，否则用 cvar 默认值。
     try {

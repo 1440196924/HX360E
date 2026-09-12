@@ -4,6 +4,9 @@
 
 #include <dlfcn.h>
 
+#include <mutex>
+#include <string>
+
 #include <hilog/log.h>
 
 #define XEG_LOG(...) OH_LOG_INFO(LOG_APP, __VA_ARGS__)
@@ -15,6 +18,23 @@ namespace {
 
 constexpr const char* kLibraryName = "libxengine.so";
 
+// 供「关于」页显示的运行状态（日志被 hilog 配额丢弃时唯一的可靠观测通道）。
+std::mutex g_status_mutex;
+std::string g_status = "未使用";
+uint64_t g_render_count = 0;
+
+}  // namespace
+
+std::string XegSpatialUpscale::GetStatusForDisplay() {
+  std::lock_guard<std::mutex> lock(g_status_mutex);
+  return g_status + "（Render 调用 " + std::to_string(g_render_count) + " 次）";
+}
+
+namespace {
+void SetStatus(const std::string& status) {
+  std::lock_guard<std::mutex> lock(g_status_mutex);
+  g_status = status;
+}
 }  // namespace
 
 bool XegSpatialUpscale::ProbeSymbols(std::string* detail_out) {
@@ -89,6 +109,11 @@ bool XegSpatialUpscale::Initialize(VkDevice device, VkExtent2D input_size,
 
   const VkResult result = create_(device, &create_info, &handle_);
   if (result != VK_SUCCESS || handle_ == nullptr) {
+    SetStatus("创建失败 " + std::to_string(int(result)) + " " +
+              std::to_string(input_size.width) + "x" +
+              std::to_string(input_size.height) + " -> " +
+              std::to_string(output_size.width) + "x" +
+              std::to_string(output_size.height));
     XEG_LOGE(
         "XegSpatialUpscale: HMS_XEG_CreateSpatialUpscale failed (%{public}d), "
         "%{public}ux%{public}u -> %{public}ux%{public}u",
@@ -102,6 +127,10 @@ bool XegSpatialUpscale::Initialize(VkDevice device, VkExtent2D input_size,
       "%{public}ux%{public}u sharpness=%{public}f",
       input_size.width, input_size.height, output_size.width,
       output_size.height, sharpness);
+  SetStatus("已创建 " + std::to_string(input_size.width) + "x" +
+            std::to_string(input_size.height) + " -> " +
+            std::to_string(output_size.width) + "x" +
+            std::to_string(output_size.height));
   return true;
 }
 
@@ -118,6 +147,7 @@ bool XegSpatialUpscale::Render(VkCommandBuffer command_buffer,
   description.inputImage = input;
   description.outputImage = output;
   render_(command_buffer, handle_, &description);
+  ++g_render_count;
   return true;
 }
 

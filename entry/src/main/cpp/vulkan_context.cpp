@@ -744,6 +744,7 @@ std::string VulkanContext::ProbeXEngineExtensions() {
                 std::string xeg_detail;
                 hx360e::XegSpatialUpscale::ProbeSymbols(&xeg_detail);
                 out += std::string(", ") + xeg_detail;
+                out += ", XEG状态=" + hx360e::XegSpatialUpscale::GetStatusForDisplay();
             }
         }
     }

@@ -1203,6 +1203,117 @@ index 54b7e5980..11e1ec9c3 100644
          display_window_->SetIcon(icon_block.data(), icon_block.size());
        }
      }
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/render_target_cache.cc b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/render_target_cache.cc
+index a820dd66f..3e3ab828f 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/render_target_cache.cc
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/render_target_cache.cc
+@@ -532,6 +532,17 @@ RenderTargetCache::~RenderTargetCache() { ShutdownCommon(); }
+ 
+ void RenderTargetCache::InitializeCommon() {
+   assert_true(ownership_ranges_.empty());
++
++  // HX360E: sub-native rendering divisor (see hx360e_render_scale_den_x).
++  draw_resolution_scale_den_x_ =
++      cvars::hx360e_render_scale_den_x ? cvars::hx360e_render_scale_den_x : 1;
++  draw_resolution_scale_den_y_ =
++      cvars::hx360e_render_scale_den_y ? cvars::hx360e_render_scale_den_y : 1;
++  if (draw_resolution_scale_den_x_ > 1 || draw_resolution_scale_den_y_ > 1) {
++    XELOGI("HX360E sub-native rendering: host extents at 1/{} x 1/{} of the guest resolution",
++           draw_resolution_scale_den_x_, draw_resolution_scale_den_y_);
++  }
++
+   ownership_ranges_.emplace(
+       std::piecewise_construct, std::forward_as_tuple(uint32_t(0)),
+       std::forward_as_tuple(xenos::kEdramTileCount, RenderTargetKey(),
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/render_target_cache.h b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/render_target_cache.h
+index 27a388dfb..5ebf60bc2 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/render_target_cache.h
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/render_target_cache.h
+@@ -37,6 +37,10 @@ DECLARE_bool(native_2x_msaa);
+ DECLARE_bool(native_stencil_value_output);
+ DECLARE_bool(snorm16_render_target_full_range);
+ 
++// HX360E: sub-native rendering divisor, see hx360e_render_scale_den_x.
++DECLARE_uint32(hx360e_render_scale_den_x);
++DECLARE_uint32(hx360e_render_scale_den_y);
++
+ namespace xe {
+ namespace gpu {
+ 
+@@ -182,6 +186,37 @@ class RenderTargetCache {
+   // to be discarded.
+   uint32_t draw_resolution_scale_x() const { return draw_resolution_scale_x_; }
+   uint32_t draw_resolution_scale_y() const { return draw_resolution_scale_y_; }
++
++  // HX360E: sub-native rendering divisor (1 = native). The host extent of a
++  // surface is guest_extent * draw_resolution_scale / divisor, so a value of 2
++  // renders at half the guest resolution while the game is unaware of it.
++  // Only extents/rect sizes may use this - never addresses or offsets, which
++  // stay in guest space or in the scaled resolve space.
++  uint32_t draw_resolution_scale_den_x() const {
++    return draw_resolution_scale_den_x_;
++  }
++  uint32_t draw_resolution_scale_den_y() const {
++    return draw_resolution_scale_den_y_;
++  }
++  // Guest pixel count along an axis -> host pixel count (for extents only).
++  // scale_native surfaces (per draw_resolution_scale_threshold) stay at 1x.
++  uint32_t GetHostExtentX(uint32_t guest_pixels, bool scale_native) const {
++    if (scale_native) {
++      return guest_pixels;
++    }
++    const uint32_t host_pixels =
++        guest_pixels * draw_resolution_scale_x_ / draw_resolution_scale_den_x_;
++    return host_pixels ? host_pixels : 1;
++  }
++  uint32_t GetHostExtentY(uint32_t guest_pixels, bool scale_native) const {
++    if (scale_native) {
++      return guest_pixels;
++    }
++    const uint32_t host_pixels =
++        guest_pixels * draw_resolution_scale_y_ / draw_resolution_scale_den_y_;
++    return host_pixels ? host_pixels : 1;
++  }
++
+   bool IsDrawResolutionScaled() const {
+     return draw_resolution_scale_x() > 1 || draw_resolution_scale_y() > 1;
+   }
+@@ -647,6 +682,9 @@ class RenderTargetCache {
+   const RegisterFile& register_file_;
+   uint32_t draw_resolution_scale_x_;
+   uint32_t draw_resolution_scale_y_;
++  // HX360E: sub-native divisor, set in InitializeCommon from the cvars.
++  uint32_t draw_resolution_scale_den_x_ = 1;
++  uint32_t draw_resolution_scale_den_y_ = 1;
+ 
+   DrawExtentEstimator draw_extent_estimator_;
+ 
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/texture_cache.cc b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/texture_cache.cc
+index 57a6c702e..28b20a421 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/texture_cache.cc
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/texture_cache.cc
+@@ -36,6 +36,21 @@ DEFINE_int32(
+     "opaquely to the game.\n"
+     "See draw_resolution_scale_x for more information.",
+     "GPU");
++DEFINE_uint32(
++    hx360e_render_scale_den_x, 1,
++    "HX360E: sub-native rendering divisor on the X axis (1 = off). The host "
++    "render targets, texture images and the viewport are created at "
++    "guest_extent * draw_resolution_scale_x / this, so 2 renders the game's "
++    "surfaces at half width, cutting the pixel shading work to a quarter. The "
++    "game stays unaware, so an upscale has to be applied when the result is "
++    "read back - expect artifacts until that is implemented (T1: measurement "
++    "groundwork only).",
++    "GPU");
++DEFINE_uint32(
++    hx360e_render_scale_den_y, 1,
++    "HX360E: sub-native rendering divisor on the Y axis. See "
++    "hx360e_render_scale_den_x.",
++    "GPU");
+ DEFINE_uint32(
+     texture_cache_memory_limit_soft, 384,
+     "Maximum host texture memory usage (in megabytes) above which old textures "
 diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/CMakeLists.txt b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/CMakeLists.txt
 index 8a447b3dd..b92902e59 100644
 --- a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/CMakeLists.txt
@@ -1216,11 +1327,99 @@ index 8a447b3dd..b92902e59 100644
    xe_shader_rules_spirv(xenia-gpu-vulkan ${CMAKE_CURRENT_SOURCE_DIR}/../shaders)
    xe_shader_rules_slang(xenia-gpu-vulkan ${CMAKE_CURRENT_SOURCE_DIR}/../shaders
                          TARGET spirv)
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_command_processor.cc b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_command_processor.cc
+index 7e92705ad..74fdcb502 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_command_processor.cc
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_command_processor.cc
+@@ -116,6 +116,15 @@ DEFINE_bool(
+     "(pre-optimization behavior).",
+     "Vulkan");
+ 
++DEFINE_uint32(
++    hx360e_viewport_divisor, 1,
++    "HX360E DIAGNOSTIC: divide the host viewport extent on both axes by this "
++    "value so the rasterized and pixel-shaded area shrinks by its square. The "
++    "rendered image becomes a miniature in the corner of the render target - "
++    "this exists ONLY to quantify how much of the frame time is per-pixel work "
++    "before committing to sub-native rendering. 1 = off.",
++    "Vulkan");
++
+ DEFINE_bool(
+     vulkan_allow_reverse_z, true,
+     "Pass viewports with minDepth > maxDepth (reverse depth ranges, used by "
+@@ -6833,10 +6842,18 @@ void VulkanCommandProcessor::UpdateDynamicState(
+   // Viewport.
+   VkViewport viewport;
+   if (viewport_info.xy_extent[0] && viewport_info.xy_extent[1]) {
+-    viewport.x = float(viewport_info.xy_offset[0]);
+-    viewport.y = float(viewport_info.xy_offset[1]);
+-    viewport.width = float(viewport_info.xy_extent[0]);
+-    viewport.height = float(viewport_info.xy_extent[1]);
++    // HX360E: sub-native rendering - the host extent is guest_extent / divisor
++    // (the RT images are created at the same divisor, see GetHostExtentX).
++    const uint32_t hx360e_viewport_divisor_x =
++        std::max(render_target_cache_->draw_resolution_scale_den_x(), 1u);
++    const uint32_t hx360e_viewport_divisor_y =
++        std::max(render_target_cache_->draw_resolution_scale_den_y(), 1u);
++    viewport.x = float(viewport_info.xy_offset[0] / hx360e_viewport_divisor_x);
++    viewport.y = float(viewport_info.xy_offset[1] / hx360e_viewport_divisor_y);
++    viewport.width = float(
++        std::max(viewport_info.xy_extent[0] / hx360e_viewport_divisor_x, 1u));
++    viewport.height = float(
++        std::max(viewport_info.xy_extent[1] / hx360e_viewport_divisor_y, 1u));
+   } else {
+     // Vulkan viewport width must be greater than 0.0f, but the Xenia  viewport
+     // may be empty for various reasons - set the viewport to outside the
+@@ -6853,11 +6870,20 @@ void VulkanCommandProcessor::UpdateDynamicState(
+   // Scissor.
+   draw_util::Scissor scissor;
+   draw_util::GetScissor(regs, scissor);
+-  // Scale the scissor to match the render target resolution scale
+-  scissor.offset[0] *= draw_resolution_scale_x;
+-  scissor.offset[1] *= draw_resolution_scale_y;
+-  scissor.extent[0] *= draw_resolution_scale_x;
+-  scissor.extent[1] *= draw_resolution_scale_y;
++  // Scale the scissor to match the render target resolution scale, then apply
++  // the HX360E sub-native divisor so it matches the shrunken viewport.
++  const uint32_t hx360e_scissor_den_x =
++      std::max(render_target_cache_->draw_resolution_scale_den_x(), 1u);
++  const uint32_t hx360e_scissor_den_y =
++      std::max(render_target_cache_->draw_resolution_scale_den_y(), 1u);
++  scissor.offset[0] = scissor.offset[0] * draw_resolution_scale_x /
++                      hx360e_scissor_den_x;
++  scissor.offset[1] = scissor.offset[1] * draw_resolution_scale_y /
++                      hx360e_scissor_den_y;
++  scissor.extent[0] = scissor.extent[0] * draw_resolution_scale_x /
++                      hx360e_scissor_den_x;
++  scissor.extent[1] = scissor.extent[1] * draw_resolution_scale_y /
++                      hx360e_scissor_den_y;
+   VkRect2D scissor_rect;
+   scissor_rect.offset.x = int32_t(scissor.offset[0]);
+   scissor_rect.offset.y = int32_t(scissor.offset[1]);
 diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_pipeline_cache.cc b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_pipeline_cache.cc
-index 254549498..00d44c4f6 100644
+index 254549498..038a1d1aa 100644
 --- a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_pipeline_cache.cc
 +++ b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_pipeline_cache.cc
-@@ -1309,7 +1309,15 @@ void VulkanPipelineCache::TranslateShadersForStorage(
+@@ -83,8 +83,16 @@ DEFINE_bool(
+     "draw is ever lost.",
+     "Vulkan");
+ 
+-DEFINE_bool(
+-    vulkan_placeholder_pipelines, false,
++  DEFINE_string(
++      hx360e_vrs_rate, "off",
++      "HX360E: fragment shading rate applied to every graphics pipeline, "
++      "off|1x2|2x1|2x2 (the XEngine adaptive VRS rate image will replace the "
++      "uniform rate). The larger the rate, the fewer fragment invocations, at "
++      "the cost of a blurrier image.",
++      "Vulkan");
++
++  DEFINE_bool(
++      vulkan_placeholder_pipelines, false,
+     "Asynchronous shader compilation async model (A/B). Default false: the "
+     "fork's deferred-bind model - no placeholder is created, the pipeline slot "
+     "stays VK_NULL_HANDLE, the command processor records a deferred bind of the "
+@@ -1309,7 +1317,15 @@ void VulkanPipelineCache::TranslateShadersForStorage(
  
    std::vector<std::unique_ptr<xe::threading::Thread>> translation_threads;
    for (size_t i = 0; i < thread_count; ++i) {
@@ -1237,6 +1436,164 @@ index 254549498..00d44c4f6 100644
      if (thread) {
        thread->set_name("Shader Translation");
        translation_threads.push_back(std::move(thread));
+@@ -2721,6 +2737,37 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
+   pipeline_create_info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+   pipeline_create_info.pNext =
+       use_dynamic_rendering ? &pipeline_rendering_create_info : nullptr;
++  // HX360E：VRS 着色率（可用 --hx360e_vrs_rate=off|1x2|2x1|2x2 切换；off 时
++  // 不挂 shading rate state，保持原画质）。全屏统一倍率，后续用 XEngine
++  // 自适应 VRS（rate image）替换成按内容自适应。
++  VkPipelineFragmentShadingRateStateCreateInfoKHR hx360e_vrs_state;
++  {
++    const std::string hx360e_vrs_rate = cvars::hx360e_vrs_rate;
++    uint32_t vrs_x = 1;
++    uint32_t vrs_y = 1;
++    if (hx360e_vrs_rate == "1x2") {
++      vrs_y = 2;
++    } else if (hx360e_vrs_rate == "2x1") {
++      vrs_x = 2;
++    } else if (hx360e_vrs_rate == "2x2") {
++      vrs_x = 2;
++      vrs_y = 2;
++    }
++    if (vrs_x > 1 || vrs_y > 1) {
++      hx360e_vrs_state.sType = static_cast<VkStructureType>(
++          VK_STRUCTURE_TYPE_PIPELINE_FRAGMENT_SHADING_RATE_STATE_CREATE_INFO_KHR);
++      hx360e_vrs_state.pNext = pipeline_create_info.pNext;
++      hx360e_vrs_state.fragmentSize.width = vrs_x;
++      hx360e_vrs_state.fragmentSize.height = vrs_y;
++      hx360e_vrs_state.combinerOps[0] =
++          static_cast<VkFragmentShadingRateCombinerOpKHR>(
++              VK_FRAGMENT_SHADING_RATE_COMBINER_OP_REPLACE_KHR);
++      hx360e_vrs_state.combinerOps[1] =
++          static_cast<VkFragmentShadingRateCombinerOpKHR>(
++              VK_FRAGMENT_SHADING_RATE_COMBINER_OP_REPLACE_KHR);
++      pipeline_create_info.pNext = &hx360e_vrs_state;
++    }
++  }
+   pipeline_create_info.flags = 0;
+   pipeline_create_info.stageCount = shader_stage_count;
+   pipeline_create_info.pStages = shader_stages.data();
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_render_target_cache.cc b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_render_target_cache.cc
+index 88f2eb068..aac01f47d 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_render_target_cache.cc
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_render_target_cache.cc
+@@ -2491,7 +2491,8 @@ bool VulkanRenderTargetCache::TryDirectHostResolveCopy(
+       return false;
+     }
+     const uint32_t tile_size_x =
+-        (source.is_64bpp ? 40u : 80u) * draw_resolution_scale_x();
++        (source.is_64bpp ? 40u : 80u) * draw_resolution_scale_x() /
++        draw_resolution_scale_den_x();
+     const uint32_t tile_pixel_size_x =
+         tile_size_x >>
+         uint32_t(source.key.msaa_samples >= xenos::MsaaSamples::k4X);
+@@ -2645,9 +2646,16 @@ bool VulkanRenderTargetCache::TryDirectHostResolveCopy(
+       1, size_t(vulkan_device->properties().minUniformBufferOffsetAlignment));
+   const uint32_t scale_x = draw_resolution_scale_x();
+   const uint32_t scale_y = draw_resolution_scale_y();
++  // HX360E: the host render targets are 1/den of the guest resolution, so a
++  // source EDRAM tile covers 1/den of the pixels it normally would. The tile
++  // count and therefore all the tile-based addressing is unchanged - only the
++  // pixel size per tile has to shrink for the shader to read the right texels
++  // (this is the same nearest-neighbour upscale as in the EDRAM dump shader).
++  const uint32_t den_x = draw_resolution_scale_den_x();
++  const uint32_t den_y = draw_resolution_scale_den_y();
+   const uint32_t height_scaled =
+       (resolve_info.height_div_8 << xenos::kResolveAlignmentPixelsLog2) *
+-      scale_y;
++      scale_y / den_y;
+   const uint32_t msaa_2x_sample_0 =
+       draw_util::GetD3D10SampleIndexForGuest2xMSAA(
+           0, msaa_2x_attachments_supported_);
+@@ -2667,8 +2675,9 @@ bool VulkanRenderTargetCache::TryDirectHostResolveCopy(
+       constants.dump_pitch_tiles = dump_pitch;
+       constants.source_base_tiles = source.key.base_tiles;
+       constants.source_pitch_tiles = source.key.GetPitchTiles();
+-      const uint32_t tile_size_x = (source.is_64bpp ? 40u : 80u) * scale_x;
+-      const uint32_t tile_size_y = 16u * scale_y;
++      const uint32_t tile_size_x =
++          (source.is_64bpp ? 40u : 80u) * scale_x / den_x;
++      const uint32_t tile_size_y = 16u * scale_y / den_y;
+       const uint32_t tile_pixel_size_x =
+           tile_size_x >>
+           uint32_t(source.key.msaa_samples >= xenos::MsaaSamples::k4X);
+@@ -4242,10 +4251,11 @@ RenderTargetCache::RenderTarget* VulkanRenderTargetCache::CreateRenderTarget(
+   image_create_info.pNext = nullptr;
+   image_create_info.flags = 0;
+   image_create_info.imageType = VK_IMAGE_TYPE_2D;
+-  image_create_info.extent.width = key.GetWidth() * GetKeyScaleX(key);
+-  image_create_info.extent.height =
+-      GetRenderTargetHeight(key.pitch_tiles_at_32bpp, key.msaa_samples) *
+-      GetKeyScaleY(key);
++  image_create_info.extent.width =
++      GetHostExtentX(key.GetWidth(), key.scale_native);
++  image_create_info.extent.height = GetHostExtentY(
++      GetRenderTargetHeight(key.pitch_tiles_at_32bpp, key.msaa_samples),
++      key.scale_native);
+   image_create_info.extent.depth = 1;
+   image_create_info.mipLevels = 1;
+   image_create_info.arrayLayers = 1;
+@@ -4692,15 +4702,22 @@ VulkanRenderTargetCache::GetHostRenderTargetsFramebuffer(
+   uint32_t framebuffer_scale_x = draw_resolution_scale_x();
+   uint32_t framebuffer_scale_y = draw_resolution_scale_y();
+   if (pitch_tiles_at_32bpp) {
+-    host_extent.width = RenderTargetKey::GetWidth(pitch_tiles_at_32bpp,
+-                                                  render_pass_key.msaa_samples);
+-    host_extent.height = GetRenderTargetHeight(pitch_tiles_at_32bpp,
+-                                               render_pass_key.msaa_samples);
+-    if (IsScaleNativeForPitch(pitch_tiles_at_32bpp,
+-                              render_pass_key.msaa_samples)) {
+-      framebuffer_scale_x = 1;
+-      framebuffer_scale_y = 1;
+-    }
++    // HX360E: the attachments are created at the sub-native divisor too, so the
++    // framebuffer extent has to match them. Compose the host extent here and
++    // leave the scale multipliers at 1.
++    const bool fb_scale_native =
++        IsScaleNativeForPitch(pitch_tiles_at_32bpp,
++                              render_pass_key.msaa_samples);
++    host_extent.width = GetHostExtentX(
++        RenderTargetKey::GetWidth(pitch_tiles_at_32bpp,
++                                  render_pass_key.msaa_samples),
++        fb_scale_native);
++    host_extent.height = GetHostExtentY(
++        GetRenderTargetHeight(pitch_tiles_at_32bpp,
++                              render_pass_key.msaa_samples),
++        fb_scale_native);
++    framebuffer_scale_x = 1;
++    framebuffer_scale_y = 1;
+   } else {
+     assert_zero(render_pass_key.depth_and_color_used);
+     // Still needed for occlusion queries.
+@@ -8803,6 +8820,27 @@ VkPipeline VulkanRenderTargetCache::GetDumpPipeline(DumpPipelineKey key) {
+         spv::OpUDiv, type_uint, source_pixel_y,
+         builder.makeUintConstant(draw_resolution_scale_y()));
+   }
++  if (draw_resolution_scale_den_x() > 1 ||
++      draw_resolution_scale_den_y() > 1) {
++    XELOGW("HX360E sub-native: dump-style shader divide applied (den {}x{})",
++           draw_resolution_scale_den_x(), draw_resolution_scale_den_y());
++    // HX360E sub-native rendering: the host render target is 1/den of the
++    // EDRAM layout, so the guest-resolution destination coordinates have to be
++    // divided to address it - every destination texel then reads the nearest
++    // source texel (nearest-neighbour upscale). Doing it here rather than
++    // shrinking only the render target also keeps the read in bounds, which is
++    // what the T1-only build got wrong (stale/black output).
++    if (draw_resolution_scale_den_x() > 1) {
++      source_pixel_x = builder.createBinOp(
++          spv::OpUDiv, type_uint, source_pixel_x,
++          builder.makeUintConstant(draw_resolution_scale_den_x()));
++    }
++    if (draw_resolution_scale_den_y() > 1) {
++      source_pixel_y = builder.createBinOp(
++          spv::OpUDiv, type_uint, source_pixel_y,
++          builder.makeUintConstant(draw_resolution_scale_den_y()));
++    }
++  }
+ 
+   // Load the source, and pack the value into one or two 32-bit integers.
+   spv::Id packed[2] = {};
 diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/kernel/kernel_state.cc b/emulator-core/src/main/cpp/xenia/src/xenia/kernel/kernel_state.cc
 index 032d6559d..519a6bd5b 100644
 --- a/emulator-core/src/main/cpp/xenia/src/xenia/kernel/kernel_state.cc
@@ -2068,7 +2425,7 @@ index b2952880d..31ff4e639 100644
  #ifndef VK_USE_PLATFORM_METAL_EXT
  #define VK_USE_PLATFORM_METAL_EXT
 diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_device.cc b/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_device.cc
-index ceb7150b7..5dd331546 100644
+index ceb7150b7..a8949a06c 100644
 --- a/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_device.cc
 +++ b/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_device.cc
 @@ -245,6 +245,9 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
@@ -2081,6 +2438,44 @@ index ceb7150b7..5dd331546 100644
      }
      if (properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 1, 0)) {
        // #237.
+@@ -367,6 +370,11 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+       VkPhysicalDeviceNonSeamlessCubeMapFeaturesEXT,
+       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_NON_SEAMLESS_CUBE_MAP_FEATURES_EXT>
+       features_EXT_non_seamless_cube_map;
++  // HX360E（XEngine 自适应 VRS 前置）：shading rate 特性。
++  VulkanFeatures<
++      VkPhysicalDeviceFragmentShadingRateFeaturesKHR,
++      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_FEATURES_KHR>
++      features_KHR_fragment_shading_rate;
+   VulkanFeatures<
+       VkPhysicalDeviceCustomBorderColorFeaturesEXT,
+       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT>
+@@ -462,6 +470,11 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+       features_EXT_fragment_shader_interlock.Link(supported_features_2,
+                                                   device_create_info);
+     }
++    // HX360E：自适应 VRS 需要 pipelineFragmentShadingRate。
++    if (device->extensions_.ext_KHR_fragment_shading_rate) {
++      features_KHR_fragment_shading_rate.Link(supported_features_2,
++                                              device_create_info);
++    }
+     if (ext_EXT_non_seamless_cube_map) {
+       features_EXT_non_seamless_cube_map.Link(supported_features_2,
+                                               device_create_info);
+@@ -892,6 +905,13 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+                                dynamicRendering);
+       }
+     }
++    // HX360E：启用 shading rate（自适应 VRS 前置）。直接拷 supported→enabled，
++    // 不经 XE_UI_VULKAN_FEATURE_2（Properties 里没有对应字段）。
++    if (device->extensions_.ext_KHR_fragment_shading_rate) {
++      features_KHR_fragment_shading_rate.enabled.pipelineFragmentShadingRate =
++          features_KHR_fragment_shading_rate.supported
++              .pipelineFragmentShadingRate;
++    }
+   }
+ 
+   if (device->extensions_.ext_1_4_KHR_dynamic_rendering_local_read &&
 diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_device.h b/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_device.h
 index fb6d09930..50e8bfe3c 100644
 --- a/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_device.h
@@ -2180,10 +2575,24 @@ index fd3e34d1c..b491f38ab 100644
      bool ext_EXT_metal_surface = false;  // #218
  #endif
 diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_presenter.cc b/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_presenter.cc
-index 0f5e7e7bf..b43a80dcc 100644
+index 0f5e7e7bf..9bc64c19e 100644
 --- a/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_presenter.cc
 +++ b/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_presenter.cc
-@@ -18,9 +18,12 @@
+@@ -1,4 +1,4 @@
+-/**
++﻿/**
+  ******************************************************************************
+  * Xenia : Xbox 360 Emulator Research Project                                 *
+  ******************************************************************************
+@@ -10,6 +10,7 @@
+ #include "xenia/ui/vulkan/vulkan_presenter.h"
+ 
+ #include <cstdint>
++#include <hilog/log.h>
+ 
+ #include "xenia/base/assert.h"
+ #include "xenia/base/cvar.h"
+@@ -18,9 +19,12 @@
  #include "xenia/base/platform.h"
  #include "xenia/ui/vulkan/vulkan_util.h"
  
@@ -2197,7 +2606,34 @@ index 0f5e7e7bf..b43a80dcc 100644
  #if XE_PLATFORM_MAC
  #include "xenia/ui/surface_mac.h"
  #endif
-@@ -206,11 +209,16 @@ Surface::TypeFlags VulkanPresenter::GetSurfaceTypesSupportedByInstance(
+@@ -51,6 +55,26 @@ DEFINE_bool(
+     "may present with tearing if frames don't meet the host display refresh "
+     "rate.",
+     "Vulkan");
++
++// HX360E: replace the FSR EASU upscale pass of the guest output with the
++// XEngine Kit spatial upscale (HMS_XEG_CmdRenderSpatialUpscale). Only takes
++// effect when the guest output upscale effect is FSR (kFsrEasu is the first
++// pass), since that pass is the one being substituted - the remaining passes
++// (RCAS sharpening, final present) and all the render pass / layout handling
++// stay as they are. The game's frame is rendered at a lower resolution by
++// hx360e_render_scale_den_x/y, so this is where the AI upscale puts the detail
++// back. Requires a Maleoon device with XEG_spatial_upscale; falls back to FSR
++// when the object cannot be created.
++DEFINE_bool(
++    hx360e_xeg_spatial_upscale, false,
++    "HX360E: use the XEngine Kit spatial upscale (GPU) instead of FSR EASU for "
++    "upscaling the guest output to the host window. Set the guest output "
++    "upscale effect to FSR for this to apply.",
++    "Vulkan");
++DEFINE_double(
++    hx360e_xeg_spatial_upscale_sharpness, 0.3,
++    "HX360E: sharpness passed to the XEngine spatial upscale, in [0, 1].",
++    "Vulkan");
+ #if XE_PLATFORM_MAC
+ DEFINE_bool(vulkan_presenter_use_backing_scale, false,
+             "Use the macOS view backing scale factor for MoltenVK drawables.",
+@@ -206,11 +230,16 @@ Surface::TypeFlags VulkanPresenter::GetSurfaceTypesSupportedByInstance(
      return 0;
    }
    Surface::TypeFlags type_flags = 0;
@@ -2215,7 +2651,7 @@ index 0f5e7e7bf..b43a80dcc 100644
  #if XE_PLATFORM_MAC
    if (instance_extensions.ext_EXT_metal_surface) {
      type_flags |= Surface::kTypeFlag_MacNSView;
-@@ -594,7 +602,7 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(
+@@ -594,7 +623,7 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(
      }
      VkResult vulkan_surface_create_result = VK_ERROR_UNKNOWN;
      switch (surface_type) {
@@ -2224,7 +2660,7 @@ index 0f5e7e7bf..b43a80dcc 100644
        case Surface::kTypeIndex_AndroidNativeWindow: {
          auto& android_native_window_surface =
              static_cast<const AndroidNativeWindowSurface&>(new_surface);
-@@ -609,6 +617,20 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(
+@@ -609,6 +638,20 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(
              &paint_context_.vulkan_surface);
        } break;
  #endif
@@ -2245,7 +2681,7 @@ index 0f5e7e7bf..b43a80dcc 100644
  #if XE_PLATFORM_GNU_LINUX
        case Surface::kTypeIndex_WaylandWindow: {
          auto& wayland_window_surface =
-@@ -1107,8 +1129,8 @@ VkSwapchainKHR VulkanPresenter::PaintContext::CreateSwapchainForVulkanSurface(
+@@ -1107,8 +1150,8 @@ VkSwapchainKHR VulkanPresenter::PaintContext::CreateSwapchainForVulkanSurface(
      // specification violation).
      surface_formats.clear();
    }
@@ -2256,6 +2692,358 @@ index 0f5e7e7bf..b43a80dcc 100644
    static constexpr VkFormat kFormat8888Primary = VK_FORMAT_R8G8B8A8_UNORM;
    static constexpr VkFormat kFormat8888Secondary = VK_FORMAT_B8G8R8A8_UNORM;
  #else
+@@ -1615,6 +1658,44 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(
+         guest_output_properties, paint_context_.swapchain_extent.width,
+         paint_context_.swapchain_extent.height, max_framebuffer_extent.width,
+         max_framebuffer_extent.height, guest_output_paint_config);
++    // HX360E: XEngine spatial upscale（1.5x）接管第 0 段。
++    //  - 第 0 段保持 kFsrEasu（它是"放大"这一步，录制时被 XEG 调用取代）
++    //  - 输出尺寸改成 1.5x（= XEG 输出图尺寸）
++    //  - 第 1 段从 kFsrRcas（1:1 锐化）改成 kBilinear（把它放大到窗口）
++    // 只改 Vulkan 侧的局部 flow，不动共享的 GetGuestOutputPaintFlow，避免影响
++    // D3D12 后端。
++    if (cvars::hx360e_xeg_spatial_upscale &&
++        guest_output_flow.effect_count >= 2) {
++      const uint32_t xeg_frontbuffer_width =
++          guest_output_flow.properties.frontbuffer_width;
++      const uint32_t xeg_frontbuffer_height =
++          guest_output_flow.properties.frontbuffer_height;
++      if (xeg_frontbuffer_width && xeg_frontbuffer_height) {
++        // 1.5x（与 XEG 对象创建时用的尺寸一致）。
++        guest_output_flow.effect_output_sizes[0] = {
++            (xeg_frontbuffer_width * 3 + 1) / 2,
++            (xeg_frontbuffer_height * 3 + 1) / 2};
++        guest_output_flow.effects[1] = GuestOutputPaintEffect::kBilinear;
++      }
++    }
++    {
++      // HX360E 璇婃柇锛堜綆棰戯紝姣?300 甯э級锛氱‘璁ゆ湰 paint 璺緞鐨?flow 鏋勬垚銆?
++      static uint32_t hx360e_flow_log_counter = 0;
++      if ((hx360e_flow_log_counter++ % 300) == 0) {
++        OH_LOG_INFO(
++            LOG_APP,
++            "HX360E flow: effect_count=%{public}u effect0=%{public}d "
++            "xeg_cvar=%{public}d fb=%{public}ux%{public}u out=%{public}ux%{public}u",
++            uint32_t(guest_output_flow.effect_count),
++            int(guest_output_flow.effect_count ? guest_output_flow.effects[0]
++                                               : GuestOutputPaintEffect::kBilinear),
++            int(cvars::hx360e_xeg_spatial_upscale),
++            guest_output_flow.properties.frontbuffer_width,
++            guest_output_flow.properties.frontbuffer_height,
++            guest_output_flow.effect_output_sizes[0].first,
++            guest_output_flow.effect_output_sizes[0].second);
++      }
++    }
+     if (guest_output_flow.effect_count) {
+       // Store the main target reference to the guest output image so it's not
+       // destroyed while it's still potentially in use by main target painting
+@@ -1872,6 +1953,267 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(
+         }
+         for (size_t i = 0; i < guest_output_flow.effect_count; ++i) {
+           bool is_final_effect = i + 1 >= guest_output_flow.effect_count;
++          if (!i) {
++            // 浣庨杈撳嚭锛堟瘡 300 甯т竴娆★級锛歨ilog 瀵归珮棰戞棩蹇椾細鏁存涓㈠純/鍘婚噸锛?
++            // 閫愬抚鎵撳嵃鍙嶈€岀湅涓嶅埌浠讳綍涓滆タ銆?
++            static uint32_t hx360e_xeg_log_counter = 0;
++            if ((hx360e_xeg_log_counter++ % 300) == 0) {
++              OH_LOG_INFO(
++                  LOG_APP,
++                  "HX360E XEG: effect_count=%{public}u effect0=%{public}d "
++                  "xeg_cvar=%{public}d frontbuffer=%{public}ux%{public}u "
++                  "out0=%{public}ux%{public}u",
++                  uint32_t(guest_output_flow.effect_count),
++                  int(guest_output_flow.effects[0]),
++                  int(cvars::hx360e_xeg_spatial_upscale),
++                  guest_output_flow.properties.frontbuffer_width,
++                  guest_output_flow.properties.frontbuffer_height,
++                  guest_output_flow.effect_output_sizes[0].first,
++                  guest_output_flow.effect_output_sizes[0].second);
++            }
++          }
++
++          // HX360E: XEngine spatial upscale - substitute the first (FSR EASU)
++          // pass. XEG renders the intermediate image itself, so this effect
++          // must NOT begin a render pass or draw; the following passes consume
++          // the intermediate as usual. Only when there is a following pass to
++          // present the intermediate (never as the final effect) so the
++          // swapchain image always goes through the normal render pass.
++          if (!i && !is_final_effect &&
++              guest_output_flow.effects[0] ==
++                  GuestOutputPaintEffect::kFsrEasu &&
++              cvars::hx360e_xeg_spatial_upscale && guest_output_image) {
++            // XEG 输入 = guest 输出（frontbuffer），输出 = 1.5x 的 RGBA8 自建图。
++            const uint32_t xeg_input_width =
++                guest_output_flow.properties.frontbuffer_width;
++            const uint32_t xeg_input_height =
++                guest_output_flow.properties.frontbuffer_height;
++            const uint32_t xeg_output_width =
++                (xeg_input_width * 3 + 1) / 2;  // 1.5x
++            const uint32_t xeg_output_height =
++                (xeg_input_height * 3 + 1) / 2;
++            if (!paint_context_.xeg_spatial_upscale_ready &&
++                !paint_context_.xeg_spatial_upscale_failed) {
++              bool created = false;
++              VkImageCreateInfo xeg_image_create_info;
++              xeg_image_create_info.sType =
++                  VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
++              xeg_image_create_info.pNext = nullptr;
++              xeg_image_create_info.flags = 0;
++              xeg_image_create_info.imageType = VK_IMAGE_TYPE_2D;
++              xeg_image_create_info.format = VK_FORMAT_R8G8B8A8_UNORM;
++              xeg_image_create_info.extent.depth = 1;
++              xeg_image_create_info.mipLevels = 1;
++              xeg_image_create_info.arrayLayers = 1;
++              xeg_image_create_info.samples = VK_SAMPLE_COUNT_1_BIT;
++              xeg_image_create_info.tiling = VK_IMAGE_TILING_OPTIMAL;
++              xeg_image_create_info.usage =
++                  VK_IMAGE_USAGE_SAMPLED_BIT |
++                  VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
++                  VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
++                  VK_IMAGE_USAGE_TRANSFER_DST_BIT;
++              xeg_image_create_info.sharingMode =
++                  VK_SHARING_MODE_EXCLUSIVE;
++              xeg_image_create_info.queueFamilyIndexCount = 0;
++              xeg_image_create_info.pQueueFamilyIndices = nullptr;
++              xeg_image_create_info.initialLayout =
++                  VK_IMAGE_LAYOUT_UNDEFINED;
++              VkImageViewCreateInfo xeg_view_create_info;
++              xeg_view_create_info.sType =
++                  VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
++              xeg_view_create_info.pNext = nullptr;
++              xeg_view_create_info.flags = 0;
++              xeg_view_create_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
++              xeg_view_create_info.format = VK_FORMAT_R8G8B8A8_UNORM;
++              xeg_view_create_info.components.r =
++                  VK_COMPONENT_SWIZZLE_IDENTITY;
++              xeg_view_create_info.components.g =
++                  VK_COMPONENT_SWIZZLE_IDENTITY;
++              xeg_view_create_info.components.b =
++                  VK_COMPONENT_SWIZZLE_IDENTITY;
++              xeg_view_create_info.components.a =
++                  VK_COMPONENT_SWIZZLE_IDENTITY;
++              xeg_view_create_info.subresourceRange.aspectMask =
++                  VK_IMAGE_ASPECT_COLOR_BIT;
++              xeg_view_create_info.subresourceRange.baseMipLevel = 0;
++              xeg_view_create_info.subresourceRange.levelCount = 1;
++              xeg_view_create_info.subresourceRange.baseArrayLayer = 0;
++              xeg_view_create_info.subresourceRange.layerCount = 1;
++              do {
++                xeg_image_create_info.extent.width = xeg_input_width;
++                xeg_image_create_info.extent.height = xeg_input_height;
++                if (!util::CreateDedicatedAllocationImage(
++                        vulkan_device_, xeg_image_create_info,
++                        util::MemoryPurpose::kDeviceLocal,
++                        paint_context_.xeg_spatial_upscale_input_image,
++                        paint_context_.xeg_spatial_upscale_input_memory)) {
++                  break;
++                }
++                xeg_view_create_info.image =
++                    paint_context_.xeg_spatial_upscale_input_image;
++                if (dfn.vkCreateImageView(
++                        device, &xeg_view_create_info, nullptr,
++                        &paint_context_.xeg_spatial_upscale_input_view) !=
++                    VK_SUCCESS) {
++                  break;
++                }
++                xeg_image_create_info.extent.width = xeg_output_width;
++                xeg_image_create_info.extent.height = xeg_output_height;
++                if (!util::CreateDedicatedAllocationImage(
++                        vulkan_device_, xeg_image_create_info,
++                        util::MemoryPurpose::kDeviceLocal,
++                        paint_context_.xeg_spatial_upscale_output_image,
++                        paint_context_.xeg_spatial_upscale_output_memory)) {
++                  break;
++                }
++                xeg_view_create_info.image =
++                    paint_context_.xeg_spatial_upscale_output_image;
++                if (dfn.vkCreateImageView(
++                        device, &xeg_view_create_info, nullptr,
++                        &paint_context_.xeg_spatial_upscale_output_view) !=
++                    VK_SUCCESS) {
++                  break;
++                }
++                paint_context_.xeg_spatial_upscale =
++                    std::make_unique<hx360e::XegSpatialUpscale>();
++                if (!paint_context_.xeg_spatial_upscale->Initialize(
++                        device, {xeg_input_width, xeg_input_height},
++                        {xeg_output_width, xeg_output_height},
++                        VK_FORMAT_R8G8B8A8_UNORM,
++                        float(cvars::hx360e_xeg_spatial_upscale_sharpness))) {
++                  break;
++                }
++                created = true;
++              } while (false);
++              if (created) {
++                paint_context_.xeg_spatial_upscale_input_width =
++                    xeg_input_width;
++                paint_context_.xeg_spatial_upscale_input_height =
++                    xeg_input_height;
++                paint_context_.xeg_spatial_upscale_output_width =
++                    xeg_output_width;
++                paint_context_.xeg_spatial_upscale_output_height =
++                    xeg_output_height;
++                paint_context_.xeg_spatial_upscale_ready = true;
++              } else {
++                if (paint_context_.xeg_spatial_upscale_output_view !=
++                    VK_NULL_HANDLE) {
++                  dfn.vkDestroyImageView(
++                      device,
++                      paint_context_.xeg_spatial_upscale_output_view, nullptr);
++                  paint_context_.xeg_spatial_upscale_output_view =
++                      VK_NULL_HANDLE;
++                }
++                if (paint_context_.xeg_spatial_upscale_output_image !=
++                    VK_NULL_HANDLE) {
++                  dfn.vkDestroyImage(
++                      device, paint_context_.xeg_spatial_upscale_output_image,
++                      nullptr);
++                  paint_context_.xeg_spatial_upscale_output_image =
++                      VK_NULL_HANDLE;
++                }
++                if (paint_context_.xeg_spatial_upscale_output_memory !=
++                    VK_NULL_HANDLE) {
++                  dfn.vkFreeMemory(
++                      device, paint_context_.xeg_spatial_upscale_output_memory,
++                      nullptr);
++                  paint_context_.xeg_spatial_upscale_output_memory =
++                      VK_NULL_HANDLE;
++                }
++                if (paint_context_.xeg_spatial_upscale_input_view !=
++                    VK_NULL_HANDLE) {
++                  dfn.vkDestroyImageView(
++                      device, paint_context_.xeg_spatial_upscale_input_view,
++                      nullptr);
++                  paint_context_.xeg_spatial_upscale_input_view =
++                      VK_NULL_HANDLE;
++                }
++                if (paint_context_.xeg_spatial_upscale_input_image !=
++                    VK_NULL_HANDLE) {
++                  dfn.vkDestroyImage(
++                      device, paint_context_.xeg_spatial_upscale_input_image,
++                      nullptr);
++                  paint_context_.xeg_spatial_upscale_input_image =
++                      VK_NULL_HANDLE;
++                }
++                if (paint_context_.xeg_spatial_upscale_input_memory !=
++                    VK_NULL_HANDLE) {
++                  dfn.vkFreeMemory(
++                      device, paint_context_.xeg_spatial_upscale_input_memory,
++                      nullptr);
++                  paint_context_.xeg_spatial_upscale_input_memory =
++                      VK_NULL_HANDLE;
++                }
++                paint_context_.xeg_spatial_upscale.reset();
++                paint_context_.xeg_spatial_upscale_failed = true;
++              }
++            }
++            if (paint_context_.xeg_spatial_upscale_ready) {
++              // 输出图先转到可写布局；XEG 调用后再转到可采样布局
++              //（下一步会让上屏链采样它）。
++              VkImageMemoryBarrier xeg_barrier;
++              xeg_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
++              xeg_barrier.pNext = nullptr;
++              xeg_barrier.srcAccessMask = 0;
++              xeg_barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
++              xeg_barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
++              xeg_barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
++              xeg_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
++              xeg_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
++              xeg_barrier.image =
++                  paint_context_.xeg_spatial_upscale_output_image;
++              xeg_barrier.subresourceRange =
++                  util::InitializeSubresourceRange();
++              dfn.vkCmdPipelineBarrier(
++                  draw_command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
++                  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr,
++                  0, nullptr, 1, &xeg_barrier);
++              if (paint_context_.xeg_spatial_upscale->Render(
++                      draw_command_buffer, guest_output_image->view(),
++                      paint_context_.xeg_spatial_upscale_output_view)) {
++                xeg_barrier.srcAccessMask =
++                    VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
++                xeg_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
++                xeg_barrier.oldLayout =
++                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
++                xeg_barrier.newLayout =
++                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
++                dfn.vkCmdPipelineBarrier(
++                    draw_command_buffer,
++                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
++                    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0,
++                    nullptr, 1, &xeg_barrier);
++                // 让第 1 段（全屏放大到窗口）采样 XEG 的输出图，而不是中间图 0
++                //（中间图 0 这段被 XEG 取代，没有任何东西写入它）。
++                VkDescriptorImageInfo xeg_descriptor_image_info;
++                xeg_descriptor_image_info.sampler = VK_NULL_HANDLE;
++                xeg_descriptor_image_info.imageView =
++                    paint_context_.xeg_spatial_upscale_output_view;
++                xeg_descriptor_image_info.imageLayout =
++                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
++                VkWriteDescriptorSet xeg_descriptor_write;
++                xeg_descriptor_write.sType =
++                    VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
++                xeg_descriptor_write.pNext = nullptr;
++                xeg_descriptor_write.dstSet =
++                    paint_context_.guest_output_descriptor_sets
++                        [PaintContext::kGuestOutputDescriptorSetIntermediate0Sampled];
++                xeg_descriptor_write.dstBinding = 0;
++                xeg_descriptor_write.dstArrayElement = 0;
++                xeg_descriptor_write.descriptorCount = 1;
++                xeg_descriptor_write.descriptorType =
++                    VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
++                xeg_descriptor_write.pImageInfo =
++                    &xeg_descriptor_image_info;
++                xeg_descriptor_write.pBufferInfo = nullptr;
++                xeg_descriptor_write.pTexelBufferView = nullptr;
++                dfn.vkUpdateDescriptorSets(device, 1, &xeg_descriptor_write, 0,
++                                           nullptr);
++                // 第 0 段没有起 render pass（XEG 自己写图），直接进入第 1 段。
++                continue;
++              }
++            }
++          }
+ 
+           int32_t effect_rect_x, effect_rect_y;
+           std::pair<uint32_t, uint32_t> effect_rect_size =
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_presenter.h b/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_presenter.h
+index fa151fb4c..a35f90693 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_presenter.h
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_presenter.h
+@@ -26,6 +26,9 @@
+ #include "xenia/ui/vulkan/vulkan_gpu_completion_timeline.h"
+ #include "xenia/ui/vulkan/vulkan_instance.h"
+ 
++// HX360E: XEngine Kit spatial upscale (HarmonyOS / Maleoon only, dlopen-based).
++#include "xeg_spatial_upscale.h"
++
+ namespace xe {
+ namespace ui {
+ namespace vulkan {
+@@ -417,6 +420,24 @@ class VulkanPresenter final : public Presenter {
+     std::array<std::unique_ptr<GuestOutputImage>,
+                kMaxGuestOutputPaintEffects - 1>
+         guest_output_intermediate_images;
++    // HX360E: XEngine spatial upscale (XEG_spatial_upscale), 1.5x. XEG's
++    // documented format is VK_FORMAT_R8G8B8A8_UNORM (the guest output is 10-bit
++    // packed, which crashed the driver), so the AI result lands in our own
++    // RGBA8 image which the remaining passes then present.
++    std::unique_ptr<hx360e::XegSpatialUpscale> xeg_spatial_upscale;
++    VkImage xeg_spatial_upscale_input_image = VK_NULL_HANDLE;
++    VkDeviceMemory xeg_spatial_upscale_input_memory = VK_NULL_HANDLE;
++    VkImageView xeg_spatial_upscale_input_view = VK_NULL_HANDLE;
++    VkImage xeg_spatial_upscale_output_image = VK_NULL_HANDLE;
++    VkDeviceMemory xeg_spatial_upscale_output_memory = VK_NULL_HANDLE;
++    VkImageView xeg_spatial_upscale_output_view = VK_NULL_HANDLE;
++    uint32_t xeg_spatial_upscale_input_width = 0;
++    uint32_t xeg_spatial_upscale_input_height = 0;
++    uint32_t xeg_spatial_upscale_output_width = 0;
++    uint32_t xeg_spatial_upscale_output_height = 0;
++    bool xeg_spatial_upscale_ready = false;
++    // Creation is not retried after a failure (the feature is unsupported).
++    bool xeg_spatial_upscale_failed = false;
+     // Created and destroyed alongside the images. UNORM only.
+     std::array<VkFramebuffer, kMaxGuestOutputPaintEffects - 1>
+         guest_output_intermediate_framebuffers = {};
 diff --git a/emulator-core/src/main/cpp/xenia/third_party/CMakeLists.txt b/emulator-core/src/main/cpp/xenia/third_party/CMakeLists.txt
 index 09b41006b..a6dad625e 100644
 --- a/emulator-core/src/main/cpp/xenia/third_party/CMakeLists.txt

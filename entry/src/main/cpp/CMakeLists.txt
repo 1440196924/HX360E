@@ -47,12 +47,19 @@ get_filename_component(_hx360e_xengine_include
 if(EXISTS "${_hx360e_xengine_include}/xengine/xeg_vulkan_extension.h")
     set(HX360E_XENGINE_INCLUDE_DIR "${_hx360e_xengine_include}")
     add_compile_definitions(HX360E_HAVE_XENGINE_HEADERS=1)
+    # 全局 include：xenia 侧的 vulkan_presenter 也要 include 这个头（经由我们的
+    # xeg_spatial_upscale.h），所以不能只挂在 entry 目标上。
+    include_directories("${_hx360e_xengine_include}")
     message(STATUS "XEngine headers: ${_hx360e_xengine_include}")
 else()
     message(STATUS "XEngine headers not found, using local ABI declarations")
 endif()
 
 # EXCLUDE_FROM_ALL：只构建被 entry 依赖的目标，不编译桌面端 xenia-app 等。
+# HX360E：xenia 侧有少量文件会 include 本移植目录下的头文件（如 XEngine 空域
+# 超分封装 xeg_spatial_upscale.h），所以在这里先把本目录加进 include 路径，
+# 让 xenia 的目标也能找到（否则只对 entry 目标可见）。
+include_directories(${NATIVERENDER_ROOT_PATH})
 add_subdirectory("${XE_XENDROID_ROOT}/xenia"
     "${CMAKE_CURRENT_BINARY_DIR}/xendroid-build" EXCLUDE_FROM_ALL)
 
