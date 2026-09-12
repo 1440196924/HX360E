@@ -21,6 +21,7 @@
 #define LOG_DOMAIN 0x0000
 #define LOG_TAG "HX360E"
 
+#include "ohaudio_audio_system.h"
 #include "ohos_window.h"
 #include "ohos_input_driver.h"
 #include "prompt_providers.h"
@@ -45,7 +46,7 @@
 // xenia 启动所需的 cvar（上游定义在 xendroid_emu.cpp / app/xenia_main.cc）。
 // ---------------------------------------------------------------------------
 DEFINE_string(gpu, "vulkan", "Graphics system. Use: [vulkan, null]", "GPU");
-DEFINE_string(apu, "nop", "Audio system. Use: [any, nop]", "APU");
+DEFINE_string(apu, "ohaudio", "Audio system. Use: [ohaudio, nop]", "APU");
 DEFINE_string(hid, "nop", "Input system. Use: [nop]", "HID");
 DEFINE_path(storage_root, "",
             "Root path for persistent internal data storage (config, etc.).",
@@ -60,8 +61,10 @@ DEFINE_bool(mount_scratch, false, "Enable scratch mount", "Storage");
 DEFINE_bool(mount_cache, false, "Enable cache mount", "Storage");
 DEFINE_bool(mount_memory_unit, false, "Enable memory unit (MU) mount",
             "Storage");
+// xenia-apu 的 xma_decoder.cc 引用该 cvar（上游定义在 Android 音频驱动里），
+// OHOS 侧在别处补上，避免未定义符号。
 DEFINE_bool(apu_aaudio_log_stats, false,
-            "Log AAudio stream statistics (Android-only; no-op on OHOS).",
+            "Log AAudio stats (referenced by xma_decoder; unused on OHOS).",
             "APU");
 // 上游定义在 xendroid_emu.cpp（Android 专用）；OHOS 侧在 ui/presenter.cc 里没有，
 // 由这里补上，供 Phase 5.5 的覆盖层开关与设置页使用。
@@ -99,7 +102,7 @@ OHNativeWindow* g_pending_native_window = nullptr;
 
 std::unique_ptr<xe::apu::AudioSystem> CreateAudioSystem(
     xe::cpu::Processor* processor) {
-  return std::make_unique<xe::apu::nop::NopAudioSystem>(processor);
+  return std::make_unique<xe::apu::ohaudio::OHaudioAudioSystem>(processor);
 }
 
 std::unique_ptr<xe::gpu::GraphicsSystem> CreateGraphicsSystem() {
@@ -242,7 +245,16 @@ void BootThread() {
         HXLOG("native_fault[prev]: %{public}s", buffer);
       }
       fclose(previous);
-      truncate(fault_log_path.c_str(), 0);
+      // Keep the crashed run for the in-app exporter (it can only run after a
+      // restart, by which time this file is otherwise cleared).
+      const std::string previous_path =
+          (log_dir / "native_fault.prev.log").string();
+      std::error_code rename_ec;
+      std::filesystem::remove(previous_path, rename_ec);
+      std::filesystem::rename(fault_log_path, previous_path, rename_ec);
+      if (rename_ec) {
+        truncate(fault_log_path.c_str(), 0);
+      }
     }
   }
   const int fault_fd =

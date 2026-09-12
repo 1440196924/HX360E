@@ -85,10 +85,16 @@ bool OhosWindow::OpenImpl() {
   OHNativeWindow* window_surface = context.window_surface();
   if (window_surface) {
     int32_t width = 0, height = 0;
+    // GET_BUFFER_GEOMETRY's variable parameters are (height, width), not
+    // (width, height) - see native_window/external_window.h. Reading them the
+    // other way round transposes the surface (1280x720 -> 720x1280), which
+    // makes xenia create a portrait swapchain and the game appear stretched.
     if (OH_NativeWindow_NativeWindowHandleOpt(window_surface,
-                                              GET_BUFFER_GEOMETRY, &width,
-                                              &height) == 0 &&
+                                              GET_BUFFER_GEOMETRY, &height,
+                                              &width) == 0 &&
         width > 0 && height > 0) {
+      HXLOG("HX360E OpenImpl: initial buffer geometry %{public}dx%{public}d",
+            width, height);
       WindowDestructionReceiver destruction_receiver(this);
       OnActualSizeUpdate(uint32_t(width), uint32_t(height),
                          destruction_receiver);
@@ -138,12 +144,18 @@ void OhosWindow::UpdateSurface() {
         static_cast<OhosWindowedAppContext&>(app_context()).window_surface();
     if (window_surface) {
       int32_t width = 0, height = 0;
+      // (height, width) - see the note in OpenImpl.
       if (OH_NativeWindow_NativeWindowHandleOpt(window_surface,
-                                                GET_BUFFER_GEOMETRY, &width,
-                                                &height) == 0 &&
+                                                GET_BUFFER_GEOMETRY, &height,
+                                                &width) == 0 &&
           width > 0 && height > 0) {
+        HXLOG("HX360E UpdateSurface: buffer geometry %{public}dx%{public}d",
+              width, height);
         OnActualSizeUpdate(uint32_t(width), uint32_t(height),
                            destruction_receiver);
+      } else {
+        HXLOG("HX360E UpdateSurface: geometry query failed (%{public}d,%{public}d)",
+              width, height);
       }
     }
   }

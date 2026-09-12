@@ -51,6 +51,8 @@ add_library(entry SHARED
         xendroid_ohos/ohos_emulator.cc
         xendroid_ohos/ohos_input_driver.cc
         xendroid_ohos/ohos_window.cc
+        xendroid_ohos/ohaudio_audio_driver.cc
+        xendroid_ohos/ohaudio_audio_system.cc
         xendroid_ohos/napi_config.cc
         xendroid_ohos/napi_meta.cc
         xendroid_ohos/napi_prompt.cc
@@ -74,6 +76,8 @@ target_link_libraries(entry PUBLIC
         libnative_vsync.so
         libvulkan.so
         libhilog_ndk.z.so
+        # OHAudio（Phase 3 音频驱动）。libohaudio.so 由系统提供。
+        libohaudio.so
         # GameControllerKit（物理手柄，OHOS API 21+）。设备不支持时注册函数
         # 返回错误码，不影响启动。
         libohgame_controller.z.so

@@ -29,6 +29,8 @@ export default class EntryAbility extends UIAbility {
       }
       hilog.info(DOMAIN, 'testTag', 'Succeeded in loading the content.');
     });
+    // 横屏由 module.json5 的 ability.orientation=landscape 声明即可，运行时
+    // 不再强制旋转（用户实测：窗口本来就是横屏）。
   }
 
   onWindowStageDestroy(): void {

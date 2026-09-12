@@ -41,8 +41,8 @@ void OnSurfaceCreatedCB(OH_NativeXComponent* component, void* window) {
     }
     g_surface_w = static_cast<uint32_t>(w);
     g_surface_h = static_cast<uint32_t>(h);
-    HILOG("XComponent: surface created %ux%u window=%{public}p", g_surface_w,
-          g_surface_h, window);
+    HILOG("XComponent: surface created %{public}ux%{public}u window=%{public}p",
+          g_surface_w, g_surface_h, window);
     // Phase 2: surface 交给 xenia 的 OhosWindow（见 AttachSurface）。
 }
 
@@ -51,7 +51,7 @@ void OnSurfaceChangedCB(OH_NativeXComponent* component, void* window) {
     if (component && window) {
         OH_NativeXComponent_GetXComponentSize(component, window, &w, &h);
     }
-    HILOG("XComponent: surface changed %ux%u",
+    HILOG("XComponent: surface changed %{public}ux%{public}u",
           static_cast<uint32_t>(w), static_cast<uint32_t>(h));
     // 尺寸变化必须让 presenter 重建 swapchain，否则放大窗口后画面卡死。
     hx360e::OnSurfaceResized();
@@ -187,10 +187,10 @@ napi_value AttachSurface(napi_env env, napi_callback_info info) {
     HILOG("AttachSurface: window=%{public}p surfaceId=%{public}llu",
           native_window, static_cast<unsigned long long>(surface_id));
 
-    // 查询实际尺寸
+    // 查询实际尺寸。注意 GET_BUFFER_GEOMETRY 的出参顺序是 (height, width)。
     int32_t w = 0, h = 0;
-    OH_NativeWindow_NativeWindowHandleOpt(native_window, GET_BUFFER_GEOMETRY, &w,
-                                          &h);
+    OH_NativeWindow_NativeWindowHandleOpt(native_window, GET_BUFFER_GEOMETRY, &h,
+                                          &w);
     HILOG("AttachSurface: buffer geometry %{public}dx%{public}d", w, h);
 
     // Phase 2：把 OHNativeWindow 交给 xenia 的 OhosWindow，由其创建

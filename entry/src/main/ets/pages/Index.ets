@@ -7,40 +7,8 @@ const DOMAIN = 0x0000;
 const TAG = 'HX360E';
 
 /**
- * 手柄控件索引，顺序必须与 native 侧 OhosPadKey（ohos_input_driver.h）一致。
- */
-class XPadKey {
-  static readonly DpadLeft: number = 0;
-  static readonly DpadUp: number = 1;
-  static readonly DpadRight: number = 2;
-  static readonly DpadDown: number = 3;
-  static readonly A: number = 4;
-  static readonly B: number = 5;
-  static readonly X: number = 6;
-  static readonly Y: number = 7;
-  static readonly Back: number = 8;
-  static readonly Start: number = 9;
-  static readonly LShoulder: number = 10;
-  static readonly RShoulder: number = 11;
-  static readonly LThumbPress: number = 12;
-  static readonly RThumbPress: number = 13;
-  static readonly LTrigger: number = 14;
-  static readonly RTrigger: number = 15;
-  static readonly LThumbLeft: number = 16;
-  static readonly LThumbUp: number = 17;
-  static readonly LThumbRight: number = 18;
-  static readonly LThumbDown: number = 19;
-  static readonly RThumbLeft: number = 20;
-  static readonly RThumbUp: number = 21;
-  static readonly RThumbRight: number = 22;
-  static readonly RThumbDown: number = 23;
-}
-
-/**
- * Phase 1.7 页面：把本地游戏文件复制到沙箱，然后启动内核（headless，无画面）。
- *   · XComponent：保留 Phase 0 的渲染表面（Phase 2 接 Vulkan 时复用）
- *   · 选择文件 → @ohos.file.picker → fs.copyFile 到 filesDir/games/<id>/
- *   · 启动 → emulator.setupLaunchArgs / setupGamePath / boot()
+ * 主页：安装游戏（文件/文件夹）、启动内核、查看状态、导出日志。
+ * 点「启动」后跳转到独立游戏页 GamePage（只显示游戏 + 虚拟手柄）。
  */
 @Entry
 @Component
@@ -53,23 +21,8 @@ struct Index {
   @State running: boolean = false;
   @State paused: boolean = false;
   @State busy: boolean = false;
-  @State padVisible: boolean = true;
-  @State padPhysical: boolean = false;
   @State exportStatus: string = '';
-  // ---- guest 提示（Phase 5.3）：'' | 'keyboard' | 'msgbox' | 'disc' ----
-  @State promptKind: string = '';
-  @State promptTitle: string = '';
-  @State promptMessage: string = '';
-  @State promptInput: string = '';
-  @State promptButtons: string[] = [];
-  @State promptDiscLabels: string[] = [];
-  @State promptDiscPaths: string[] = [];
-  private promptId: bigint = BigInt(0);
-  private lastSurfaceId: string = '';
-  private promptTimer: number = -1;
   private pollTimer: number = -1;
-  private attachTimer: number = -1;
-  private xcompController: XComponentController = new XComponentController();
 
   aboutToAppear(): void {
     this.runJitProbe();
@@ -80,9 +33,7 @@ struct Index {
       hilog.error(DOMAIN, TAG, 'emulator API missing: %{public}s', JSON.stringify(e));
     }
     this.restoreInstalled();
-    this.attachTimer = setInterval(() => this.tryAttach(), 200);
     this.pollTimer = setInterval(() => this.refresh(), 500);
-    this.promptTimer = setInterval(() => this.pollPrompt(), 150);
   }
 
   // 启动时恢复沙箱内的「当前游戏」（单槽位：games/current/game*）。
@@ -115,95 +66,9 @@ struct Index {
       clearInterval(this.pollTimer);
       this.pollTimer = -1;
     }
-    if (this.attachTimer >= 0) {
-      clearInterval(this.attachTimer);
-      this.attachTimer = -1;
-    }
-    if (this.promptTimer >= 0) {
-      clearInterval(this.promptTimer);
-      this.promptTimer = -1;
-    }
-    this.cancelAllPrompts();
   }
 
-  // ---- guest 提示（Phase 5.3）----
-
-  // ArkTS 侧 150ms 轮询 guest 的键盘/对话框/换盘请求（DESIGN.md §9.3）。
-  pollPrompt(): void {
-    if (this.promptKind !== '') {
-      return;
-    }
-    try {
-      const kb = testNapi.prompt.keyboardRequest();
-      if (kb !== null) {
-        this.promptId = kb.id;
-        this.promptTitle = kb.title;
-        this.promptMessage = kb.description;
-        this.promptInput = kb.defaultText;
-        this.promptKind = 'keyboard';
-        return;
-      }
-      const mb = testNapi.prompt.msgboxRequest();
-      if (mb !== null) {
-        this.promptId = mb.id;
-        this.promptTitle = mb.title;
-        this.promptMessage = mb.text;
-        this.promptButtons = mb.buttons;
-        this.promptKind = 'msgbox';
-        return;
-      }
-      const d = testNapi.prompt.discRequest();
-      if (d !== null) {
-        this.promptId = d.id;
-        this.promptTitle = '请更换光盘';
-        this.promptMessage = d.message;
-        this.promptDiscLabels = d.discLabels;
-        this.promptDiscPaths = d.discPaths;
-        this.promptKind = 'disc';
-      }
-    } catch (e) {
-      // 模块未就绪时忽略
-    }
-  }
-
-  clearPrompt(): void {
-    this.promptKind = '';
-    this.promptTitle = '';
-    this.promptMessage = '';
-    this.promptInput = '';
-    this.promptButtons = [];
-    this.promptDiscLabels = [];
-    this.promptDiscPaths = [];
-  }
-
-  submitKeyboard(accepted: boolean): void {
-    try {
-      testNapi.prompt.keyboardSubmit(this.promptId, accepted, this.promptInput);
-    } catch (e) {
-      hilog.error(DOMAIN, TAG, 'keyboardSubmit failed: %{public}s', JSON.stringify(e));
-    }
-    this.clearPrompt();
-  }
-
-  submitMsgbox(index: number): void {
-    try {
-      testNapi.prompt.msgboxSubmit(this.promptId, index);
-    } catch (e) {
-      hilog.error(DOMAIN, TAG, 'msgboxSubmit failed: %{public}s', JSON.stringify(e));
-    }
-    this.clearPrompt();
-  }
-
-  submitDisc(accepted: boolean, path: string): void {
-    try {
-      testNapi.prompt.discSubmit(this.promptId, accepted, path);
-    } catch (e) {
-      hilog.error(DOMAIN, TAG, 'discSubmit failed: %{public}s', JSON.stringify(e));
-    }
-    this.clearPrompt();
-  }
-
-  // 退出/卸载时释放所有阻塞在提示上的 guest 线程。
+  // 退出时释放所有阻塞在提示上的 guest 线程（提示 UI 在 GamePage）。
   cancelAllPrompts(): void {
     try {
       testNapi.prompt.keyboardCancelAll();
@@ -212,8 +77,9 @@ struct Index {
     } catch (e) {
       // 忽略
     }
-    this.clearPrompt();
   }
+
+  // ---- guest 提示相关的轮询/提交已移到 GamePage ----
 
   // Phase 0.1：JIT 可执行内存探测
   runJitProbe(): void {
@@ -222,22 +88,6 @@ struct Index {
       this.jitInfo = r.firstWorking >= 0 ? `JIT: ${r.firstWorkingName} ✅` : 'JIT: 不可用 ❌';
     } catch (e) {
       this.jitInfo = 'JIT 探测异常';
-    }
-  }
-
-  // 取 surfaceId 并交给 native（Phase 0.2 呈现链路）。持续轮询：surface 在窗口
-  // 尺寸变化时可能被重建并换新 id，需要重新 attach（否则放大窗口会卡死）。
-  tryAttach(): void {
-    try {
-      const id: string = this.xcompController.getXComponentSurfaceId();
-      if (id === '' || id === '0' || id === this.lastSurfaceId) {
-        return;
-      }
-      const ok: boolean = testNapi.attachSurface(id);
-      this.lastSurfaceId = id;
-      hilog.info(DOMAIN, TAG, 'attachSurface(%{public}s) -> %{public}d', id, ok ? 1 : 0);
-    } catch (e) {
-      hilog.error(DOMAIN, TAG, 'attach failed: %{public}s', JSON.stringify(e));
     }
   }
 
@@ -553,7 +403,7 @@ struct Index {
     return '';
   }
 
-  // 启动内核（headless：null GPU + nop 音频/输入）
+  // 启动内核并进入独立游戏页。
   bootGame(): void {
     if (this.gamePath === '') {
       this.installStatus = '请先安装游戏';
@@ -567,55 +417,24 @@ struct Index {
         `--content_root=${storage}/content`,
         `--cache_root=${storage}/cache`,
         '--gpu=vulkan',
-        '--apu=nop',
+        '--apu=ohaudio',
         '--hid=nop',
       ];
       testNapi.emulator.setupLaunchArgs(args);
       testNapi.emulator.setupGamePath(this.gamePath);
       testNapi.emulator.boot();
-      this.installStatus = '启动中…（headless，看 hilog）';
+      this.installStatus = '启动中…（见游戏页）';
       hilog.info(DOMAIN, TAG, 'boot(%{public}s)', this.gamePath);
+      // 切到独立游戏页：只显示画面 + 虚拟手柄。
+      this.getUIContext().getRouter().pushUrl({ url: 'pages/GamePage' })
+        .then(() => {
+          hilog.info(DOMAIN, TAG, 'entered GamePage');
+        })
+        .catch((e: Error) => {
+          hilog.error(DOMAIN, TAG, 'pushUrl failed: %{public}s', e.message);
+        });
     } catch (e) {
       hilog.error(DOMAIN, TAG, 'boot failed: %{public}s', JSON.stringify(e));
-    }
-  }
-
-  // ---- 手柄输入（Phase 4）----
-
-  // 摇杆方向 / 扳机需要带模拟值，其余按键只需按下与否。
-  private keyValue(key: number): number {
-    if (key === XPadKey.LTrigger || key === XPadKey.RTrigger) {
-      return 255;
-    }
-    if (key === XPadKey.LThumbLeft || key === XPadKey.LThumbDown ||
-      key === XPadKey.RThumbLeft || key === XPadKey.RThumbDown) {
-      return -32767;
-    }
-    if (key === XPadKey.LThumbRight || key === XPadKey.LThumbUp ||
-      key === XPadKey.RThumbRight || key === XPadKey.RThumbUp) {
-      return 32767;
-    }
-    return 0;
-  }
-
-  padPress(key: number, pressed: boolean): void {
-    try {
-      testNapi.emulator.keyEvent(key, pressed, this.keyValue(key));
-    } catch (e) {
-      hilog.error(DOMAIN, TAG, 'keyEvent failed: %{public}s', JSON.stringify(e));
-    }
-  }
-
-  padTogglePhysical(): void {
-    try {
-      if (this.padPhysical) {
-        testNapi.emulator.padStopPhysical();
-        this.padPhysical = false;
-      } else {
-        this.padPhysical = testNapi.emulator.padStartPhysical();
-      }
-    } catch (e) {
-      hilog.error(DOMAIN, TAG, 'gamepad toggle failed: %{public}s', JSON.stringify(e));
     }
   }
 
@@ -668,7 +487,9 @@ struct Index {
       const ctx = getContext(this);
       const logDir: string = `${ctx.filesDir}/logs`;
       let text: string = `HX360E logs ${new Date().toISOString()}\n`;
-      text += '===== native_fault.log (tail 256KB) =====\n';
+      text += '===== native_fault.prev.log (上次运行，崩溃现场) =====\n';
+      text += this.readLogTail(`${logDir}/native_fault.prev.log`, 256 * 1024);
+      text += '\n===== native_fault.log (tail 256KB) =====\n';
       text += this.readLogTail(`${logDir}/native_fault.log`, 256 * 1024);
       text += '\n===== xe.log (tail 4MB) =====\n';
       text += this.readLogTail(`${logDir}/xe.log`, 4 * 1024 * 1024);
@@ -708,253 +529,58 @@ struct Index {
       .onClick(action)
   }
 
-  // 按住生效的手柄按钮（触摸 Down/Up，而不是点击）。
-  @Builder
-  padBtn(label: string, key: number) {
-    Button(label)
-      .fontSize(11)
-      .fontColor('#fff')
-      .backgroundColor('#6600aaff')
-      .borderRadius(6)
-      .width(46)
-      .height(34)
-      .padding(0)
-      .onTouch((e: TouchEvent) => {
-        if (e.type === TouchType.Down) {
-          this.padPress(key, true);
-        } else if (e.type === TouchType.Up || e.type === TouchType.Cancel) {
-          this.padPress(key, false);
-        }
-      })
-  }
-
-  @Builder
-  dpadPad() {
-    Column({ space: 2 }) {
-      Row() {
-        this.padBtn('D↑', XPadKey.DpadUp)
-      }
-      .justifyContent(FlexAlign.Center)
-      .width('100%')
-
-      Row({ space: 2 }) {
-        this.padBtn('D←', XPadKey.DpadLeft)
-        this.padBtn('D↓', XPadKey.DpadDown)
-        this.padBtn('D→', XPadKey.DpadRight)
-      }
-    }
-    .width(132)
-  }
-
-  @Builder
-  facePad() {
-    Column({ space: 2 }) {
-      Row() {
-        this.padBtn('Y', XPadKey.Y)
-      }
-      .justifyContent(FlexAlign.Center)
-      .width('100%')
-
-      Row({ space: 2 }) {
-        this.padBtn('X', XPadKey.X)
-        this.padBtn('B', XPadKey.B)
-        this.padBtn('A', XPadKey.A)
-      }
-    }
-    .width(132)
-  }
-
-  // 摇杆用 4 向按钮近似（满偏），够跑通输入链路；模拟量后续再做。
-  @Builder
-  stickPad(isLeft: boolean) {
-    Column({ space: 2 }) {
-      Row() {
-        this.padBtn('↑', isLeft ? XPadKey.LThumbUp : XPadKey.RThumbUp)
-      }
-      .justifyContent(FlexAlign.Center)
-      .width('100%')
-
-      Row({ space: 2 }) {
-        this.padBtn('←', isLeft ? XPadKey.LThumbLeft : XPadKey.RThumbLeft)
-        this.padBtn(isLeft ? 'L3' : 'R3',
-          isLeft ? XPadKey.LThumbPress : XPadKey.RThumbPress)
-        this.padBtn('→', isLeft ? XPadKey.LThumbRight : XPadKey.RThumbRight)
-      }
-
-      Row() {
-        this.padBtn('↓', isLeft ? XPadKey.LThumbDown : XPadKey.RThumbDown)
-      }
-      .justifyContent(FlexAlign.Center)
-      .width('100%')
-    }
-    .width(132)
-  }
-
   build() {
-    Stack({ alignContent: Alignment.Top }) {
-      XComponent({
-        id: 'hx360e_surface',
-        type: XComponentType.SURFACE,
-        controller: this.xcompController,
-      })
-        .width('100%')
-        .height('100%')
+    Column({ space: 12 }) {
+      Text('HX360E').fontSize(20).fontColor('#fff')
+      Text(this.status).fontSize(12).fontColor('#8cf')
+      Text(this.jitInfo).fontSize(11).fontColor('#9f9')
+      Text(this.gpuInfo).fontSize(9).fontColor('#aaa')
+      Text(this.installStatus).fontSize(11).fontColor('#ffd')
+      Text(this.running ? (this.paused ? '内核：已暂停' : '内核：运行中') : '内核：未运行')
+        .fontSize(11)
+        .fontColor('#f9a')
+      Text(this.exportStatus).fontSize(11).fontColor('#9cf')
 
-      Column({ space: 3 }) {
-        Text(this.status).fontSize(12).fontColor('#8cf')
-        Text(this.jitInfo).fontSize(11).fontColor('#9f9')
-        Text(this.gpuInfo).fontSize(9).fontColor('#aaa')
-        Text(this.installStatus).fontSize(11).fontColor('#ffd')
-        Text(this.running ? (this.paused ? '内核：已暂停' : '内核：运行中') : '内核：未运行')
-          .fontSize(11)
-          .fontColor('#f9a')
-        Text(this.exportStatus).fontSize(11).fontColor('#9cf')
+      Row({ space: 8 }) {
+        this.actionButton('安装文件', () => {
+          this.pickAndInstall(false);
+        })
+        this.actionButton('安装文件夹', () => {
+          this.pickAndInstall(true);
+        })
+        this.actionButton('启动', () => {
+          this.bootGame();
+        })
       }
       .width('100%')
-      .padding(6)
-      .backgroundColor('#99000000')
 
-      Column({ space: 8 }) {
-        Row({ space: 8 }) {
-          this.actionButton('安装文件', () => {
-            this.pickAndInstall(false);
-          })
-          this.actionButton('安装文件夹', () => {
-            this.pickAndInstall(true);
-          })
-          this.actionButton('启动', () => {
-            this.bootGame();
-          })
-        }
-        Row({ space: 8 }) {
-          this.actionButton(this.paused ? '继续' : '暂停', () => {
-            if (this.paused) {
-              testNapi.emulator.resume();
-            } else {
-              testNapi.emulator.pause();
-            }
-          })
-          this.actionButton('退出', () => {
-            this.cancelAllPrompts();
-            testNapi.emulator.quit();
-          })
-        }
-        Row({ space: 8 }) {
-          this.actionButton(this.padVisible ? '隐藏手柄' : '显示手柄', () => {
-            this.padVisible = !this.padVisible;
-            if (!this.padVisible) {
-              testNapi.emulator.padReleaseAll();
-            }
-          })
-          this.actionButton(this.padPhysical ? '物理手柄:开' : '物理手柄:关', () => {
-            this.padTogglePhysical();
-          })
-        }
-        Row({ space: 8 }) {
-          this.actionButton('导出日志到 Download', () => {
-            this.exportLogs();
-          })
-        }
+      Row({ space: 8 }) {
+        this.actionButton(this.paused ? '继续' : '暂停', () => {
+          if (this.paused) {
+            testNapi.emulator.resume();
+          } else {
+            testNapi.emulator.pause();
+          }
+        })
+        this.actionButton('退出', () => {
+          this.cancelAllPrompts();
+          testNapi.emulator.quit();
+        })
       }
       .width('100%')
-      .padding(10)
-      .position({ x: 0, y: '100%' })
-      .translate({ y: -192 })
 
-      if (this.padVisible) {
-        Column() {
-          Row({ space: 6 }) {
-            this.padBtn('LB', XPadKey.LShoulder)
-            this.padBtn('LT', XPadKey.LTrigger)
-            this.padBtn('BK', XPadKey.Back)
-            this.padBtn('ST', XPadKey.Start)
-            this.padBtn('RT', XPadKey.RTrigger)
-            this.padBtn('RB', XPadKey.RShoulder)
-          }
-          .justifyContent(FlexAlign.Center)
-          .width('100%')
-
-          Row({ space: 8 }) {
-            this.stickPad(true)
-            this.dpadPad()
-            this.facePad()
-            this.stickPad(false)
-          }
-          .justifyContent(FlexAlign.Center)
-          .width('100%')
-        }
-        .width('100%')
-        .height('100%')
-        .justifyContent(FlexAlign.End)
-        .padding({ bottom: 160 })
-        // None：覆盖层容器自身不参与命中测试，只有里面的手柄按钮响应，
-        // 下层「启动/暂停」按钮仍可点击。
-        .hitTestBehavior(HitTestMode.None)
+      Row({ space: 8 }) {
+        this.actionButton('导出日志到 Download', () => {
+          this.exportLogs();
+        })
       }
-
-      // guest 提示模态层（Phase 5.3）：键盘 / 对话框 / 换盘。
-      if (this.promptKind !== '') {
-        Column() {
-          Column({ space: 10 }) {
-            Text(this.promptTitle)
-              .fontSize(16)
-              .fontColor('#fff')
-              .width('100%')
-            Text(this.promptMessage)
-              .fontSize(13)
-              .fontColor('#ddd')
-              .width('100%')
-
-            if (this.promptKind === 'keyboard') {
-              TextInput({ placeholder: '请输入…', text: this.promptInput })
-                .width('100%')
-                .onChange((value: string) => {
-                  this.promptInput = value;
-                })
-              Row({ space: 8 }) {
-                Button('确定')
-                  .layoutWeight(1)
-                  .onClick(() => this.submitKeyboard(true))
-                Button('取消')
-                  .layoutWeight(1)
-                  .onClick(() => this.submitKeyboard(false))
-              }
-              .width('100%')
-            } else if (this.promptKind === 'msgbox') {
-              Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Center }) {
-                ForEach(this.promptButtons, (label: string, index: number) => {
-                  Button(label)
-                    .margin(4)
-                    .onClick(() => this.submitMsgbox(index))
-                })
-              }
-              .width('100%')
-            } else {
-              Column({ space: 6 }) {
-                ForEach(this.promptDiscLabels, (label: string, index: number) => {
-                  Button(label)
-                    .width('100%')
-                    .onClick(() => this.submitDisc(true, this.promptDiscPaths[index]))
-                })
-                Button('取消')
-                  .width('100%')
-                  .onClick(() => this.submitDisc(false, ''))
-              }
-              .width('100%')
-            }
-          }
-          .width('80%')
-          .padding(16)
-          .backgroundColor('#ee202020')
-          .borderRadius(10)
-        }
-        .width('100%')
-        .height('100%')
-        .justifyContent(FlexAlign.Center)
-        .backgroundColor('#66000000')
-      }
+      .width('100%')
     }
     .width('100%')
     .height('100%')
+    .padding(16)
+    .backgroundColor('#101018')
+    .alignItems(HorizontalAlign.Center)
+    .justifyContent(FlexAlign.Center)
   }
 }
