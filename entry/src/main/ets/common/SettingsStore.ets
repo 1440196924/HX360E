@@ -15,7 +15,7 @@ const TAG = 'HX360E';
  *   3. 版本相同 → 直接返回，不碰文件。
  * 这样默认值的改动能真正生效，又不会覆盖用户自己改过的值。
  */
-const CONFIG_SCHEMA_VERSION: number = 2;
+const CONFIG_SCHEMA_VERSION: number = 3;
 const CONFIG_VERSION_TAG: string = 'HX360E|schema_version';
 /** [标签, 旧默认值, 新默认值] */
 const CONFIG_MIGRATIONS: string[][] = [
@@ -24,6 +24,10 @@ const CONFIG_MIGRATIONS: string[][] = [
   // GPU 成本 A/B：真实遮挡查询→伪造（tiled GPU 上查询易串行化）；回读解析 uma→none。
   ['GPU|occlusion_query', 'fast', 'fake'],
   ['GPU|readback_resolve', 'uma', 'none'],
+  // v3：新增 Vulkan|hx360e_xeg_spatial_upscale(_sharpness) 两个键（系统级超分）。
+  //   hx360e_xeg_spatial_upscale 默认 true：XEG 1.5x 超分接到上屏链路后画质更好，
+  //   且创建失败会自动退回 FSR 链，非 Maleoon 设备无副作用。
+  ['Vulkan|hx360e_xeg_spatial_upscale', 'false', 'true'],
 ];
 
 /**

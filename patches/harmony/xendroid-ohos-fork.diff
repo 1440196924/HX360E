@@ -2575,7 +2575,7 @@ index fd3e34d1c..b491f38ab 100644
      bool ext_EXT_metal_surface = false;  // #218
  #endif
 diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_presenter.cc b/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_presenter.cc
-index 0f5e7e7bf..9bc64c19e 100644
+index 0f5e7e7bf..69287f323 100644
 --- a/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_presenter.cc
 +++ b/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_presenter.cc
 @@ -1,4 +1,4 @@
@@ -2606,7 +2606,7 @@ index 0f5e7e7bf..9bc64c19e 100644
  #if XE_PLATFORM_MAC
  #include "xenia/ui/surface_mac.h"
  #endif
-@@ -51,6 +55,26 @@ DEFINE_bool(
+@@ -51,6 +55,27 @@ DEFINE_bool(
      "may present with tearing if frames don't meet the host display refresh "
      "rate.",
      "Vulkan");
@@ -2626,14 +2626,15 @@ index 0f5e7e7bf..9bc64c19e 100644
 +    "upscaling the guest output to the host window. Set the guest output "
 +    "upscale effect to FSR for this to apply.",
 +    "Vulkan");
-+DEFINE_double(
-+    hx360e_xeg_spatial_upscale_sharpness, 0.3,
-+    "HX360E: sharpness passed to the XEngine spatial upscale, in [0, 1].",
++DEFINE_int32(
++    hx360e_xeg_spatial_upscale_sharpness, 30,
++    "HX360E: sharpness passed to the XEngine spatial upscale, in percent "
++    "(0 to 100, the API takes 0.0 to 1.0).",
 +    "Vulkan");
  #if XE_PLATFORM_MAC
  DEFINE_bool(vulkan_presenter_use_backing_scale, false,
              "Use the macOS view backing scale factor for MoltenVK drawables.",
-@@ -206,11 +230,16 @@ Surface::TypeFlags VulkanPresenter::GetSurfaceTypesSupportedByInstance(
+@@ -206,11 +231,16 @@ Surface::TypeFlags VulkanPresenter::GetSurfaceTypesSupportedByInstance(
      return 0;
    }
    Surface::TypeFlags type_flags = 0;
@@ -2651,7 +2652,7 @@ index 0f5e7e7bf..9bc64c19e 100644
  #if XE_PLATFORM_MAC
    if (instance_extensions.ext_EXT_metal_surface) {
      type_flags |= Surface::kTypeFlag_MacNSView;
-@@ -594,7 +623,7 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(
+@@ -594,7 +624,7 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(
      }
      VkResult vulkan_surface_create_result = VK_ERROR_UNKNOWN;
      switch (surface_type) {
@@ -2660,7 +2661,7 @@ index 0f5e7e7bf..9bc64c19e 100644
        case Surface::kTypeIndex_AndroidNativeWindow: {
          auto& android_native_window_surface =
              static_cast<const AndroidNativeWindowSurface&>(new_surface);
-@@ -609,6 +638,20 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(
+@@ -609,6 +639,20 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(
              &paint_context_.vulkan_surface);
        } break;
  #endif
@@ -2681,7 +2682,7 @@ index 0f5e7e7bf..9bc64c19e 100644
  #if XE_PLATFORM_GNU_LINUX
        case Surface::kTypeIndex_WaylandWindow: {
          auto& wayland_window_surface =
-@@ -1107,8 +1150,8 @@ VkSwapchainKHR VulkanPresenter::PaintContext::CreateSwapchainForVulkanSurface(
+@@ -1107,8 +1151,8 @@ VkSwapchainKHR VulkanPresenter::PaintContext::CreateSwapchainForVulkanSurface(
      // specification violation).
      surface_formats.clear();
    }
@@ -2692,7 +2693,7 @@ index 0f5e7e7bf..9bc64c19e 100644
    static constexpr VkFormat kFormat8888Primary = VK_FORMAT_R8G8B8A8_UNORM;
    static constexpr VkFormat kFormat8888Secondary = VK_FORMAT_B8G8R8A8_UNORM;
  #else
-@@ -1615,6 +1658,44 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(
+@@ -1615,6 +1659,44 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(
          guest_output_properties, paint_context_.swapchain_extent.width,
          paint_context_.swapchain_extent.height, max_framebuffer_extent.width,
          max_framebuffer_extent.height, guest_output_paint_config);
@@ -2737,7 +2738,7 @@ index 0f5e7e7bf..9bc64c19e 100644
      if (guest_output_flow.effect_count) {
        // Store the main target reference to the guest output image so it's not
        // destroyed while it's still potentially in use by main target painting
-@@ -1872,6 +1953,267 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(
+@@ -1872,6 +1954,268 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(
          }
          for (size_t i = 0; i < guest_output_flow.effect_count; ++i) {
            bool is_final_effect = i + 1 >= guest_output_flow.effect_count;
@@ -2868,7 +2869,8 @@ index 0f5e7e7bf..9bc64c19e 100644
 +                        device, {xeg_input_width, xeg_input_height},
 +                        {xeg_output_width, xeg_output_height},
 +                        VK_FORMAT_R8G8B8A8_UNORM,
-+                        float(cvars::hx360e_xeg_spatial_upscale_sharpness))) {
++                        float(cvars::hx360e_xeg_spatial_upscale_sharpness) /
++                            100.0f)) {
 +                  break;
 +                }
 +                created = true;

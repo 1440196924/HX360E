@@ -184,6 +184,13 @@ export class SettingsSchema {
               opt('off', '关闭'), opt('1x2', '1x2'), opt('2x1', '2x1'),
               opt('2x2', '2x2（最省，最糊）'),
             ]),
+          // 系统级超分：XEngine 空域超分（XEG_spatial_upscale），把 guest 输出
+          // 以 1.5x 交给系统的 AI/GPU 超分再上屏。仅 Maleoon 设备可用，创建失败
+          // 会自动退回 FSR 链。
+          Setting.bool('Vulkan', 'hx360e_xeg_spatial_upscale',
+            '系统级超分（XEngine 1.5x）', true),
+          Setting.int('Vulkan', 'hx360e_xeg_spatial_upscale_sharpness',
+            '系统级超分锐度（0-100）', 30, 0, 100),
           Setting.bool('GPU', 'vulkan_cache_texture_descriptors',
           '缓存纹理描述符', true),
         Setting.int('GPU', 'vulkan_mid_frame_submission_draws',

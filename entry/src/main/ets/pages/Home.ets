@@ -348,10 +348,9 @@ struct Home {
       // 我们靠 EDRAM dump 路径（已加升采样换算）即可，且已稳定 30fps 有余量，
       // 不需要这条更快的路径。
       '--vulkan_direct_host_resolve=false',
-      // XEG 空域超分：当前会崩（SIGSEGV）——疑因 guest 输出是 10-bit 打包格式
-      // (A2B10G10R10_UNORM_PACK32)，XEG 可能只支持 R8G8B8A8_UNORM。待加一层
-      // RGBA8 转换图后再开。cvar 默认已是 false。
-      '--hx360e_xeg_spatial_upscale=true',
+      // 系统级超分（XEngine 1.5x）改由设置项 Vulkan|hx360e_xeg_spatial_upscale
+      // 控制（默认开）。这里不再传参：命令行优先级高于 --config，传了就会盖掉
+      // 用户在设置页里的选择。
     ];
     // 高级选项里保存过的设置（稀疏 TOML）：存在才带上，否则用 cvar 默认值。
     try {
