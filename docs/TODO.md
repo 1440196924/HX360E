@@ -315,12 +315,12 @@ mprotect(PROT_READ|PROT_EXEC)                      // 切 RX
 
 ### 0.3 OHAudio 低延迟 `[P0]`
 
-- [ ] 最小工程：`OH_AudioStreamBuilder_Create(RENDERER)` + `AUDIOSTREAM_LATENCY_MODE_FAST`
-- [ ] `OH_AudioStreamBuilder_SetRendererWriteDataCallback` 输出 440Hz 正弦波
-- [ ] 验证无欠载（`OH_AudioRenderer_GetUnderflowCount`）
+- [x] 最小工程：`OH_AudioStreamBuilder_Create(RENDERER)` + `AUDIOSTREAM_LATENCY_MODE_FAST`  （已落地到 ohaudio_audio_driver）
+- [x] `OH_AudioStreamBuilder_SetRendererWriteDataCallback` 输出 440Hz 正弦波  （已接 APU 输出）
+- [~] 验证无欠载（`OH_AudioRenderer_GetUnderflowCount`）  （已做欠载恢复，未做统计校验）
 - [ ] 验证 `OH_AudioRenderer_GetAudioTimestampInfo` 可用于时钟对齐
-- [ ] 记录：实际采样率 / 帧长 / 延迟
-- [ ] 结论写入 `docs/phase0-audio-result.md`
+- [x] 记录：实际采样率 / 帧长 / 延迟  （实测 48kHz / 2ch / 256 帧 / FAST）
+- [ ] 结论写入 `docs/phase0-audio-result.md`  （暂记录在 TODO 与本文件注释）
 
 ### 0.4 Vulkan 能力探测 + 已知游戏矩阵 `[P1]`
 
@@ -332,12 +332,12 @@ mprotect(PROT_READ|PROT_EXEC)                      // 切 RX
 
 ### 0.5 沙箱安装与存储 `[P0]`
 
-- [ ] picker 选文件 → 读头 4KB 识别格式（ISO / ZAR / GOD / XEX 目录）
+- [~] picker 选文件 → 读头 4KB 识别格式（ISO / ZAR / GOD / XEX 目录）  （native probeFile 已可读头诊断；安装流程未做格式嗅探）
 - [ ] `storageStatistics.getFreeSizeSync()` 空间预检
-- [ ] `fs.createReadStream` / `createWriteStream` 流式拷贝 + 进度回调
+- [~] `fs.createReadStream` / `createWriteStream` 流式拷贝 + 进度回调  （已用 4MB 分块 + 显式 offset 拷贝；进度回调未做）
 - [ ] `.tmp-<id>/` → `rename` 原子落定
-- [ ] native 侧用沙箱内 POSIX 路径成功 `open` + `read` 大文件
-- [ ] **关键验证**：`filesDir` 是否有空间配额？能否拷贝 >10 GB 的文件？
+- [x] native 侧用沙箱内 POSIX 路径成功 `open` + `read` 大文件  （xenia 直接读 games/<id>/ 下大文件运行）
+- [~] **关键验证**：`filesDir` 是否有空间配额？能否拷贝 >10 GB 的文件？  （已装 123MB 的 Limbo；>10GB 未验）
 - [ ] 结论写入 `docs/phase0-storage-result.md`
 
 ---
@@ -405,8 +405,8 @@ mprotect(PROT_READ|PROT_EXEC)                      // 切 RX
 - [x] **补丁 0002**：`cmake/XeniaHelpers.cmake` 的 `xe_platform_sources` 新增 `OHOS` 分支（走 `_posix`）、`xe_target_defaults` 在 OHOS 下关闭 `-Werror`；`src/xenia/CMakeLists.txt` 在 OHOS 下跳过 `apu/sdl`、`helper/sdl`、`hid/sdl`、`app`；`gpu/vulkan`、`ui/vulkan` 在 OHOS 下跳过 edge 着色器管线（消费预生成 bytecode）
 - [x] **补丁 0003**：`base/memory_posix.cc` 的 `ASharedMemory_create` → `memfd_create`；`IsWritableExecutableMemorySupported()` 返回 `false`（走 RW → mprotect RX）
 - [x] **补丁 0004**：`__clear_cache` 相关——a64 后端已编译通过，未遇 bionic 符号
-- [~] **补丁 0009**：`a64_code_cache.cc` 的 `/data/data/<pkg>/` 路径假设——待真机运行验证时处理
-- [ ] **补丁 0010**：日志 sink 抽象（先保持文件日志，hilog 后置）
+- [x] **补丁 0009**：`a64_code_cache.cc` 的 `/data/data/<pkg>/` 路径假设——待真机运行验证时处理  （已改 OHOS 匿名 RW + 每页 W^X，不再依赖 /data/data）
+- [x] **补丁 0010**：日志 sink 抽象（先保持文件日志，hilog 后置）  （hilog sink + 文件 sink 已落地）
 
 **额外发现的补丁（编译期，未在初版清单）**：
 - `third_party/xbyak_aarch64/src/util_impl_linux.h`：OHOS 无 `_SC_LEVEL*_CACHE_SIZE`，加 `#if defined(...)` 兜底
@@ -448,9 +448,9 @@ mprotect(PROT_READ|PROT_EXEC)                      // 切 RX
   - [x] ArkTS：`@ohos.file.picker` 选文件 → `fs.copyFile` 到 `filesDir/games/<id>/` → 启动时扫描恢复
   - [x] 真机验证：内核 `Setup` 全通过（Memory/Processor/Kernel/Vulkan Maleoon 935/Audio），`LaunchPath` 已执行
 - [x] 能加载 XEX 并启动内核（无画面）——**真机验证通过**（Limbo / XBLA GOD）：内核 Setup 全通过 → `LaunchStfsContainer` → 创建 guest 线程（GuestScheduler）→ 执行 guest JIT 代码约 6 秒
-- [~] 进入游戏主循环——guest 运行数秒后崩溃：`Access Violation: read at 0x5CB1D2A7D0`（guest 物理 ~0x1D2A7D0），xenia 已捕获并打印 guest crash report；**疑似 null GPU 后端导致**（`PM4_DRAW_INDX_2: Failed in backend` 刷屏），待 Phase 2 Vulkan 后端验证
+- [x] 进入游戏主循环——guest 运行数秒后崩溃：`Access Violation: read at 0x5CB1D2A7D0`（guest 物理 ~0x1D2A7D0），xenia 已捕获并打印 guest crash report；**疑似 null GPU 后端导致**（`PM4_DRAW_INDX_2: Failed in backend` 刷屏），待 Phase 2 Vulkan 后端验证  （已能进游戏并持续呈现）
 - [x] 日志能输出到 `filesDir/logs/xe.log`——同时新增 hilog sink（`base/logging.cc`），xenia 日志可在 hilog 查看
-- [~] 记录：从进程启动到内核启动的耗时、内存占用
+- [~] 记录：从进程启动到内核启动的耗时、内存占用  （仅部分记录）
 
 **本轮新增 OHOS 适配补丁（超出初版清单）**：
 - `kernel/xevent.cc`、`kernel/xobject.cc`：`RecordCreator/RecordSetter/RecordCooperativeSignal` 改用 `GetCurrentFiberThread()`，避免 host 线程初始化内核时的 `assert_always`
@@ -491,7 +491,7 @@ mprotect(PROT_READ|PROT_EXEC)                      // 切 RX
       （Phase 0.2 已验证该路径比回调 `window` 参数可靠）
 - [x] `OnSurfaceCreated` 等价物：`AttachSurface` 保存 `OHNativeWindow*`（`HX360E: AttachSurface: window=…`）
 - [x] 尺寸：`OH_NativeWindow_NativeWindowHandleOpt(..., GET_BUFFER_GEOMETRY, ...)`（实测 `1324x2090`）
-- [ ] `OnSurfaceDestroyed`：同步等待 GPU 排空后销毁 surface（前后台切换，见 2.6）
+- [~] `OnSurfaceDestroyed`：同步等待 GPU 排空后销毁 surface（前后台切换，见 2.6）  （销毁时关闭独立上下文；xenia surface 重建未完全验证）
 - [x] ArkTS：`XComponent({ id, type: XComponentType.SURFACE, controller })`
 
 ### 2.2 Surface 实现 `[P0]` ✅
@@ -515,7 +515,7 @@ mprotect(PROT_READ|PROT_EXEC)                      // 切 RX
 - [x] CMake 加 `-DVK_USE_PLATFORM_OHOS`，链接 `xenia-gpu-vulkan` / `glslang-spirv`
 - [x] 验证 swapchain 创建（真机 `1324x2090` format 37）与 presenter 连接
 - [x] 验证呈现循环：**画面已出来**（Xbox logo、游戏标题/加载画面）—— 真机确认
-- [ ] FPS 可测量（`emulator.lastFrameTimeMs/instantFps/averageFps` 尚未实现，见 2.5）
+- [x] FPS 可测量（`emulator.lastFrameTimeMs/instantFps/averageFps` 尚未实现，见 2.5）  （已实现）
 
 ### 2.5 最小 NAPI 与 UI `[P0]` ✅（FPS 接口除外）
 
@@ -528,22 +528,22 @@ mprotect(PROT_READ|PROT_EXEC)                      // 切 RX
   - [x] `emulator.probeFile(path)`（镜像头识别，诊断用）
   - [x] `emulator.keyEvent(key, pressed, value)` + `padReleaseAll/padStartPhysical/padStopPhysical`
         （**Phase 4 已实现**，不再是空壳）
-  - [ ] `emulator.changeSurface(w, h)`
-  - [ ] `emulator.lastFrameTimeMs()` / `instantFps()` / `averageFps()`
+  - [x] `emulator.changeSurface(w, h)`
+  - [x] `emulator.lastFrameTimeMs()` / `instantFps()` / `averageFps()`
 - [x] `types/libentry/Index.d.ts` 声明
 - [x] 最小 ArkTS 页面：
   - [x] 按钮 → picker 选文件（临时方案，Phase 6 换成正式安装器）
   - [x] XComponent 全屏
   - [x] 启动 / 暂停 / 退出按钮、手柄覆盖层开关、**导出日志到 Download**
-  - [ ] FPS 显示（当前显示的是 Phase 0 的 `vulkanStatus()`，非内核帧率）
+  - [x] FPS 显示（当前显示的是 Phase 0 的 `vulkanStatus()`，非内核帧率）  （游戏页调试浮层：FPS + 帧时间，可拖动）
 
 ### 2.6 验收 `[P0]`
 
-- [ ] 画面出现并可持续呈现（不是黑屏 / 不是卡住）
-- [ ] FPS 可测量，记录数值
-- [ ] 前台切后台再切回，surface 重建正常（不崩溃）
+- [x] 画面出现并可持续呈现（不是黑屏 / 不是卡住）
+- [x] FPS 可测量，记录数值  （调试浮层实时显示）
+- [~] 前台切后台再切回，surface 重建正常（不崩溃）  （未系统验证）
 - [ ] 记录首帧时间
-- [ ] 在 Kirin 9020 与 Kirin 9010 各测一遍
+- [~] 在 Kirin 9020 与 Kirin 9010 各测一遍  （已测 Pura 70 Pro / MateBook Pro S）
 
 ---
 
@@ -553,19 +553,19 @@ mprotect(PROT_READ|PROT_EXEC)                      // 切 RX
 
 ### 3.1 OHAudio 驱动 `[P1]`
 
-- [ ] `xendroid_ohos/ohaudio_audio_driver.h/.cc`，照搬 `xe_aaudio_audio_driver.cpp`（563 行）结构
-- [ ] API 映射（DESIGN.md §7.1 表）
-- [ ] 保留上游三个设计：软件音量 / 欠载恢复线程 / 格式协商（FLOAT32 → S16 降级）
-- [ ] `ohaudio_audio_system.h/.cc` 工厂
-- [ ] 注册到 `create_audio_system`（cvar `apu` 默认改 `ohaudio`）
+- [x] `xendroid_ohos/ohaudio_audio_driver.h/.cc`，照搬 `xe_aaudio_audio_driver.cpp`（563 行）结构
+- [x] API 映射（DESIGN.md §7.1 表）
+- [x] 保留上游三个设计：软件音量 / 欠载恢复线程 / 格式协商（FLOAT32 → S16 降级）
+- [x] `ohaudio_audio_system.h/.cc` 工厂
+- [x] 注册到 `create_audio_system`（cvar `apu` 默认改 `ohaudio`）
 - [ ] 时钟对齐：`OH_AudioRenderer_GetAudioTimestampInfo`
 
 ### 3.2 验收 `[P1]`
 
-- [ ] 游戏中能听到 BGM 与音效
-- [ ] `GetUnderflowCount` 保持低位
+- [x] 游戏中能听到 BGM 与音效
+- [~] `GetUnderflowCount` 保持低位  （已做欠载恢复，未统计）
 - [ ] 前后台切换后音频恢复
-- [ ] 无爆音 / 无变调
+- [~] 无爆音 / 无变调  （初步可听，未细验）
 
 ---
 
@@ -584,7 +584,7 @@ mprotect(PROT_READ|PROT_EXEC)                      // 切 RX
       摇杆带死区、扳机给模拟量（`GetState` 里 `left/right_trigger` 用模拟值）
 - [x] NAPI：`emulator.keyEvent(keyIndex, pressed, value)` / `padReleaseAll` /
       `padStartPhysical` / `padStopPhysical`
-- [ ] 验证 XInput 语义映射（数字键 0–15 / 模拟半轴 16–23）—— 需要真手柄 + 进游戏实测
+- [~] 验证 XInput 语义映射（数字键 0–15 / 模拟半轴 16–23）—— 需要真手柄 + 进游戏实测  （真手柄未实测）
 
 ### 4.2 触摸与虚拟手柄 `[P1]`（简化版完成）
 
@@ -592,8 +592,8 @@ mprotect(PROT_READ|PROT_EXEC)                      // 切 RX
       L3·R3 / 左右摇杆 4 向，触摸 `Down/Up/Cancel` 直接驱动 `keyEvent`
 - [x] `键位索引表`：ArkTS `XPadKey` 与 native `OhosPadKey`（`ohos_input_driver.h`）顺序必须一致
 - [x] 覆盖层开关（`HitTestMode.None`，避免挡住下层按钮）
-- [ ] 摇杆模拟量（当前是 4 向满偏近似）
-- [ ] 多点触控 claim 机制、命中测试
+- [x] 摇杆模拟量（当前是 4 向满偏近似）  （真模拟量 + 死区 + 归一化）
+- [x] 多点触控 claim 机制、命中测试  （按手指 id 跟踪，双摇杆可同时操作）
 - [ ] 布局编辑模式（对应 `GamepadEditorScreen.kt` 328 行）`[P2]`
 
 ### 4.3 按键映射 `[P1]`
@@ -608,8 +608,8 @@ mprotect(PROT_READ|PROT_EXEC)                      // 切 RX
 
 ### 4.5 验收 `[P1]`
 
-- [ ] 物理手柄可操作游戏
-- [ ] 触摸虚拟手柄可操作游戏
+- [~] 物理手柄可操作游戏  （GameControllerKit 已接，未实测）
+- [x] 触摸虚拟手柄可操作游戏
 - [ ] 按键映射可自定义并持久化
 
 ---
@@ -637,7 +637,7 @@ mprotect(PROT_READ|PROT_EXEC)                      // 切 RX
 - [x] `config.close(handle)` → 序列化 + 释放，返回 TOML 文本
 - [x] `config.free(handle)` → 直接释放（不序列化）
 - [x] 句柄用 `bigint` 传 C++ 指针（`toml::table*`），ArkTS 侧须配对 close/free
-- [ ] ArkTS `ConfigHandle` 类 + `ConfigStore`（对应上游 `ConfigHandle.kt` /
+- [x] ArkTS `ConfigHandle` 类 + `ConfigStore`（对应上游 `ConfigHandle.kt` /  （已在 SettingsStore / SettingsSchema 落地）
       `ConfigStore.kt`）——归 Phase 7 设置页
 
 ### 5.2 元数据 `[P1]` ✅
@@ -688,9 +688,9 @@ mprotect(PROT_READ|PROT_EXEC)                      // 切 RX
 ### 6.1 安装器 `[P1]`
 
 - [ ] `GameInstaller`（ArkTS）：
-  - [ ] picker 选文件（`DocumentSelectOptions`，支持多选）
-  - [ ] 预检：读头 4KB 识别格式、读元数据、`statSync().size`、`getFreeSizeSync()` 空间检查
-  - [ ] 流式拷贝 + 进度回调 → `napi` 上报或直接 ArkTS 内上报
+  - [~] picker 选文件（`DocumentSelectOptions`，支持多选）  （当前为“选文件夹”单选）
+  - [~] 预检：读头 4KB 识别格式、读元数据、`statSync().size`、`getFreeSizeSync()` 空间检查  （元数据/大小已做；格式嗅探与空间检查未做）
+  - [~] 流式拷贝 + 进度回调 → `napi` 上报或直接 ArkTS 内上报  （分块拷贝已实现；进度回调未做）
   - [ ] `.tmp-<id>/` → `renameSync` 原子落定
   - [ ] 校验：大小比对 + 头 4KB 比对
   - [ ] 写 `install.json`
@@ -700,11 +700,11 @@ mprotect(PROT_READ|PROT_EXEC)                      // 切 RX
 
 ### 6.2 游戏库 `[P1]`
 
-- [ ] 扫描 `games/*/install.json` 重建索引（不建独立数据库）
-- [ ] `GameLibraryPage`（对应上游 `GameLibraryScreen.kt` 606 行）
+- [x] 扫描 `games/*/install.json` 重建索引（不建独立数据库）  （用 games/.meta/<id>.json）
+- [x] `GameLibraryPage`（对应上游 `GameLibraryScreen.kt` 606 行）  （封面 + 名称 + 长按菜单）
 - [ ] 去重：同 titleId 提示覆盖
 - [ ] 多光盘：按 titleId 分组，展开可见各盘
-- [ ] 元数据缓存与图标提取
+- [x] 元数据缓存与图标提取  （封面导出到 .meta/<id>.png）
 
 ### 6.3 存储管理 `[P1]`
 
@@ -726,7 +726,7 @@ mprotect(PROT_READ|PROT_EXEC)                      // 切 RX
 
 ### 6.6 验收 `[P1]`
 
-- [ ] 安装 16 GB 游戏成功，进度可见
+- [~] 安装 16 GB 游戏成功，进度可见  （123MB 已成功；进度仅有文案）
 - [ ] 中断安装后可清理残留
 - [ ] 卸载释放空间
 - [ ] 存档可导出并重新导入
@@ -739,16 +739,16 @@ mprotect(PROT_READ|PROT_EXEC)                      // 切 RX
 
 ### 7.1 P0 页面 `[P1]`
 
-- [ ] `GameLibraryPage`（606 行对应）
-- [ ] `GameInstallPage`
-- [ ] `GameViewPage`（835 行对应，含覆盖层 / 暂停菜单）
-- [ ] `SettingsPage`（含 `SettingsSchema` 421 行对应）
-- [ ] `GamepadOverlay`（643 行对应）
+- [x] `GameLibraryPage`（606 行对应）
+- [x] `GameInstallPage`  （加号 → 系统文件夹选择器 → GameInstall）
+- [x] `GameViewPage`（835 行对应，含覆盖层 / 暂停菜单）  （GamePage：覆盖层 + 提示面板）
+- [x] `SettingsPage`（含 `SettingsSchema` 421 行对应）
+- [x] `GamepadOverlay`（643 行对应）  （VirtualStick / VirtualDpad / PadButton）
 - [ ] `PauseMenuPanel`
 
 ### 7.2 P1 页面 `[P1]`
 
-- [ ] `GuestPromptPanels`（键盘 / 对话框 / 换盘）
+- [x] `GuestPromptPanels`（键盘 / 对话框 / 换盘）
 - [ ] `ProfilesPage`（368 行对应）+ 头像选择
 - [ ] `KeymapPage`
 - [ ] `StoragePage`
@@ -758,15 +758,15 @@ mprotect(PROT_READ|PROT_EXEC)                      // 切 RX
 
 - [ ] `ContentManagerPage`
 - [ ] `GamepadEditorPage`
-- [ ] `AboutPage`
-- [ ] `FpsOverlay`（可拖动定位）
-- [ ] `SessionLogs` 日志查看（对应上游 239 行，`logcat` → hilog）
+- [x] `AboutPage`
+- [x] `FpsOverlay`（可拖动定位）  （可拖动定位）
+- [~] `SessionLogs` 日志查看（对应上游 239 行，`logcat` → hilog）  （可导出到 Download；应用内查看器未做）
 
 ### 7.4 应用框架 `[P1]`
 
-- [ ] `module.json5` 声明权限
-- [ ] 沉浸式全屏 / 屏幕常亮 / 方向锁定
-- [ ] 状态管理（`@Observed` / `AppStorage` / `@ohos.data.preferences`）
+- [x] `module.json5` 声明权限
+- [~] 沉浸式全屏 / 屏幕常亮 / 方向锁定  （沉浸式全屏/方向锁定已做；屏幕常亮未做）
+- [~] 状态管理（`@Observed` / `AppStorage` / `@ohos.data.preferences`）  （@State + 文件持久化；preferences 未用）
 - [ ] 手动 DI 容器（对应 `AppContainer.kt` 150 行）
 - [ ] 后台保活策略（模拟器运行时的生命周期处理）
 
