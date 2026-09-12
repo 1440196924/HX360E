@@ -334,13 +334,13 @@ struct Home {
       '--gpu=vulkan',
       '--apu=ohaudio',
       '--hid=nop',
-      // 强制 FIFO 呈现（禁 IMMEDIATE/MAILBOX/FIFO_RELAXED）：presenter 走
-      // PaintMode::kUIThreadOnRequest，由 UI 线程 present（对齐安卓行为，静态
-      // 画面 15fps→59fps）。此时必须启用 ohos_window.cc 的 UI 线程 paint。
-      // 实测：非 FIFO（去量化）对重场景帧率无益（仍 ~17fps），故固定 FIFO。
-      '--vulkan_allow_present_mode_immediate=false',
-      '--vulkan_allow_present_mode_mailbox=false',
-      '--vulkan_allow_present_mode_fifo_relaxed=false',
+      // 呈现模式：允许 IMMEDIATE/MAILBOX（非 FIFO）→ presenter 走
+      // kGuestOutputThreadImmediately，由 guest 线程直接 present。
+      // 实测：强制 FIFO + UI 线程 paint 会让实际上屏率掉到 ~8 次/秒（体感变卡），
+      // 已回退；此处必须与 ohos_window.cc 的空 RequestPaintImpl 成对。
+      '--vulkan_allow_present_mode_immediate=true',
+      '--vulkan_allow_present_mode_mailbox=true',
+      '--vulkan_allow_present_mode_fifo_relaxed=true',
     ];
     // 高级选项里保存过的设置（稀疏 TOML）：存在才带上，否则用 cvar 默认值。
     try {

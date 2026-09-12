@@ -177,13 +177,13 @@ std::unique_ptr<xe::ui::Surface> OhosWindow::CreateSurfaceImpl(
 }
 
 void OhosWindow::RequestPaintImpl() {
-  // 启动参数强制 FIFO 呈现（Home.ets），presenter 走 PaintMode::kUIThreadOnRequest，
-  // 由 UI 线程负责 present —— 对齐安卓 AndroidWindow::RequestPaintImpl() →
-  // PostInvalidateWindowSurface。
-  // 约束：若改回允许 IMMEDIATE/MAILBOX（非 FIFO），必须把这里改回空实现，
-  // 否则 UI 线程会去碰 guest 输出线程独占的呈现连接状态（实测 SIGSEGV）。
-  auto& context = static_cast<OhosWindowedAppContext&>(app_context());
-  context.RequestPaintOnUIThread();
+  // 保持空实现：启动参数允许 IMMEDIATE/MAILBOX（非 FIFO），presenter 走
+  // PaintMode::kGuestOutputThreadImmediately，呈现连接状态归 guest 输出线程独占，
+  // UI 线程调 OnPaint 会 SIGSEGV（实测）。
+  // 注意：之前尝试「强制 FIFO + UI 线程 paint」虽然让静态画面到 59fps，但实际上屏
+  // 率掉到 ~8 次/秒（探针 paints/s=8，与 profiler 抓到的 8fps 一致），体感变卡，
+  // 已回退。若将来要重做，必须先解决 UI 线程 paint 循环的吞吐（例如去掉 4ms
+  // 轮询、按 vsync 驱动、并确认 XComponent buffer 数量足够）。
 }
 
 void OhosWindow::UpdateSurface() {
