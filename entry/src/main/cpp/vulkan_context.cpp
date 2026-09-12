@@ -678,6 +678,54 @@ std::string VulkanContext::ProbeXEngineExtensions() {
                 out += " | ";
             }
             out += std::string(dev_props.deviceName) + ": ";
+
+            // 与 XEngine 自适应 VRS 相关的能力：VRS 需要一个 shading rate
+            // attachment（VK_KHR_fragment_shading_rate）。这里把它和
+            // VK_HUAWEI_subpass_shading 是否可用一起报出来。
+            uint32_t ext_count = 0;
+            if (vkEnumerateDeviceExtensionProperties(devices[i], nullptr,
+                                                     &ext_count,
+                                                     nullptr) == VK_SUCCESS &&
+                ext_count > 0) {
+                std::vector<VkExtensionProperties> exts(ext_count);
+                if (vkEnumerateDeviceExtensionProperties(
+                        devices[i], nullptr, &ext_count, exts.data()) ==
+                    VK_SUCCESS) {
+                    bool has_fsr = false;
+                    bool has_subpass_shading = false;
+                    for (const VkExtensionProperties& e : exts) {
+                        if (strcmp(e.extensionName,
+                                   "VK_KHR_fragment_shading_rate") == 0) {
+                            has_fsr = true;
+                        } else if (strcmp(e.extensionName,
+                                          "VK_HUAWEI_subpass_shading") == 0) {
+                            has_subpass_shading = true;
+                        }
+                    }
+                    out += has_fsr ? "fsr=yes" : "fsr=no";
+                    out += has_subpass_shading ? ", subpass_shading=yes"
+                                               : ", subpass_shading=no";
+                    if (has_fsr) {
+                        VkPhysicalDeviceFragmentShadingRatePropertiesKHR
+                            rate_props{};
+                        rate_props.sType = static_cast<VkStructureType>(
+                            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_PROPERTIES_KHR);
+                        VkPhysicalDeviceProperties2 props2{};
+                        props2.sType =
+                            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+                        props2.pNext = &rate_props;
+                        vkGetPhysicalDeviceProperties2(devices[i], &props2);
+                        out += ", maxRate=" +
+                               std::to_string(rate_props.maxFragmentSize.width) +
+                               "x" +
+                               std::to_string(rate_props.maxFragmentSize.height) +
+                               ", primitiveRate=" +
+                               (rate_props.primitiveFragmentShadingRateWithMultipleViewports
+                                    ? "mvp" : "single");
+                    }
+                    out += ", ";
+                }
+            }
             if (props.empty()) {
                 out += "(无 XEG 特性)";
             } else {
