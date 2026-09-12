@@ -25,6 +25,8 @@ export class GameMeta {
   fileCount: number = 0;
   sizeBytes: number = 0;
   installedAt: number = 0;
+  /** 封面文件绝对路径（安装时从 Xbox 元数据里导出；没有则为空串）。 */
+  iconPath: string = '';
 }
 
 /** 游戏库：多槽位安装目录 + 元数据 + 列表/删除/启动目标解析。 */
@@ -110,6 +112,11 @@ export class GameLibrary {
     return `${GameLibrary.metaDir(filesDir)}/${id}.json`;
   }
 
+  /** 封面文件路径（安装时写在这里）。 */
+  static iconPathOf(filesDir: string, id: string): string {
+    return `${GameLibrary.metaDir(filesDir)}/${id}.png`;
+  }
+
   static saveMeta(filesDir: string, meta: GameMeta): void {
     GameLibrary.ensureDir(GameLibrary.metaDir(filesDir));
     const path: string = GameLibrary.metaPath(filesDir, meta.id);
@@ -139,6 +146,13 @@ export class GameLibrary {
       meta.fileCount = parsed.fileCount ?? 0;
       meta.sizeBytes = parsed.sizeBytes ?? 0;
       meta.installedAt = parsed.installedAt ?? 0;
+      // 封面在不在由文件系统决定（元数据里不存路径）。
+      const icon: string = GameLibrary.iconPathOf(filesDir, meta.id);
+      try {
+        meta.iconPath = fs.accessSync(icon) ? icon : '';
+      } catch (e) {
+        meta.iconPath = '';
+      }
       return meta;
     } catch (e) {
       hilog.error(DOMAIN, TAG, 'loadMeta failed: %{public}s : %{public}s',

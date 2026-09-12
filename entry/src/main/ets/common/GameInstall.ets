@@ -7,6 +7,13 @@ import { GameLibrary, GameMeta } from './GameLibrary';
 const DOMAIN = 0x0000;
 const TAG = 'HX360E';
 
+/** 从 Xbox 元数据里读到的标题信息。 */
+class TitleMeta {
+  name: string = '';
+  titleId: string = '';
+  iconBytes: ArrayBuffer | undefined = undefined;
+}
+
 /**
  * 游戏安装：调系统文件选择器 → 复制进沙箱槽位 → 解析启动目标 → 写元数据。
  * 逻辑与 Index（demo 页）一致；本设备上 copyFile 会写出全 0、不显式传 offset 的
@@ -62,15 +69,27 @@ export class GameInstall {
       return '已复制但未找到可启动文件（default.xex / STFS / game*）';
     }
 
+    const tm: TitleMeta = GameInstall.readTitleMeta(target);
     const meta = new GameMeta();
     meta.id = id;
-    meta.name = GameInstall.displayNameFor(displayName);
-    meta.titleId = GameInstall.titleIdFor(target);
+    meta.name = tm.name !== '' ? tm.name : GameInstall.displayNameFor(displayName);
+    meta.titleId = tm.titleId;
     meta.target = GameLibrary.toRelative(dir, target);
     meta.kind = 'folder';
     meta.fileCount = count;
     meta.sizeBytes = GameLibrary.dirSize(dir);
     meta.installedAt = Date.now();
+    if (tm.iconBytes !== undefined && tm.iconBytes.byteLength > 0) {
+      const iconPath: string = GameLibrary.iconPathOf(filesDir, id);
+      if (GameInstall.writeBytes(iconPath, tm.iconBytes)) {
+        meta.iconPath = iconPath;
+        hilog.info(DOMAIN, TAG, 'icon exported (%{public}d bytes)',
+          tm.iconBytes.byteLength);
+      }
+    }
+    if (meta.titleId === '') {
+      meta.titleId = GameInstall.titleIdFor(target);
+    }
     GameLibrary.saveMeta(filesDir, meta);
     hilog.info(DOMAIN, TAG, 'installed slot=%{public}s target=%{public}s files=%{public}d',
       id, target, count);
@@ -103,6 +122,60 @@ export class GameInstall {
   private static displayNameFor(pickedName: string): string {
     const dot: number = pickedName.lastIndexOf('.');
     return dot > 0 ? pickedName.substring(0, dot) : pickedName;
+  }
+
+  // 读标题名 / TitleID / 封面（先按 GOD 包，再按 ISO/ZAR/XEX 目录）。
+  private static readTitleMeta(target: string): TitleMeta {
+    const out = new TitleMeta();
+    try {
+      const god = testNapi.meta.metaInfoFromGodPath(target);
+      if (god !== null) {
+        out.name = god.name ?? '';
+        out.titleId = god.titleId ?? '';
+        out.iconBytes = god.icon;
+      }
+    } catch (e) {
+      // 非 GOD 包，继续
+    }
+    if (out.name === '' || out.iconBytes === undefined) {
+      try {
+        const lower: string = target.toLowerCase();
+        const format: number = lower.endsWith('.iso') ? 0
+          : (lower.endsWith('.zar') ? 2 : 1);
+        const info = testNapi.meta.metaFromPath(target, format);
+        if (info !== null) {
+          if (out.name === '') {
+            out.name = info.name ?? '';
+          }
+          if (out.titleId === '') {
+            out.titleId = info.titleId ?? '';
+          }
+          if (out.iconBytes === undefined) {
+            out.iconBytes = info.icon;
+          }
+        }
+      } catch (e) {
+        // 忽略：没有元数据就用显示名兜底
+      }
+    }
+    return out;
+  }
+
+  private static writeBytes(path: string, bytes: ArrayBuffer): boolean {
+    try {
+      const fd = fs.openSync(path,
+        fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+      try {
+        fs.writeSync(fd.fd, bytes);
+      } finally {
+        fs.closeSync(fd);
+      }
+      return true;
+    } catch (e) {
+      hilog.error(DOMAIN, TAG, 'write icon failed: %{public}s',
+        JSON.stringify(e));
+      return false;
+    }
   }
 
   // 尽量读出 Xbox Title ID；读不出返回空串（列表用显示名兜底）。

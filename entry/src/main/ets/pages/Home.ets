@@ -18,6 +18,121 @@ const DOMAIN = 0x0000;
 const TAG = 'HX360E';
 
 /**
+ * 游戏卡片：封面 + 名称，长按弹系统上下文菜单（背景模糊、卡片预览浮起、菜单贴下方）。
+ * 做成独立 @Component，回调不会因 @Builder 闭包捕获而串到别的行。
+ */
+@Component
+struct GameCard {
+  item: GameMeta = new GameMeta();
+  onStart: (item: GameMeta) => void = (item: GameMeta) => {
+  };
+  onDelete: (item: GameMeta) => void = (item: GameMeta) => {
+  };
+
+  private subtitle(): string {
+    const parts: string[] = [];
+    if (this.item.titleId !== '') {
+      parts.push(this.item.titleId);
+    }
+    const size: string = GameLibrary.formatSize(this.item.sizeBytes);
+    if (size !== '') {
+      parts.push(size);
+    }
+    const date: string = GameLibrary.formatDate(this.item.installedAt);
+    if (date !== '') {
+      parts.push(date);
+    }
+    return parts.join(' · ');
+  }
+
+  // 长按菜单内容（对齐系统闹钟列表的长按菜单：图标 + 文案，红/蓝配色）。
+  @Builder
+  menu() {
+    Column() {
+      Row({ space: 12 }) {
+        SymbolGlyph($r('sys.symbol.play_fill'))
+          .fontSize(22)
+          .fontColor([$r('app.color.text_primary')])
+        Text('启动')
+          .fontSize(15)
+          .fontColor($r('app.color.text_primary'))
+      }
+      .width('100%')
+      .padding({ left: 16, right: 22, top: 13, bottom: 13 })
+      .onClick(() => {
+        this.onStart(this.item);
+      })
+
+      Divider()
+        .color($r('app.color.divider'))
+        .margin({ left: 50 })
+
+      Row({ space: 12 }) {
+        SymbolGlyph($r('sys.symbol.trash_fill'))
+          .fontSize(22)
+          .fontColor([$r('app.color.danger')])
+        Text('删除')
+          .fontSize(15)
+          .fontColor($r('app.color.danger'))
+      }
+      .width('100%')
+      .padding({ left: 16, right: 22, top: 13, bottom: 13 })
+      .onClick(() => {
+        this.onDelete(this.item);
+      })
+    }
+    .width(190)
+  }
+
+  build() {
+    Row({ space: 12 }) {
+      // 封面（读不到就留一个占位块）
+      Stack() {
+        Column()
+          .width(74)
+          .height(74)
+          .borderRadius(10)
+          .backgroundColor($r('app.color.chip_bg'))
+        if (this.item.iconPath !== '') {
+          Image(`file://${this.item.iconPath}`)
+            .width(74)
+            .height(74)
+            .borderRadius(10)
+            .objectFit(ImageFit.Cover)
+        }
+      }
+      .width(74)
+      .height(74)
+
+      Column({ space: 4 }) {
+        Text(this.item.name)
+          .fontSize(16)
+          .fontColor($r('app.color.text_primary'))
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        Text(this.subtitle())
+          .fontSize(11)
+          .fontColor($r('app.color.text_hint'))
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+      }
+      .alignItems(HorizontalAlign.Start)
+      .layoutWeight(1)
+    }
+    .width('100%')
+    .padding(12)
+    .backgroundColor($r('app.color.card_bg'))
+    .borderRadius(12)
+    // 长按：系统上下文菜单（IMAGE 预览 = 该项快照保持清晰浮起，背景自动模糊）
+    .bindContextMenu(this.menu(), ResponseType.LongPress, {
+      preview: MenuPreviewMode.IMAGE,
+      previewBorderRadius: 12,
+      previewAnimationOptions: { scale: [0.9, 1.0] },
+    })
+  }
+}
+
+/**
  * 新主页（App 入口，默认竖屏）：
  *   游戏 —— 游戏库列表（多槽位），每项可启动/删除；右上角进入导入页。
  *   设置 —— 一级菜单：高级选项 / 控制 / 导出日志 / 打开模拟器目录 / 关于。
@@ -112,9 +227,8 @@ struct Home {
 
   subtitleOf(item: GameMeta): string {
     const parts: string[] = [];
-    parts.push(item.kind === 'folder' ? '文件夹' : '单文件');
     if (item.titleId !== '') {
-      parts.push(`TitleID ${item.titleId}`);
+      parts.push(item.titleId);
     }
     const size: string = GameLibrary.formatSize(item.sizeBytes);
     if (size !== '') {
@@ -254,43 +368,6 @@ struct Home {
 
   // ---- @Builder ----
 
-  @Builder
-  gameRow(item: GameMeta) {
-    Row({ space: 10 }) {
-      Column({ space: 4 }) {
-        Text(item.name)
-          .fontSize(15)
-          .fontColor($r('app.color.text_primary'))
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-        Text(this.subtitleOf(item))
-          .fontSize(11)
-          .fontColor($r('app.color.text_hint'))
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-      }
-      .alignItems(HorizontalAlign.Start)
-      .layoutWeight(1)
-
-      Button('启动')
-        .fontSize(13)
-        .height(32)
-        .padding({ left: 14, right: 14 })
-        .onClick(() => this.startGame(item))
-      Button('删除')
-        .fontSize(13)
-        .height(32)
-        .padding({ left: 14, right: 14 })
-        .backgroundColor($r('app.color.chip_bg'))
-        .fontColor($r('app.color.danger'))
-        .onClick(() => this.deleteGame(item))
-    }
-    .width('100%')
-    .padding(12)
-    .backgroundColor($r('app.color.card_bg'))
-    .borderRadius(12)
-  }
-
   // 设置项：左侧图标 + 标题/说明 + 右侧箭头（对齐系统设置/商店的菜单样式）。
   @Builder
   settingRow(label: string, hint: string, symbol: Resource, action: () => void) {
@@ -366,7 +443,15 @@ struct Home {
         List({ space: 8 }) {
           ForEach(this.games, (item: GameMeta) => {
             ListItem() {
-              this.gameRow(item)
+              GameCard({
+                item: item,
+                onStart: (g: GameMeta) => {
+                  this.startGame(g);
+                },
+                onDelete: (g: GameMeta) => {
+                  this.deleteGame(g);
+                },
+              })
             }
           }, (item: GameMeta) => item.id)
         }
@@ -499,8 +584,13 @@ struct Home {
 
   build() {
     Navigation(this.pathStack) {
-      Column() {
-        this.floatingTabs()
+      Stack({ alignContent: Alignment.Center }) {
+        Column() {
+          this.floatingTabs()
+        }
+        .width('100%')
+        .height('100%')
+
       }
       .width('100%')
       .height('100%')
