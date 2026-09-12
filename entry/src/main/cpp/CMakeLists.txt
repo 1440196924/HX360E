@@ -62,6 +62,7 @@ add_library(entry SHARED
         napi_init.cpp
         jit_probe.cpp
         vulkan_context.cpp
+        xeg_spatial_upscale.cc
         xendroid_ohos/ohos_emulator.cc
         xendroid_ohos/ohos_input_driver.cc
         xendroid_ohos/ohos_window.cc

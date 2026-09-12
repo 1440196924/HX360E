@@ -4,6 +4,8 @@
 // 同时记录设备能力（Phase 0.4）到日志与 deviceInfo 字符串。
 #include "vulkan_context.h"
 
+#include "xeg_spatial_upscale.h"
+
 #include <chrono>
 #include <cstring>
 #include <atomic>
@@ -736,6 +738,12 @@ std::string VulkanContext::ProbeXEngineExtensions() {
                     out += std::string(props[e].extensionName) + "(v" +
                            std::to_string(props[e].version) + ")";
                 }
+            }
+            // 空域超分符号是否可用（Vulkan 侧只有 spatial_upscale，没有 neural）。
+            {
+                std::string xeg_detail;
+                hx360e::XegSpatialUpscale::ProbeSymbols(&xeg_detail);
+                out += std::string(", ") + xeg_detail;
             }
         }
     }
