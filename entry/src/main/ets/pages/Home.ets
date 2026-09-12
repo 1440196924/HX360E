@@ -318,6 +318,24 @@ struct Home {
     return parts.join(' · ');
   }
 
+  // 次原生渲染倍率（1=原生720p，2=半分辨率360p，…）。读设置页里保存的值，
+  // 没有保存过就用 schema 默认值（2）。
+  private renderScaleDen(): number {
+    try {
+      const raw: string | undefined =
+        SettingsStore.shared().raw('GPU|hx360e_render_scale_den_x');
+      if (raw !== undefined && raw !== '') {
+        const v: number = Number.parseInt(raw, 10);
+        if (!Number.isNaN(v) && v >= 1 && v <= 4) {
+          return v;
+        }
+      }
+    } catch (e) {
+      // 读配置失败就用默认值
+    }
+    return 2;
+  }
+
   // 启动游戏：传绝对路径给 native，然后进独立游戏页（横屏）。
   startGame(item: GameMeta): void {
     const filesDir: string = this.filesDir();
@@ -341,9 +359,11 @@ struct Home {
       '--vulkan_allow_present_mode_immediate=true',
       '--vulkan_allow_present_mode_mailbox=true',
       '--vulkan_allow_present_mode_fifo_relaxed=true',
-      // ===== T2/T3 验证：次原生渲染 den=2（dump shader 已加升采样换算）=====
-      '--hx360e_render_scale_den_x=2',
-      '--hx360e_render_scale_den_y=2',
+      // 次原生渲染倍率：host 尺寸 = guest / 该值。由设置页的
+      // GPU|hx360e_render_scale_den_x 控制（1=原生720p，2=半分辨率360p）。
+      // 命令行优先级高于 --config，所以这里读设置再同时传给 X/Y，否则设置页改不动。
+      `--hx360e_render_scale_den_x=${this.renderScaleDen()}`,
+      `--hx360e_render_scale_den_y=${this.renderScaleDen()}`,
       // direct-HR 路径对 den 的适配尚未做对（标题层会缩到左上角 1/4）。
       // 我们靠 EDRAM dump 路径（已加升采样换算）即可，且已稳定 30fps 有余量，
       // 不需要这条更快的路径。

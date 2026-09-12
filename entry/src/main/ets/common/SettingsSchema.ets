@@ -178,7 +178,15 @@ export class SettingsSchema {
           'Resolve-to-texture：跳过上传', true),
         Setting.bool('GPU', 'vulkan_async_skip_draws', '异步跳过绘制', true),
         Setting.bool('GPU', 'vulkan_dynamic_pipeline_state', '扩展动态状态', true),
-        Setting.int('GPU', 'vulkan_pipeline_creation_threads', '管线创建线程数',          4, 0, 5),
+          Setting.int('GPU', 'vulkan_pipeline_creation_threads', '管线创建线程数',          4, 0, 5),
+          // 次原生渲染：host 尺寸 = guest / 该值。
+          //   1 = 原生 720p（最清晰；实测本机只能到 ~15fps）
+          //   2 = 半分辨率 360p（推荐；配合系统级超分 1.5x，实测稳定 30fps）
+          // X / Y 需一致，启动时两者都会按 X 的值传入（见 Home.startGame）。
+          Setting.int('GPU', 'hx360e_render_scale_den_x',
+            '渲染分辨率（1=原生720p，2=半分辨率360p）', 2, 1, 4),
+          Setting.int('GPU', 'hx360e_render_scale_den_y',
+            '渲染分辨率·纵向（与上一项保持一致）', 2, 1, 4),
           Setting.list('Vulkan', 'hx360e_vrs_rate', 'VRS 着色率（fragment 降频）',
             'off', [
               opt('off', '关闭'), opt('1x2', '1x2'), opt('2x1', '2x1'),
