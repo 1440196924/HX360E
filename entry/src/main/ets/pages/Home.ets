@@ -1,9 +1,16 @@
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { common } from '@kit.AbilityKit';
 import { window, display, SymbolGlyphModifier } from '@kit.ArkUI';
+import { fileIo } from '@kit.CoreFileKit';
 import { HdsTabs, HdsTabsController, hdsMaterial } from '@kit.UIDesignKit';
 import testNapi from 'libentry.so';
 import { GameLibrary, GameMeta } from '../common/GameLibrary';
+import { GameInstall } from '../common/GameInstall';
+import { SettingsStore } from '../common/SettingsStore';
+import { AdvancedPage } from './AdvancedPage';
+import { ControlsPage } from './ControlsPage';
+import { DirectoryPage } from './DirectoryPage';
+import { AboutPage } from './AboutPage';
 import { LogExport } from '../common/LogExport';
 import { Orientation } from '../common/Orientation';
 
@@ -28,7 +35,11 @@ struct Home {
   @State statusText: string = '';
   // 状态栏高度（vp），沉浸式下标题不能压到状态栏上。
   @State statusBarVp: number = 0;
+  // 安装中（避免重复触发选择器）。
+  @State busy: boolean = false;
   private hdsTabController: HdsTabsController = new HdsTabsController();
+  // 官方路由栈：子页（高级选项/控制/目录/关于）以 NavDestination 推入。
+  private pathStack: NavPathStack = new NavPathStack();
 
   aboutToAppear(): void {
     const ctx: common.Context | undefined = this.appContext();
@@ -133,6 +144,15 @@ struct Home {
       '--apu=ohaudio',
       '--hid=nop',
     ];
+    // 高级选项里保存过的设置（稀疏 TOML）：存在才带上，否则用 cvar 默认值。
+    try {
+      const cfg: string = SettingsStore.configPath(filesDir);
+      if (fileIo.accessSync(cfg)) {
+        args.push(`--config=${cfg}`);
+      }
+    } catch (e) {
+      // 忽略：没有配置文件就用默认值
+    }
     try {
       testNapi.emulator.setupLaunchArgs(args);
       testNapi.emulator.setupGamePath(target);
@@ -160,11 +180,29 @@ struct Home {
     }
   }
 
-  importGame(): void {
-    this.getUIContext().getRouter().pushUrl({ url: 'pages/Index' })
-      .catch((e: Error) => {
-        hilog.error(DOMAIN, TAG, 'pushUrl Index failed: %{public}s', e.message);
-      });
+  // 加号：直接弹系统文件夹选择器并安装，不再跳 demo 页。
+  async importGame(): Promise<void> {
+    if (this.busy) {
+      return;
+    }
+    const ctx: common.Context | undefined = this.appContext();
+    if (ctx === undefined) {
+      this.statusText = '导入失败：无 context';
+      return;
+    }
+    this.busy = true;
+    try {
+      this.statusText = await GameInstall.installFolder(ctx, ctx.filesDir,
+        (text: string) => {
+          this.statusText = text;
+        });
+      this.reloadGames();
+    } catch (e) {
+      this.statusText = '导入失败（见 hilog）';
+      hilog.error(DOMAIN, TAG, 'import failed: %{public}s', JSON.stringify(e));
+    } finally {
+      this.busy = false;
+    }
   }
 
   async doExportLogs(): Promise<void> {
@@ -177,10 +215,28 @@ struct Home {
     this.statusText = await LogExport.exportLogs(ctx, ctx.filesDir);
   }
 
-  private go(url: string): void {
-    this.getUIContext().getRouter().pushUrl({ url: url }).catch((e: Error) => {
-      hilog.error(DOMAIN, TAG, 'pushUrl %{public}s failed: %{public}s', url, e.message);
-    });
+  private go(name: string): void {
+    try {
+      const info: NavPathInfo = { name: name };
+      this.pathStack.pushPath(info);
+    } catch (e) {
+      hilog.error(DOMAIN, TAG, 'pushPath %{public}s failed: %{public}s', name,
+        JSON.stringify(e));
+    }
+  }
+
+  // NavDestination 路由表：子页自带系统标题栏与返回按钮。
+  @Builder
+  pageMap(name: string, param: Object) {
+    if (name === 'advanced') {
+      AdvancedPage()
+    } else if (name === 'controls') {
+      ControlsPage()
+    } else if (name === 'directory') {
+      DirectoryPage()
+    } else if (name === 'about') {
+      AboutPage()
+    }
   }
 
   // 页签图标（normal / selected 两态）。系统符号来自 sys.symbol.*。
@@ -275,10 +331,16 @@ struct Home {
           .fontColor($r('app.color.text_primary'))
           .fontWeight(FontWeight.Bold)
         Blank()
-        Button('导入游戏')
-          .fontSize(13)
-          .height(32)
-          .onClick(() => this.importGame())
+        Button({ type: ButtonType.Circle }) {
+          SymbolGlyph($r('sys.symbol.plus'))
+            .fontSize(22)
+            .fontColor([$r('app.color.text_primary')])
+        }
+        .width(40)
+        .height(40)
+        .padding(0)
+        .backgroundColor($r('app.color.card_bg'))
+        .onClick(() => this.importGame())
       }
       .width('100%')
       .padding({
@@ -293,7 +355,7 @@ struct Home {
           Text('还没有游戏')
             .fontSize(14)
             .fontColor($r('app.color.text_secondary'))
-          Text('点右上角「导入游戏」选文件或文件夹')
+          Text('点右上角 + 选择游戏文件夹')
             .fontSize(12)
             .fontColor($r('app.color.text_hint'))
         }
@@ -344,12 +406,12 @@ struct Home {
           Column() {
             this.settingRow('高级选项', '渲染分辨率 / 后端 / 诊断',
               $r('sys.symbol.gearshape'), () => {
-                this.go('pages/AdvancedPage');
+                this.go('advanced');
               })
             this.rowDivider()
             this.settingRow('控制', '虚拟手柄与按键对照',
               $r('sys.symbol.gamecontroller'), () => {
-                this.go('pages/ControlsPage');
+                this.go('controls');
               })
           }
           .width('100%')
@@ -364,7 +426,7 @@ struct Home {
             this.rowDivider()
             this.settingRow('打开模拟器目录', '浏览沙箱内文件',
               $r('sys.symbol.folder'), () => {
-                this.go('pages/DirectoryPage');
+                this.go('directory');
               })
           }
           .width('100%')
@@ -374,7 +436,7 @@ struct Home {
           Column() {
             this.settingRow('关于', 'HX360E 版本与设备信息',
               $r('sys.symbol.info_circle'), () => {
-                this.go('pages/AboutPage');
+                this.go('about');
               })
           }
           .width('100%')
@@ -436,13 +498,20 @@ struct Home {
   }
 
   build() {
-    Column() {
-      this.floatingTabs()
+    Navigation(this.pathStack) {
+      Column() {
+        this.floatingTabs()
+      }
+      .width('100%')
+      .height('100%')
+      // 沉浸：首页内容延伸到状态栏下方（标题里已按 statusBarVp 留白）。
+      .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP])
     }
+    .hideTitleBar(true)
+    .mode(NavigationMode.Stack)
+    .navDestination(this.pageMap)
     .width('100%')
     .height('100%')
     .backgroundColor($r('app.color.page_bg'))
-    // 沉浸：内容延伸到状态栏下方（标题里已按 statusBarVp 留白）。
-    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP])
   }
 }

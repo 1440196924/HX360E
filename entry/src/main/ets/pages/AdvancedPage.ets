@@ -1,147 +1,256 @@
 import { hilog } from '@kit.PerformanceAnalysisKit';
-import testNapi from 'libentry.so';
+import { common } from '@kit.AbilityKit';
+import { SettingsSchema, SettingsCategory, Setting } from '../common/SettingsSchema';
+import { SettingsStore } from '../common/SettingsStore';
 
 const DOMAIN = 0x0000;
 const TAG = 'HX360E';
 
-/** 高级选项：目前是只读信息 + 少数可切换项（都用已有的 native 接口）。 */
-@Entry
+/**
+ * 一行设置。做成独立 @Component（而不是 @Builder + 闭包）：
+ * @Builder 的参数在回调里捕获会串行（ArkUI 已知行为），
+ * 独立组件每行各持一个 setting 实例，回调不会写错键。
+ */
 @Component
-struct AdvancedPage {
-  @State deviceInfo: string = '';
-  @State jitInfo: string = '';
-  @State fpsInfo: string = '';
-  @State touchOverlayOn: boolean = false;
-  @State statusText: string = '';
+struct SettingRow {
+  setting: Setting = new Setting();
+  @State localRev: number = 0;
 
-  aboutToAppear(): void {
-    this.refresh();
-    try {
-      this.touchOverlayOn = testNapi.emulator.showTouchOverlayEnabled();
-    } catch (e) {
-      hilog.error(DOMAIN, TAG, 'touchOverlay query failed: %{public}s', JSON.stringify(e));
-    }
+  private store(): SettingsStore {
+    return SettingsStore.shared();
   }
 
-  onPageShow(): void {
-    this.refresh();
+  private step(): number {
+    const span: number = this.setting.max - this.setting.min;
+    if (span > 512) {
+      return 64;
+    }
+    if (span > 64) {
+      return 16;
+    }
+    return 1;
   }
 
-  refresh(): void {
-    try {
-      this.deviceInfo = testNapi.emulator.deviceInfo();
-    } catch (e) {
-      this.deviceInfo = '(不可用)';
+  private selectOptions(): Array<SelectOption> {
+    const out: Array<SelectOption> = [];
+    for (const o of this.setting.options) {
+      const item: SelectOption = { value: o.label };
+      out.push(item);
     }
-    try {
-      const r = testNapi.jitProbe();
-      this.jitInfo = r.firstWorking >= 0 ? `${r.firstWorkingName} ✅` : '不可用 ❌';
-    } catch (e) {
-      this.jitInfo = '(探测失败)';
+    return out;
+  }
+
+  private selectedIndex(): number {
+    const cur: string = this.store().valueOf(this.setting);
+    for (let i = 0; i < this.setting.options.length; i++) {
+      if (this.setting.options[i].value === cur) {
+        return i;
+      }
     }
-    try {
-      const fps: number = testNapi.emulator.averageFps();
-      const ms: number = testNapi.emulator.lastFrameTimeMs();
-      this.fpsInfo = `平均 ${fps.toFixed(1)} FPS · 上一帧 ${ms.toFixed(1)} ms`;
-    } catch (e) {
-      this.fpsInfo = '(未运行)';
-    }
+    return -1;
+  }
+
+  private selectedLabel(): string {
+    const idx: number = this.selectedIndex();
+    return idx >= 0 ? this.setting.options[idx].label
+      : this.store().valueOf(this.setting);
   }
 
   @Builder
-  infoRow(label: string, value: string) {
-    Column({ space: 4 }) {
-      Text(label).fontSize(12).fontColor($r('app.color.text_secondary'))
-      Text(value).fontSize(13).fontColor($r('app.color.text_primary'))
+  label() {
+    Row({ space: 6 }) {
+      Text(this.setting.label)
+        .fontSize(15)
+        .fontColor($r('app.color.text_primary'))
+        .maxLines(2)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+      if (this.store().isModified(this.setting)) {
+        Text('●').fontSize(9).fontColor($r('app.color.accent'))
+      }
     }
-    .alignItems(HorizontalAlign.Start)
-    .width('100%')
-    .padding({ left: 16, right: 16, top: 10, bottom: 10 })
+    .alignItems(VerticalAlign.Center)
+    .layoutWeight(1)
   }
 
   build() {
     Column() {
-      Row() {
-        Text('‹ 返回').fontSize(15).fontColor($r('app.color.accent'))
-          .onClick(() => {
-            this.getUIContext().getRouter().back();
+      if (this.setting.type === 'bool') {
+        Row() {
+          this.label()
+          Toggle({
+            type: ToggleType.Switch,
+            isOn: this.store().valueOf(this.setting) === 'true',
           })
-        Blank()
-        Text('高级选项').fontSize(16).fontColor($r('app.color.text_primary')).fontWeight(FontWeight.Bold)
-        Blank()
-        Text(' ').fontSize(15)
-      }
-      .width('100%')
-      .padding({ left: 16, right: 16, top: 12, bottom: 12 })
-
-      Scroll() {
-        Column() {
-          this.infoRow('GPU / 音频 / 输入后端', this.deviceInfo)
-          this.infoRow('JIT 可执行内存', this.jitInfo)
-          this.infoRow('性能', this.fpsInfo)
-
-          Divider().color($r('app.color.divider')).margin({ top: 4, bottom: 4 })
-
-          Row() {
-            Column({ space: 2 }) {
-              Text('显示虚拟手柄').fontSize(15).fontColor($r('app.color.text_primary'))
-              Text('游戏页底部的手柄按钮覆盖层').fontSize(11).fontColor($r('app.color.text_hint'))
-            }
-            .alignItems(HorizontalAlign.Start)
-            .layoutWeight(1)
-            Toggle({ type: ToggleType.Switch, isOn: this.touchOverlayOn })
-              .onChange((isOn: boolean) => {
-                this.touchOverlayOn = isOn;
-                try {
-                  testNapi.emulator.setShowTouchOverlay(isOn);
-                  this.statusText = isOn ? '已显示虚拟手柄' : '已隐藏虚拟手柄';
-                } catch (e) {
-                  this.statusText = '设置失败（见 hilog）';
-                  hilog.error(DOMAIN, TAG, 'setShowTouchOverlay failed: %{public}s',
-                    JSON.stringify(e));
-                }
-              })
-          }
-          .width('100%')
-          .padding({ left: 16, right: 16, top: 14, bottom: 14 })
-
-          Divider().color($r('app.color.divider')).margin({ top: 4, bottom: 4 })
-
-          Row() {
-            Column({ space: 2 }) {
-              Text('刷新 GPU 缓存').fontSize(15).fontColor($r('app.color.text_primary'))
-              Text('画面异常时清空着色器/管线缓存').fontSize(11).fontColor($r('app.color.text_hint'))
-            }
-            .alignItems(HorizontalAlign.Start)
-            .layoutWeight(1)
-            Button('执行')
-              .fontSize(13)
-              .height(32)
-              .onClick(() => {
-                try {
-                  testNapi.emulator.flushGpuCaches();
-                  this.statusText = '已刷新 GPU 缓存';
-                } catch (e) {
-                  this.statusText = '刷新失败（见 hilog）';
-                }
-              })
-          }
-          .width('100%')
-          .padding({ left: 16, right: 16, top: 14, bottom: 14 })
-
-          Text(this.statusText)
-            .fontSize(11)
-            .fontColor($r('app.color.accent'))
-            .width('100%')
-            .padding({ left: 16, right: 16, top: 8, bottom: 16 })
+            .onChange((on: boolean) => {
+              // 只在值真变化时写入：挂载/刷新触发的回调不回写。
+              const next: string = on ? 'true' : 'false';
+              if (this.store().valueOf(this.setting) !== next) {
+                this.store().set(this.setting, next);
+                this.localRev++;
+              }
+            })
         }
         .width('100%')
+        .padding({ left: 16, right: 16, top: 10, bottom: 10 })
+      } else if (this.setting.type === 'int') {
+        Row({ space: 8 }) {
+          this.label()
+          Button('−')
+            .fontSize(16)
+            .width(34)
+            .height(30)
+            .padding(0)
+            .backgroundColor($r('app.color.chip_bg'))
+            .fontColor($r('app.color.text_primary'))
+            .onClick(() => {
+              const cur: number =
+                Number.parseInt(this.store().valueOf(this.setting));
+              const next: number = Number.isNaN(cur) ? this.setting.min
+                : Math.max(this.setting.min, cur - this.step());
+              this.store().set(this.setting, `${next}`);
+              this.localRev++;
+            })
+          Text(this.store().valueOf(this.setting))
+            .fontSize(14)
+            .fontColor($r('app.color.text_primary'))
+            .width(64)
+            .textAlign(TextAlign.Center)
+          Button('+')
+            .fontSize(16)
+            .width(34)
+            .height(30)
+            .padding(0)
+            .backgroundColor($r('app.color.chip_bg'))
+            .fontColor($r('app.color.text_primary'))
+            .onClick(() => {
+              const cur: number =
+                Number.parseInt(this.store().valueOf(this.setting));
+              const next: number = Number.isNaN(cur) ? this.setting.min
+                : Math.min(this.setting.max, cur + this.step());
+              this.store().set(this.setting, `${next}`);
+              this.localRev++;
+            })
+        }
+        .width('100%')
+        .padding({ left: 16, right: 16, top: 8, bottom: 8 })
+      } else {
+        Row({ space: 8 }) {
+          this.label()
+          Select(this.selectOptions())
+            .selected(this.selectedIndex())
+            .value(this.selectedLabel())
+            .font({ size: 13 })
+            .onSelect((index: number, value?: string) => {
+              if (index < 0 || index >= this.setting.options.length) {
+                return;
+              }
+              const next: string = this.setting.options[index].value;
+              if (this.store().valueOf(this.setting) !== next) {
+                this.store().set(this.setting, next);
+                this.localRev++;
+              }
+            })
+        }
+        .width('100%')
+        .padding({ left: 16, right: 16, top: 8, bottom: 8 })
       }
-      .layoutWeight(1)
-      .width('100%')
     }
     .width('100%')
-    .height('100%')
-    .backgroundColor($r('app.color.page_bg'))
+  }
+}
+
+/**
+ * 高级选项：按分区列出设置（对照安卓版 SettingsSchema）。
+ * bool = 开关；int = −/+ 步进；list = 下拉选择。
+ * 改动即时写入内存中的 TOML，离开页面时落盘（storage/xenia.config.toml），
+ * 下次启动游戏通过 --config= 生效。标题栏用 NavDestination 自带（含返回按钮）。
+ */
+@Component
+export struct AdvancedPage {
+  @State statusText: string = '';
+  @State deviceInfo: string = '';
+  private store: SettingsStore = SettingsStore.shared();
+
+  aboutToAppear(): void {
+    try {
+      const ctx = getContext(this) as common.Context;
+      this.store.open(ctx.filesDir);
+      this.statusText = this.store.isOpen() ? '设置已加载（改动自动保存）'
+        : '设置不可用（见 hilog）';
+      this.store.dumpToLog();
+    } catch (e) {
+      this.statusText = '设置不可用（见 hilog）';
+      hilog.error(DOMAIN, TAG, 'settings open failed: %{public}s',
+        JSON.stringify(e));
+    }
+  }
+
+  aboutToDisappear(): void {
+    // dirty 时落盘；未改动则直接释放。
+    this.store.close();
+  }
+
+  @Builder
+  categoryCard(cat: SettingsCategory) {
+    Column() {
+      Text(cat.title)
+        .fontSize(13)
+        .fontColor($r('app.color.text_hint'))
+        .width('100%')
+        .padding({ left: 16, right: 16, top: 12, bottom: 6 })
+
+      ForEach(cat.settings, (s: Setting) => {
+        SettingRow({ setting: s })
+      }, (s: Setting) => s.tag())
+    }
+    .width('100%')
+    .backgroundColor($r('app.color.card_bg'))
+    .borderRadius(16)
+  }
+
+  build() {
+    NavDestination() {
+      Column() {
+        Scroll() {
+          Column({ space: 12 }) {
+            ForEach(SettingsSchema.categories(), (cat: SettingsCategory) => {
+              this.categoryCard(cat)
+            }, (cat: SettingsCategory) => cat.title)
+
+            Text(this.deviceInfo)
+              .fontSize(11)
+              .fontColor($r('app.color.text_hint'))
+              .width('100%')
+              .padding({ left: 16, right: 16, bottom: 8 })
+          }
+          .width('100%')
+          .padding({ left: 12, right: 12, top: 8, bottom: 24 })
+        }
+        .layoutWeight(1)
+        .width('100%')
+        .scrollBar(BarState.Off)
+        .align(Alignment.Top)
+
+        Text(this.statusText)
+          .fontSize(11)
+          .fontColor($r('app.color.accent'))
+          .maxLines(2)
+          .width('100%')
+          .padding({ left: 16, right: 16, bottom: 10 })
+      }
+      .width('100%')
+      .height('100%')
+      .backgroundColor($r('app.color.page_bg'))
+    }
+    .title('高级选项')
+    .menus([
+      {
+        value: '重置',
+        action: () => {
+          this.store.resetAll();
+          this.statusText = '已恢复默认（返回时保存）';
+        },
+      },
+    ])
   }
 }

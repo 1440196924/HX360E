@@ -6,7 +6,9 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -586,6 +588,131 @@ std::string DebugOverlayText() {
 }
 
 bool ShowDebugOverlay() { return cvars::show_debug_overlay; }
+
+// 进程 CPU 占用（占整机百分比）：进程 CPU 时间增量 / (墙钟增量 × 核数)。
+float CpuUsagePercent() {
+  static std::mutex usage_mutex;
+  static uint64_t last_cpu_ns = 0;
+  static uint64_t last_wall_ns = 0;
+
+  struct timespec cpu_ts;
+  struct timespec wall_ts;
+  if (clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &cpu_ts) != 0 ||
+      clock_gettime(CLOCK_MONOTONIC, &wall_ts) != 0) {
+    return 0.f;
+  }
+  const uint64_t cpu_ns =
+      uint64_t(cpu_ts.tv_sec) * 1000000000ull + uint64_t(cpu_ts.tv_nsec);
+  const uint64_t wall_ns =
+      uint64_t(wall_ts.tv_sec) * 1000000000ull + uint64_t(wall_ts.tv_nsec);
+
+  std::lock_guard<std::mutex> lock(usage_mutex);
+  float out = 0.f;
+  if (last_wall_ns != 0 && wall_ns > last_wall_ns) {
+    const double d_cpu = double(cpu_ns - last_cpu_ns);
+    const double d_wall = double(wall_ns - last_wall_ns);
+    unsigned cores = std::thread::hardware_concurrency();
+    if (cores == 0) {
+      cores = 1;
+    }
+    out = float(d_cpu / (d_wall * double(cores)) * 100.0);
+  }
+  last_cpu_ns = cpu_ns;
+  last_wall_ns = wall_ns;
+  return out;
+}
+
+namespace {
+// 读文件首个数值（GPU 占用在 sysfs 上，不同平台路径/格式不同）。
+bool ReadSysfsNumber(const char* path, double* out_value) {
+  FILE* f = fopen(path, "rb");
+  if (!f) {
+    return false;
+  }
+  char buf[128] = {0};
+  const size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+  fclose(f);
+  if (n == 0) {
+    return false;
+  }
+  *out_value = std::atof(buf);
+  return true;
+}
+}  // namespace
+
+// GPU 占用：优先用 xenia Vulkan 的时间戳回读（GPU 执行时间 ÷ 帧间隔，最准）；
+// 读不到再试 sysfs；都不可用返回 -1（界面显示 n/a）。
+float GpuBusyPercent() {
+  float gpu_instant_ms = 0.f;
+  float gpu_avg_ms = 0.f;
+  if (xe::GetGpuStats(gpu_instant_ms, gpu_avg_ms) && gpu_avg_ms > 0.f) {
+    float frame_instant_ms = 0.f;
+    float frame_avg_ms = 0.f;
+    float fps = 0.f;
+    xe::GetFrameStats(frame_instant_ms, frame_avg_ms, fps);
+    if (frame_avg_ms > 0.f) {
+      const float pct = gpu_avg_ms / frame_avg_ms * 100.f;
+      return pct > 100.f ? 100.f : pct;
+    }
+  }
+  static const char* kBusyPaths[] = {
+      "/sys/class/devfreq/gpufreq/gpu_busy_percentage",
+      "/sys/class/devfreq/gpu/gpu_busy_percentage",
+      "/sys/kernel/gpu/gpu_busy",
+      "/sys/class/kgsl/kgsl-3d0/gpu_busy_percentage",
+      "/sys/class/devfreq/gpufreq/load",
+      "/sys/class/devfreq/gpu/load",
+      "/sys/class/devfreq/mali0/load",
+  };
+  static const char* kCurFreqPaths[] = {
+      "/sys/class/devfreq/gpufreq/cur_freq",
+      "/sys/class/devfreq/gpu/cur_freq",
+      "/sys/class/devfreq/mali0/gpufreq/cur_freq",
+      "/sys/class/devfreq/mali0/cur_freq",
+  };
+  static const char* kMaxFreqPaths[] = {
+      "/sys/class/devfreq/gpufreq/max_freq",
+      "/sys/class/devfreq/gpu/max_freq",
+      "/sys/class/devfreq/mali0/gpufreq/max_freq",
+      "/sys/class/devfreq/mali0/max_freq",
+  };
+  static std::atomic<bool> logged{false};
+
+  for (const char* path : kBusyPaths) {
+    double value = 0.0;
+    if (ReadSysfsNumber(path, &value) && value > 0.0) {
+      if (!logged.exchange(true)) {
+        HXLOG("GpuBusy: busy node %{public}s = %{public}.1f", path, value);
+      }
+      return float(value > 100.0 ? 100.0 : value);
+    }
+  }
+  double cur = 0.0;
+  double max = 0.0;
+  for (const char* path : kCurFreqPaths) {
+    if (ReadSysfsNumber(path, &cur) && cur > 0.0) {
+      break;
+    }
+  }
+  for (const char* path : kMaxFreqPaths) {
+    if (ReadSysfsNumber(path, &max) && max > 0.0) {
+      break;
+    }
+  }
+  if (cur > 0.0 && max > 0.0) {
+    const float pct = float(cur / max * 100.0);
+    if (!logged.exchange(true)) {
+      HXLOG("GpuBusy: devfreq fallback cur=%{public}.0f max=%{public}.0f "
+            "→ %{public}.0f%%",
+            cur, max, pct);
+    }
+    return pct;
+  }
+  if (!logged.exchange(true)) {
+    HXLOG("GpuBusy: no readable GPU sysfs node (n/a)");
+  }
+  return -1.f;
+}
 
 bool ShowTouchOverlay() { return cvars::show_touch_overlay; }
 

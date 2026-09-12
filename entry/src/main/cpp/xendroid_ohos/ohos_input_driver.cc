@@ -82,6 +82,15 @@ void ApplyDirections(OhosInputDriver* driver, int left_key, int right_key,
   driver->OnKey(up_key, y > kStickDeadzone, y_value);
 }
 
+// Axis magnitude with the sign taken from the direction key. Callers differ:
+// the physical pad and the old overlay pass a signed value (+/-32767), while
+// the analog virtual stick passes only the magnitude, so trusting the sign of
+// `value` made "down" read as "up" (and "left" as "right").
+int16_t AxisValue(short value, bool negative) {
+  const int16_t magnitude = static_cast<int16_t>(value < 0 ? -value : value);
+  return negative ? static_cast<int16_t>(-magnitude) : magnitude;
+}
+
 void HandlePadAxis(PadAxisGroup group, const struct GamePad_AxisEvent* event) {
   OhosInputDriver* driver = pad_driver();
   if (!driver) {
@@ -395,20 +404,28 @@ xe::X_RESULT OhosInputDriver::GetState(uint32_t user_index,
             ks.value < 0 ? 0 : (ks.value > 255 ? 255 : ks.value));
         break;
       case xe::ui::VirtualKey::kXInputPadLThumbLeft:
+        thumb_lx = AxisValue(ks.value, true);
+        break;
       case xe::ui::VirtualKey::kXInputPadLThumbRight:
-        thumb_lx = ks.value;
+        thumb_lx = AxisValue(ks.value, false);
         break;
       case xe::ui::VirtualKey::kXInputPadLThumbUp:
-      case xe::ui::VirtualKey::kXInputPadLThumbDown:
-        thumb_ly = ks.value;
+        thumb_ly = AxisValue(ks.value, false);
         break;
-      case xe::ui::VirtualKey::kXInputPadRThumbUp:
-      case xe::ui::VirtualKey::kXInputPadRThumbDown:
-        thumb_ry = ks.value;
+      case xe::ui::VirtualKey::kXInputPadLThumbDown:
+        thumb_ly = AxisValue(ks.value, true);
         break;
       case xe::ui::VirtualKey::kXInputPadRThumbLeft:
+        thumb_rx = AxisValue(ks.value, true);
+        break;
       case xe::ui::VirtualKey::kXInputPadRThumbRight:
-        thumb_rx = ks.value;
+        thumb_rx = AxisValue(ks.value, false);
+        break;
+      case xe::ui::VirtualKey::kXInputPadRThumbUp:
+        thumb_ry = AxisValue(ks.value, false);
+        break;
+      case xe::ui::VirtualKey::kXInputPadRThumbDown:
+        thumb_ry = AxisValue(ks.value, true);
         break;
       default:
         break;

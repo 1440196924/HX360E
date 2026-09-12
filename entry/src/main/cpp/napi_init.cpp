@@ -403,6 +403,18 @@ napi_value EmulatorSetShowTouchOverlay(napi_env env, napi_callback_info info) {
     return nullptr;
 }
 
+napi_value EmulatorCpuUsage(napi_env env, napi_callback_info info) {
+  napi_value result;
+  napi_create_double(env, hx360e::CpuUsagePercent(), &result);
+  return result;
+}
+
+napi_value EmulatorGpuBusy(napi_env env, napi_callback_info info) {
+  napi_value result;
+  napi_create_double(env, hx360e::GpuBusyPercent(), &result);
+  return result;
+}
+
 napi_value EmulatorFlushGpuCaches(napi_env env, napi_callback_info info) {
     hx360e::FlushGpuCaches();
     return nullptr;
@@ -466,6 +478,10 @@ static napi_value Init(napi_env env, napi_value exports) {
          nullptr, nullptr, napi_default, nullptr},
         {"showDebugOverlayEnabled", nullptr, EmulatorShowDebugOverlay, nullptr,
          nullptr, nullptr, napi_default, nullptr},
+        {"cpuUsagePercent", nullptr, EmulatorCpuUsage, nullptr, nullptr, nullptr,
+         napi_default, nullptr},
+        {"gpuBusyPercent", nullptr, EmulatorGpuBusy, nullptr, nullptr, nullptr,
+         napi_default, nullptr},
         {"showTouchOverlayEnabled", nullptr, EmulatorShowTouchOverlay, nullptr,
          nullptr, nullptr, napi_default, nullptr},
         {"setShowTouchOverlay", nullptr, EmulatorSetShowTouchOverlay, nullptr,

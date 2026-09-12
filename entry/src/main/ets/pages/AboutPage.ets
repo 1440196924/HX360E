@@ -5,9 +5,8 @@ const DOMAIN = 0x0000;
 const TAG = 'HX360E';
 
 /** 关于：应用信息 + 设备/后端信息 + JIT 结论。 */
-@Entry
 @Component
-struct AboutPage {
+export struct AboutPage {
   @State deviceInfo: string = '';
   @State jitInfo: string = '';
 
@@ -38,19 +37,8 @@ struct AboutPage {
   }
 
   build() {
-    Column() {
-      Row() {
-        Text('‹ 返回').fontSize(15).fontColor($r('app.color.accent'))
-          .onClick(() => {
-            this.getUIContext().getRouter().back();
-          })
-        Blank()
-        Text('关于').fontSize(16).fontColor($r('app.color.text_primary')).fontWeight(FontWeight.Bold)
-        Blank()
-        Text(' ').fontSize(15)
-      }
-      .width('100%')
-      .padding({ left: 16, right: 16, top: 12, bottom: 12 })
+    NavDestination() {
+      Column() {
 
       Scroll() {
         Column() {
@@ -82,8 +70,10 @@ struct AboutPage {
       .layoutWeight(1)
       .width('100%')
     }
-    .width('100%')
-    .height('100%')
-    .backgroundColor($r('app.color.page_bg'))
+      .width('100%')
+      .height('100%')
+      .backgroundColor($r('app.color.page_bg'))
+    }
+    .title('关于')
   }
 }

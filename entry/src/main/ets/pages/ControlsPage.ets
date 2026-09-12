@@ -1,9 +1,8 @@
 import { XPadKey } from '../common/PadKey';
 
 /** 控制：虚拟手柄按键 ↔ native 键位索引对照（映射编辑后续再做）。 */
-@Entry
 @Component
-struct ControlsPage {
+export struct ControlsPage {
   @Builder
   keyRow(label: string, index: number) {
     Row() {
@@ -25,19 +24,8 @@ struct ControlsPage {
   }
 
   build() {
-    Column() {
-      Row() {
-        Text('‹ 返回').fontSize(15).fontColor($r('app.color.accent'))
-          .onClick(() => {
-            this.getUIContext().getRouter().back();
-          })
-        Blank()
-        Text('控制').fontSize(16).fontColor($r('app.color.text_primary')).fontWeight(FontWeight.Bold)
-        Blank()
-        Text(' ').fontSize(15)
-      }
-      .width('100%')
-      .padding({ left: 16, right: 16, top: 12, bottom: 12 })
+    NavDestination() {
+      Column() {
 
       Scroll() {
         Column() {
@@ -76,8 +64,10 @@ struct ControlsPage {
       .layoutWeight(1)
       .width('100%')
     }
-    .width('100%')
-    .height('100%')
-    .backgroundColor($r('app.color.page_bg'))
+      .width('100%')
+      .height('100%')
+      .backgroundColor($r('app.color.page_bg'))
+    }
+    .title('控制')
   }
 }

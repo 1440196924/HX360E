@@ -61,6 +61,11 @@ float AverageFps();
 std::string DebugOverlayText();
 // 生效的 Display|show_debug_overlay / HID|show_touch_overlay（含 per-game 覆盖）。
 bool ShowDebugOverlay();
+
+// 调试浮层用的占用率：CPU = 本进程 CPU 时间/墙钟时间（按核数归一，0..100）；
+// GPU = 尽力读 sysfs（不可读时返回 -1）。
+float CpuUsagePercent();
+float GpuBusyPercent();
 bool ShowTouchOverlay();
 void SetShowTouchOverlay(bool value);
 // 刷新 GPU 管线缓存（当前基线无接口，占位）。

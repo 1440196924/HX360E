@@ -16,9 +16,8 @@ class DirEntry {
  * 模拟器目录：应用沙箱内的文件浏览（其他 App 无权访问本应用沙箱，
  * 所以这里用应用内浏览代替「用文件管理器打开」）。
  */
-@Entry
 @Component
-struct DirectoryPage {
+export struct DirectoryPage {
   @State rootPath: string = '';
   @State currentPath: string = '';
   @State entries: DirEntry[] = [];
@@ -141,19 +140,8 @@ struct DirectoryPage {
   }
 
   build() {
-    Column() {
-      Row() {
-        Text('‹ 返回').fontSize(15).fontColor($r('app.color.accent'))
-          .onClick(() => {
-            this.getUIContext().getRouter().back();
-          })
-        Blank()
-        Text('模拟器目录').fontSize(16).fontColor($r('app.color.text_primary')).fontWeight(FontWeight.Bold)
-        Blank()
-        Text(' ').fontSize(15)
-      }
-      .width('100%')
-      .padding({ left: 16, right: 16, top: 12, bottom: 12 })
+    NavDestination() {
+      Column() {
 
       Text(this.currentPath)
         .fontSize(11)
@@ -200,8 +188,10 @@ struct DirectoryPage {
         .maxLines(2)
         .padding({ left: 16, right: 16, bottom: 12 })
     }
-    .width('100%')
-    .height('100%')
-    .backgroundColor($r('app.color.page_bg'))
+      .width('100%')
+      .height('100%')
+      .backgroundColor($r('app.color.page_bg'))
+    }
+    .title('模拟器目录')
   }
 }

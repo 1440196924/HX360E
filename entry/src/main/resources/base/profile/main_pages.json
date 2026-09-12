@@ -2,10 +2,6 @@
   "src": [
     "pages/Home",
     "pages/Index",
-    "pages/GamePage",
-    "pages/AdvancedPage",
-    "pages/ControlsPage",
-    "pages/DirectoryPage",
-    "pages/AboutPage"
+    "pages/GamePage"
   ]
 }

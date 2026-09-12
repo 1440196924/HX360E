@@ -165,14 +165,16 @@ napi_value ConfigLoadEntry(napi_env env, napi_callback_info info) {
     return null_value;
   }
   std::string out;
-  if (auto v = value->value<bool>()) {
-    out = *v ? "true" : "false";
-  } else if (auto v = value->value<int64_t>()) {
-    out = std::to_string(*v);
-  } else if (auto v = value->value<double>()) {
-    out = std::to_string(*v);
-  } else if (auto v = value->value<std::string>()) {
-    out = *v;
+  // 按节点的真实类型取值：toml++ 的 value<bool>() 会把非 0 整数也转成 true，
+  // 导致读回来的 8 / 44 变成 "true"（0 变成 "false"）。
+  if (value->is_boolean()) {
+    out = value->as_boolean()->get() ? "true" : "false";
+  } else if (value->is_integer()) {
+    out = std::to_string(value->as_integer()->get());
+  } else if (value->is_floating_point()) {
+    out = std::to_string(value->as_floating_point()->get());
+  } else if (value->is_string()) {
+    out = value->as_string()->get();
   } else {
     return null_value;
   }

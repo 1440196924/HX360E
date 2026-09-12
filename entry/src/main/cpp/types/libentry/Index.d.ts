@@ -42,6 +42,10 @@ export interface EmulatorApi {
   instantFps(): number;
   averageFps(): number;
   debugOverlayText(): string;
+  /** 本进程 CPU 占用（占整机百分比，0..100）。 */
+  cpuUsagePercent(): number;
+  /** GPU 占用百分比；不可读时为 -1（界面显示 n/a）。 */
+  gpuBusyPercent(): number;
   showDebugOverlayEnabled(): boolean;
   showTouchOverlayEnabled(): boolean;
   setShowTouchOverlay(value: boolean): void;
