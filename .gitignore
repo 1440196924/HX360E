@@ -12,3 +12,5 @@
 /.appanalyzer
 /.cache
 /screenshots
+# Graphics Profiler 抓帧文件（单个可达数十 MB）
+*.rdc

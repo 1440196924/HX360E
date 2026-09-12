@@ -40,6 +40,7 @@
 #include "xenia/base/threading.h"
 #include "xenia/config.h"
 #include "xenia/emulator.h"
+#include "xenia/gpu/null/null_graphics_system.h"
 #include "xenia/gpu/vulkan/vulkan_graphics_system.h"
 #include "xenia/hid/nop/nop_hid.h"
 #include "xenia/kernel/xam/profile_standalone.h"
@@ -108,6 +109,12 @@ std::unique_ptr<xe::apu::AudioSystem> CreateAudioSystem(
 }
 
 std::unique_ptr<xe::gpu::GraphicsSystem> CreateGraphicsSystem() {
+  // 与上游一致（app/xenia_main.cc:483-485）：gpu=null 时用空实现。
+  // 用途：把「GPU 侧耗时」与「guest CPU 侧耗时」分开 —— 同一场景分别用
+  // --gpu=vulkan / --gpu=null 跑，若 null 下帧时间大幅下降，则瓶颈在 GPU 子系统。
+  if (cvars::gpu == "null") {
+    return std::make_unique<xe::gpu::null::NullGraphicsSystem>();
+  }
   return std::make_unique<xe::gpu::vulkan::VulkanGraphicsSystem>();
 }
 
