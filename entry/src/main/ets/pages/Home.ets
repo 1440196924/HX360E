@@ -334,10 +334,10 @@ struct Home {
       '--gpu=vulkan',
       '--apu=ohaudio',
       '--hid=nop',
-      // 强制 FIFO 呈现（禁掉 IMMEDIATE/MAILBOX/FIFO_RELAXED）：presenter 才会走
-      // PaintMode::kUIThreadOnRequest，由 UI 线程负责 present（对齐安卓行为）。详见
-      // ui/vulkan/vulkan_presenter.cc 的 present mode 选择顺序与
-      // ui/presenter.cc 的 GetDesiredPaintModeFromUIThread。
+      // 强制 FIFO 呈现（禁 IMMEDIATE/MAILBOX/FIFO_RELAXED）：presenter 走
+      // PaintMode::kUIThreadOnRequest，由 UI 线程 present（对齐安卓行为，静态
+      // 画面 15fps→59fps）。此时必须启用 ohos_window.cc 的 UI 线程 paint。
+      // 实测：非 FIFO（去量化）对重场景帧率无益（仍 ~17fps），故固定 FIFO。
       '--vulkan_allow_present_mode_immediate=false',
       '--vulkan_allow_present_mode_mailbox=false',
       '--vulkan_allow_present_mode_fifo_relaxed=false',

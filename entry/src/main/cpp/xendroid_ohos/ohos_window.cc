@@ -177,9 +177,11 @@ std::unique_ptr<xe::ui::Surface> OhosWindow::CreateSurfaceImpl(
 }
 
 void OhosWindow::RequestPaintImpl() {
-  // 对齐安卓 AndroidWindow::RequestPaintImpl() → PostInvalidateWindowSurface：
-  // presenter 在 PaintMode::kUIThreadOnRequest 下需要 UI 线程来 present。
-  // 启动参数已强制 FIFO 呈现（见 Home.ets），因此这里会走到 UI 线程 paint。
+  // 启动参数强制 FIFO 呈现（Home.ets），presenter 走 PaintMode::kUIThreadOnRequest，
+  // 由 UI 线程负责 present —— 对齐安卓 AndroidWindow::RequestPaintImpl() →
+  // PostInvalidateWindowSurface。
+  // 约束：若改回允许 IMMEDIATE/MAILBOX（非 FIFO），必须把这里改回空实现，
+  // 否则 UI 线程会去碰 guest 输出线程独占的呈现连接状态（实测 SIGSEGV）。
   auto& context = static_cast<OhosWindowedAppContext&>(app_context());
   context.RequestPaintOnUIThread();
 }
