@@ -1,0 +1,145 @@
+diff --git a/SPIRV/InReadableOrder.cpp b/SPIRV/InReadableOrder.cpp
+index 18e487d8..3d28629a 100644
+--- a/SPIRV/InReadableOrder.cpp
++++ b/SPIRV/InReadableOrder.cpp
+@@ -52,6 +52,7 @@
+ 
+ #include <cassert>
+ #include <unordered_set>
++#include <vector>
+ 
+ using spv::Block;
+ using spv::Id;
+@@ -59,6 +60,13 @@ using spv::Id;
+ namespace {
+ // Traverses CFG in a readable order, invoking a pre-set callback on each block.
+ // Use by calling visit() on the root block.
++//
++// Iterative (explicit-stack) DFS: the original recursive form recursed once per
++// CFG block, so a function with very deep control flow (large game shaders)
++// overflowed even a 32 MiB host thread stack while serializing the module in
++// Function::dump.  An explicit stack removes the dependence on native stack
++// depth.  Semantics (visit order, delaying of merge/continue blocks, and the
++// ReachReason values) are preserved.
+ class ReadableOrderTraverser {
+ public:
+     ReadableOrderTraverser(std::function<void(Block*, spv::ReachReason, Block*)> callback)
+@@ -71,47 +79,78 @@ public:
+     void visit(Block* block, spv::ReachReason why, Block* header)
+     {
+         assert(block);
+-        if (why == spv::ReachViaControlFlow) {
+-            reachableViaControlFlow_.insert(block);
+-        }
+-        if (visited_.count(block) || delayed_.count(block))
+-            return;
+-        callback_(block, why, header);
+-        visited_.insert(block);
+-        Block* mergeBlock = nullptr;
+-        Block* continueBlock = nullptr;
+-        auto mergeInst = block->getMergeInstruction();
+-        if (mergeInst) {
+-            Id mergeId = mergeInst->getIdOperand(0);
+-            mergeBlock = block->getParent().getParent().getInstruction(mergeId)->getBlock();
+-            delayed_.insert(mergeBlock);
+-            if (mergeInst->getOpCode() == spv::Op::OpLoopMerge) {
+-                Id continueId = mergeInst->getIdOperand(1);
+-                continueBlock =
+-                    block->getParent().getParent().getInstruction(continueId)->getBlock();
+-                delayed_.insert(continueBlock);
++
++        enum class TaskKind { Visit, Continue, Merge };
++        struct Task {
++            TaskKind kind;
++            Block* block;   // Visit: block to visit. Continue/Merge: the header.
++            Block* target;  // Continue/Merge: the delayed block to visit.
++            spv::ReachReason why;
++            Block* header;
++        };
++
++        std::vector<Task> stack;
++        stack.push_back(Task{TaskKind::Visit, block, nullptr, why, header});
++        while (!stack.empty()) {
++            const Task task = stack.back();
++            stack.pop_back();
++
++            if (task.kind != TaskKind::Visit) {
++                // Delayed merge/continue block: decide the reason now (after all
++                // branches have been visited) and visit it.
++                Block* delayedBlock = task.target;
++                const spv::ReachReason reason =
++                    (reachableViaControlFlow_.count(delayedBlock) > 0)
++                        ? spv::ReachViaControlFlow
++                        : (task.kind == TaskKind::Continue ? spv::ReachDeadContinue
++                                                           : spv::ReachDeadMerge);
++                delayed_.erase(delayedBlock);
++                stack.push_back(Task{TaskKind::Visit, delayedBlock, nullptr, reason,
++                                     task.block});
++                continue;
++            }
++
++            Block* current = task.block;
++            if (task.why == spv::ReachViaControlFlow) {
++                reachableViaControlFlow_.insert(current);
++            }
++            if (visited_.count(current) || delayed_.count(current))
++                continue;
++            callback_(current, task.why, task.header);
++            visited_.insert(current);
++
++            Block* mergeBlock = nullptr;
++            Block* continueBlock = nullptr;
++            auto mergeInst = current->getMergeInstruction();
++            if (mergeInst) {
++                Id mergeId = mergeInst->getIdOperand(0);
++                mergeBlock = current->getParent().getParent().getInstruction(mergeId)->getBlock();
++                delayed_.insert(mergeBlock);
++                if (mergeInst->getOpCode() == spv::Op::OpLoopMerge) {
++                    Id continueId = mergeInst->getIdOperand(1);
++                    continueBlock =
++                        current->getParent().getParent().getInstruction(continueId)->getBlock();
++                    delayed_.insert(continueBlock);
++                }
++            }
++
++            // Push in reverse execution order (LIFO): merge last, then continue,
++            // then the successors (first successor on top -> visited first).
++            if (mergeBlock) {
++                stack.push_back(Task{TaskKind::Merge, current, mergeBlock,
++                                     spv::ReachViaControlFlow, nullptr});
++            }
++            if (continueBlock) {
++                stack.push_back(Task{TaskKind::Continue, current, continueBlock,
++                                     spv::ReachViaControlFlow, nullptr});
++            }
++            if (task.why == spv::ReachViaControlFlow) {
++                const auto& successors = current->getSuccessors();
++                for (size_t i = successors.size(); i-- > 0;) {
++                    stack.push_back(Task{TaskKind::Visit, successors[i], nullptr,
++                                         task.why, nullptr});
++                }
+             }
+-        }
+-        if (why == spv::ReachViaControlFlow) {
+-            const auto& successors = block->getSuccessors();
+-            for (auto it = successors.cbegin(); it != successors.cend(); ++it)
+-                visit(*it, why, nullptr);
+-        }
+-        if (continueBlock) {
+-            const spv::ReachReason continueWhy =
+-                (reachableViaControlFlow_.count(continueBlock) > 0)
+-                    ? spv::ReachViaControlFlow
+-                    : spv::ReachDeadContinue;
+-            delayed_.erase(continueBlock);
+-            visit(continueBlock, continueWhy, block);
+-        }
+-        if (mergeBlock) {
+-            const spv::ReachReason mergeWhy =
+-                (reachableViaControlFlow_.count(mergeBlock) > 0)
+-                    ? spv::ReachViaControlFlow
+-                    : spv::ReachDeadMerge;
+-            delayed_.erase(mergeBlock);
+-            visit(mergeBlock, mergeWhy, block);
+         }
+     }
+ 

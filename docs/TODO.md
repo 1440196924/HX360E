@@ -87,7 +87,7 @@
 | 上游 fork（含全部 OHOS 补丁，**未提交**） | `D:\Code\OpenSource\XenDroid`（main @ `779680a`） |
 | xenia 源码树 | `<fork>/emulator-core/src/main/cpp/xenia` |
 | 集成方式 | `entry/src/main/cpp/CMakeLists.txt` 的 `XE_XENDROID_ROOT` 缓存变量 → `add_subdirectory(... EXCLUDE_FROM_ALL)` |
-| fork 补丁存档 | `patches/harmony/xendroid-ohos-fork.diff` + `patches/harmony/xbyak_aarch64.diff`（**已过期，需重新导出**，见附录 D） |
+| fork 补丁存档 | `patches/harmony/xendroid-ohos-fork.diff`（xenia 源码树，43 文件）+ `patches/harmony/glslang.diff`（子模块 `third_party/glslang`）+ `patches/harmony/xbyak_aarch64.diff`（子模块）。**2026-09-12 重新导出**（见附录 D）。导出前需先 `git add -N` 那 5 个新增文件，否则 `git diff` 不含它们 |
 
 **构建**：`build_project`（hvigor）→ `entry/build/.../libentry.so`；**增量约 7–25 秒**，
 全量（首次 / 清缓存）约 10–17 分钟。debug 构建的 native 编译是 **`-O0 -g`**（见下），
@@ -239,9 +239,11 @@
    不同格式标题（ISO / XEX 目录 / 单文件 STFS / 多文件 GOD）确认安装与启动目标解析。
 3. **Phase 6 正式安装器**：安装进度、`.tmp` + `rename` 原子落定、空间预检、多文件包选择、
    残留清理（现在是最简单的单槽位覆盖版）。
-4. **归档**：重新导出 `patches/harmony/*.diff`（含本轮 `xobject.cc`、glslang
-   `InReadableOrder.cpp`、`vulkan_pipeline_cache.cc` 等 fork 改动）；清理或明确保留临时诊断
-   日志（D.4）。
+4. **归档** ✅（2026-09-12 已重新导出）：`patches/harmony/xendroid-ohos-fork.diff`
+   （43 文件，含 `xobject.cc` / `memory_posix.cc` / `code_cache_base.h` /
+   `vulkan_pipeline_cache.cc` / `surface_ohos.*`）、`patches/harmony/glslang.diff`
+   （`InReadableOrder.cpp` 迭代遍历）、`patches/harmony/xbyak_aarch64.diff`。
+   临时诊断日志暂时保留（D.4）。
 
 
 ---

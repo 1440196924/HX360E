@@ -246,8 +246,194 @@ index cfac7e74b..9e86dde42 100644
  
  }  // namespace nop
  }  // namespace apu
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/base/exception_handler.h b/emulator-core/src/main/cpp/xenia/src/xenia/base/exception_handler.h
+index 9e96ceafc..7fb21ea76 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/base/exception_handler.h
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/base/exception_handler.h
+@@ -259,6 +259,20 @@ class ExceptionHandler {
+   static void Uninstall(Handler fn, void* data);
+ };
+ 
++// ---------------------------------------------------------------------------
++// Crash-safe diagnostic sink.
++//
++// hilog lines written just before the process is killed by the default signal
++// action are routinely lost, which hides exactly the information needed to
++// debug the fault being reported. Point this at an O_APPEND file descriptor
++// during startup; the signal handler then writes through it with write(2)
++// only (async-signal-safe), so the record survives the crash.
++void SetExceptionHandlerDiagnosticFd(int fd);
++
++// Best-effort async-signal-safe line to the diagnostic sink. No-op when no
++// descriptor has been set. `message` should end with '\n'.
++void WriteExceptionDiagnostic(const char* message);
++
+ }  // namespace xe
+ 
+ #endif  // XENIA_BASE_EXCEPTION_HANDLER_H_
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/base/exception_handler_posix.cc b/emulator-core/src/main/cpp/xenia/src/xenia/base/exception_handler_posix.cc
+index 898ff4b7d..ea33d3638 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/base/exception_handler_posix.cc
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/base/exception_handler_posix.cc
+@@ -19,11 +19,39 @@
+ #include "xenia/base/host_thread_context.h"
+ #include "xenia/base/logging.h"
+ #include "xenia/base/math.h"
++#include "xenia/base/memory.h"
+ #include "xenia/base/platform.h"
+ #include "xenia/base/threading.h"
+ 
+ namespace xe {
+ 
++namespace {
++
++// Crash-safe diagnostic sink: see SetExceptionHandlerDiagnosticFd. Only
++// write(2) is used on this path so a record survives the default action.
++int g_diagnostic_fd = -1;
++
++void WriteDiagnosticLine(const char* message) {
++  if (g_diagnostic_fd < 0 || !message) {
++    return;
++  }
++  size_t length = 0;
++  while (message[length]) {
++    ++length;
++  }
++  if (length) {
++    (void)::write(g_diagnostic_fd, message, length);
++  }
++}
++
++}  // namespace
++
++void SetExceptionHandlerDiagnosticFd(int fd) { g_diagnostic_fd = fd; }
++
++void WriteExceptionDiagnostic(const char* message) {
++  WriteDiagnosticLine(message);
++}
++
+ bool signal_handlers_installed_ = false;
+ struct sigaction original_sigill_handler_;
+ struct sigaction original_sigsegv_handler_;
+@@ -269,6 +297,32 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
+       assert_unhandled_case(signal_number);
+   }
+ 
++#if XE_PLATFORM_OHOS
++  {
++    // Entry record: proves the handler ran at all for this fault. Written via
++    // the crash-safe sink because hilog loses lines this close to the kill.
++    // `seq` makes the fault sequence (per address) readable even when the
++    // process dies before anything else is flushed.
++    static std::atomic<uint32_t> fault_sequence{0};
++    const uint32_t sequence =
++        fault_sequence.fetch_add(1, std::memory_order_relaxed);
++    char diag[224];
++    const int diag_length = std::snprintf(
++        diag, sizeof(diag),
++        "OHOS-fault-enter: seq=%u tid=%ld sig=%d op=%d fault=%p pc=%p\n",
++        sequence, static_cast<long>(::gettid()), signal_number,
++        static_cast<int>(ex.access_violation_operation()),
++        reinterpret_cast<void*>(static_cast<uintptr_t>(ex.fault_address())),
++        static_cast<const void*>(reinterpret_cast<const uint8_t*>(ex.pc())));
++    if (diag_length > 0 && sequence < 512) {
++      // Bounded, and deliberately small: a fault loop writes thousands of these
++      // and they would push the informative records (TC-refuse / forceRW /
++      // window) out of the 256 KB tail window the in-app exporter reads.
++      WriteDiagnosticLine(diag);
++    }
++  }
++#endif
++
+   for (size_t i = 0; i < xe::countof(handlers_) && handlers_[i].first; ++i) {
+     if (handlers_[i].first(&ex, handlers_[i].second)) {
+       // Exception handled.
+@@ -412,6 +466,63 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
+   // the kernel re-execute the faulting instruction, which faults again
+   // immediately -> an infinite fault->handler->return loop that pegs the thread
+   // at 100% CPU and looks like a hang / black screen instead of a crash.
++#if XE_PLATFORM_OHOS
++  // A fault our handlers cannot resolve is first retried once with the handler
++  // still installed: transient races (a page momentarily read-only while the
++  // faulting thread retries) resolve on the retry. Only when the *identical*
++  // fault repeats consecutively is it genuinely unhandled, and only then do we
++  // fall back to SIG_DFL so the process dies at the real fault site.
++  //
++  // Keyed on the fault itself, NOT a global counter: the old global count
++  // permanently dropped our handler (SIG_DFL) after 8 unhandled faults, so the
++  // very next *handled* write-watch fault killed the process. On TR2013 (a
++  // fault storm of handled watched writes, then a transient unhandled fault)
++  // that turned a recoverable situation into a SIGSEGV. Android has no such
++  // global disable.
++  const uintptr_t fault_pc = static_cast<uintptr_t>(ex.pc());
++  const uintptr_t fault_addr =
++      static_cast<uintptr_t>(ex.fault_address());
++  static std::atomic<uintptr_t> last_pc{0};
++  static std::atomic<uintptr_t> last_addr{0};
++  static std::atomic<int> last_signal{0};
++  static std::atomic<uint32_t> repeat_count{0};
++  if (fault_pc == last_pc.load(std::memory_order_relaxed) &&
++      fault_addr == last_addr.load(std::memory_order_relaxed) &&
++      signal_number == last_signal.load(std::memory_order_relaxed)) {
++    repeat_count.fetch_add(1, std::memory_order_relaxed);
++  } else {
++    last_pc.store(fault_pc, std::memory_order_relaxed);
++    last_addr.store(fault_addr, std::memory_order_relaxed);
++    last_signal.store(signal_number, std::memory_order_relaxed);
++    repeat_count.store(1, std::memory_order_relaxed);
++  }
++  const uint32_t repeat = repeat_count.load(std::memory_order_relaxed);
++  // Deliberately no QueryProtect() here: it reads /proc/self/maps through the
++  // C++ runtime, which is not async-signal-safe and can deadlock when the
++  // interrupted thread held the allocator lock.
++  if (repeat == 1 || (repeat & (repeat - 1)) == 0) {
++    char diag[256];
++    const int diag_length = std::snprintf(
++        diag, sizeof(diag),
++        "OHOS-unhandled: repeat=%u sig=%d op=%d fault=%p pc=%p\n", repeat,
++        signal_number, static_cast<int>(ex.access_violation_operation()),
++        reinterpret_cast<void*>(fault_addr),
++        reinterpret_cast<const void*>(fault_pc));
++    if (diag_length > 0) {
++      WriteDiagnosticLine(diag);
++    }
++  }
++  if (repeat < 8) {
++    // Retry with our handler still installed.
++    return;
++  }
++  // The same fault has repeated: hand it to the default action instead of
++  // chaining. The chained platform handler (DFX) returns without terminating,
++  // so chaining here would leave us faulting forever with the platform crash
++  // handler running on every retry (measured: 5000+ faults, 7800+ DFX calls).
++  signal(signal_number, SIG_DFL);
++  return;
++#endif
+   const struct sigaction* previous_handler = nullptr;
+   switch (signal_number) {
+     case SIGSEGV:
+@@ -425,6 +536,19 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
+       break;
+   }
+   if (previous_handler) {
++#if XE_PLATFORM_OHOS
++    {
++      char diag[192];
++      const int diag_length = std::snprintf(
++          diag, sizeof(diag),
++          "OHOS-chain: sig=%d prev_flags=0x%X prev_sigaction=%d\n",
++          signal_number, static_cast<unsigned>(previous_handler->sa_flags),
++          previous_handler->sa_sigaction ? 1 : 0);
++      if (diag_length > 0) {
++        WriteDiagnosticLine(diag);
++      }
++    }
++#endif
+     if ((previous_handler->sa_flags & SA_SIGINFO) &&
+         previous_handler->sa_sigaction) {
+       previous_handler->sa_sigaction(signal_number, signal_info,
 diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/base/logging.cc b/emulator-core/src/main/cpp/xenia/src/xenia/base/logging.cc
-index 233ec2c2a..82b2f935e 100644
+index 233ec2c2a..802ac0cc4 100644
 --- a/emulator-core/src/main/cpp/xenia/src/xenia/base/logging.cc
 +++ b/emulator-core/src/main/cpp/xenia/src/xenia/base/logging.cc
 @@ -36,6 +36,8 @@
@@ -358,18 +544,44 @@ index 233ec2c2a..82b2f935e 100644
  class Logger {
   public:
    explicit Logger(const std::string_view app_name)
-@@ -447,6 +541,9 @@ void InitializeLogging(const std::string_view app_name) {
+@@ -447,6 +541,35 @@ void InitializeLogging(const std::string_view app_name) {
    if (cvars::log_to_logcat) {
      logger_->AddLogSink(std::make_unique<AndroidLogSink>(app_name));
    }
 +#elif XE_PLATFORM_OHOS
-+  // HarmonyOS: hilog sink (file/stdout sinks aren't reachable via hdc).
++  // HarmonyOS: hilog sink *and* the regular file sink. Because this branch is
++  // an #elif, the #else block below (file + stdout sinks) is not compiled on
++  // OHOS - which silently left xe.log unwritten (stale content from an older
++  // build only). The file lives in the app sandbox so hdc cannot read it, but
++  // it is exactly what the in-app "export logs" button reads, so it must be
++  // written.
 +  logger_->AddLogSink(std::make_unique<OhosLogSink>());
++  {
++    FILE* log_file = nullptr;
++    const char* file_mode = cvars::log_append ? "at" : "wt";
++    if (cvars::log_file.empty()) {
++      std::string file_name = fmt::format("{}.log", app_name);
++      auto file_path = xe::filesystem::GetExecutableFolder() / file_name;
++      log_file = xe::filesystem::OpenFile(file_path, file_mode);
++    } else {
++      xe::filesystem::CreateParentFolder(cvars::log_file);
++      log_file = xe::filesystem::OpenFile(cvars::log_file, file_mode);
++    }
++    logger_->AddLogSink(std::make_unique<FileLogSink>(log_file, true));
++  }
++
++  if (cvars::log_to_stdout) {
++    logger_->AddLogSink(std::make_unique<FileLogSink>(stdout, false));
++  }
++
++  if (cvars::log_to_debugprint) {
++    logger_->AddLogSink(std::make_unique<DebugPrintLogSink>());
++  }
  #else
    {
      FILE* log_file = nullptr;
 diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/base/memory_posix.cc b/emulator-core/src/main/cpp/xenia/src/xenia/base/memory_posix.cc
-index 43a50c3bc..0bb4e7c65 100644
+index 43a50c3bc..fb33efe66 100644
 --- a/emulator-core/src/main/cpp/xenia/src/xenia/base/memory_posix.cc
 +++ b/emulator-core/src/main/cpp/xenia/src/xenia/base/memory_posix.cc
 @@ -35,7 +35,8 @@
@@ -396,7 +608,38 @@ index 43a50c3bc..0bb4e7c65 100644
  #else
  bool IsWritableExecutableMemorySupported() { return true; }
  #endif  // XE_PLATFORM_MAC
-@@ -368,7 +376,18 @@ bool QueryProtect(void* base_address, size_t& length, PageAccess& access_out) {
+@@ -212,11 +220,30 @@ void* AllocFixed(void* base_address, size_t length,
+ #endif  // XE_PLATFORM_MAC
+     }
+ 
++    // Never silently replace an existing mapping. Plain MAP_FIXED unmaps
++    // whatever already lives at the requested address - on OHOS the guest
++    // memory views are placed by scanning for a base, and MAP_FIXED there
++    // could delete the host's own heap/thread stacks, which then shows up as
++    // memory corruption far away (e.g. malloc returning unmapped memory
++    // inside the shader translation). MAP_FIXED_NOREPLACE fails instead, so
++    // the caller can retry at another base.
++#ifdef MAP_FIXED_NOREPLACE
++    flags |= MAP_FIXED_NOREPLACE;
++#else
+     flags |= MAP_FIXED;
++#endif
+   }
+ 
+   void* result = mmap(base_address, length, prot, flags, -1, 0);
+ 
++#ifdef MAP_FIXED_NOREPLACE
++  if (result == MAP_FAILED && base_address != nullptr && errno == EINVAL) {
++    // Kernel predates MAP_FIXED_NOREPLACE; fall back to plain MAP_FIXED.
++    flags = (flags & ~MAP_FIXED_NOREPLACE) | MAP_FIXED;
++    result = mmap(base_address, length, prot, flags, -1, 0);
++  }
++#endif
++
+   if (result == MAP_FAILED) {
+     return nullptr;
+   }
+@@ -368,7 +395,18 @@ bool QueryProtect(void* base_address, size_t& length, PageAccess& access_out) {
  FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path,
                                            size_t length, PageAccess access,
                                            bool commit) {
@@ -416,8 +659,17 @@ index 43a50c3bc..0bb4e7c65 100644
      //XELOGI("CreateFileMappingHandle: {} 0x{:X}", path.string(), length);
      int sharedmem_fd = ASharedMemory_create(path.c_str(), length);
      return sharedmem_fd >= 0 ? sharedmem_fd : kFileMappingHandleInvalid;
-@@ -514,9 +533,22 @@ void* MapFileView(FileMappingHandle handle, void* base_address, size_t length,
+@@ -511,12 +549,39 @@ void* MapFileView(FileMappingHandle handle, void* base_address, size_t length,
+ 
+   int flags = MAP_SHARED;
+   if (base_address != nullptr) {
++    // See AllocFixed: MAP_FIXED would silently replace an existing mapping
++    // (the guest memory views are placed by scanning for a free base).
++#ifdef MAP_FIXED_NOREPLACE
++      flags |= MAP_FIXED_NOREPLACE;
++#else
        flags |= MAP_FIXED;
++#endif
    }
  
 +#if XE_PLATFORM_OHOS
@@ -432,6 +684,14 @@ index 43a50c3bc..0bb4e7c65 100644
 +
      void* result = mmap(base_address, length, prot, flags, handle, file_offset);
  
++#ifdef MAP_FIXED_NOREPLACE
++  if (result == MAP_FAILED && base_address != nullptr && errno == EINVAL) {
++    // Kernel predates MAP_FIXED_NOREPLACE; fall back to plain MAP_FIXED.
++    flags = (flags & ~MAP_FIXED_NOREPLACE) | MAP_FIXED;
++    result = mmap(base_address, length, prot, flags, handle, file_offset);
++  }
++#endif
++
    if (result == MAP_FAILED) {
 +    XELOGE("MapFileView failed: base={:p} len=0x{:X} prot=0x{:X} flags=0x{:X} "
 +           "errno={}",
@@ -439,7 +699,7 @@ index 43a50c3bc..0bb4e7c65 100644
      return nullptr;
    }
  
-@@ -528,6 +560,17 @@ void* MapFileView(FileMappingHandle handle, void* base_address, size_t length,
+@@ -528,6 +593,17 @@ void* MapFileView(FileMappingHandle handle, void* base_address, size_t length,
      return nullptr;
    }
  
@@ -500,10 +760,18 @@ index a1adabd55..717de6434 100644
  
    size_t hash() const { return utf8::hash_fnv1a(view()); }
 diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/cpu/backend/code_cache_base.h b/emulator-core/src/main/cpp/xenia/src/xenia/cpu/backend/code_cache_base.h
-index 57cd83547..30e6455bb 100644
+index 57cd83547..da51376d8 100644
 --- a/emulator-core/src/main/cpp/xenia/src/xenia/cpu/backend/code_cache_base.h
 +++ b/emulator-core/src/main/cpp/xenia/src/xenia/cpu/backend/code_cache_base.h
-@@ -21,6 +21,12 @@
+@@ -13,6 +13,7 @@
+ #include <atomic>
+ #include <cstddef>
+ #include <cstdint>
++#include <cstdio>
+ #include <cstdlib>
+ #include <cstring>
+ #include <memory>
+@@ -21,9 +22,16 @@
  #include <utility>
  #include <vector>
  
@@ -516,7 +784,11 @@ index 57cd83547..30e6455bb 100644
  #include "third_party/fmt/include/fmt/format.h"
  #include "xenia/base/assert.h"
  #include "xenia/base/clock.h"
-@@ -174,6 +180,49 @@ class CodeCacheBase : public CodeCache {
++#include "xenia/base/exception_handler.h"
+ #include "xenia/base/literals.h"
+ #include "xenia/base/logging.h"
+ #include "xenia/base/math.h"
+@@ -174,6 +182,78 @@ class CodeCacheBase : public CodeCache {
    virtual bool Initialize() {
      file_name_ =
          fmt::format("xenia_code_cache_{}", Clock::QueryHostTickCount());
@@ -560,13 +832,42 @@ index 57cd83547..30e6455bb 100644
 +    }
 +    external_indirection_target_count_.store(0, std::memory_order_relaxed);
 +    generated_code_map_.reserve(kMaximumFunctionCount);
++    XELOGE(
++        "OHOS code cache: exec={} write={} code_size=0x{:X} table={} "
++        "table_size=0x{:X} bias=0x{:X} default=0x{:08X}",
++        static_cast<const void*>(generated_code_execute_base_),
++        static_cast<const void*>(generated_code_write_base_),
++        static_cast<uint64_t>(kGeneratedCodeSize),
++        static_cast<const void*>(indirection_table_base_),
++        static_cast<uint64_t>(kIndirectionTableSize),
++        static_cast<uint64_t>(indirection_table_base_bias_),
++        indirection_default_value_);
++    {
++      // Also record the region bases through the crash-safe sink so every
++      // native_fault.log is self-describing (the file is truncated per boot,
++      // and the code cache/table addresses change run to run, so the fault
++      // addresses cannot be interpreted without them).
++      char diag[224];
++      const int diag_length = std::snprintf(
++          diag, sizeof(diag),
++          "OHOS-regions: code=[%p,%p) table=[%p,%p) bias=0x%llX\n",
++          static_cast<const void*>(generated_code_execute_base_),
++          static_cast<void*>(generated_code_execute_base_ +
++                             kGeneratedCodeSize),
++          static_cast<const void*>(indirection_table_base_),
++          static_cast<void*>(indirection_table_base_ + kIndirectionTableSize),
++          static_cast<unsigned long long>(indirection_table_base_bias_));
++      if (diag_length > 0) {
++        WriteExceptionDiagnostic(diag);
++      }
++    }
 +    return true;
 +#endif  // XE_PLATFORM_OHOS
 +
      mapping_ = xe::memory::CreateFileMappingHandle(
          file_name_, kGeneratedCodeSize,
          xe::memory::PageAccess::kExecuteReadWrite, false);
-@@ -310,7 +359,12 @@ class CodeCacheBase : public CodeCache {
+@@ -310,7 +390,12 @@ class CodeCacheBase : public CodeCache {
        }
      }
      if (!generated_code_execute_base_ || !generated_code_write_base_) {
@@ -580,7 +881,7 @@ index 57cd83547..30e6455bb 100644
        return false;
      }
  
-@@ -452,6 +506,27 @@ class CodeCacheBase : public CodeCache {
+@@ -452,6 +537,27 @@ class CodeCacheBase : public CodeCache {
                     code_execute_address_out, code_write_address_out);
    }
  
@@ -608,7 +909,26 @@ index 57cd83547..30e6455bb 100644
    void PlaceGuestCode(uint32_t guest_address, void* machine_code,
                        const EmitFunctionInfo& func_info,
                        GuestFunction* function_info,
-@@ -502,6 +577,15 @@ class CodeCacheBase : public CodeCache {
+@@ -462,6 +568,18 @@ class CodeCacheBase : public CodeCache {
+     {
+       auto global_lock = global_critical_region_.Acquire();
+ 
++#if XE_PLATFORM_OHOS
++      // W^X is toggled per page on OHOS (one anonymous region doubles as the
++      // write and the execute view), so a placement must not share its first
++      // page with code that is already published: flipping that page to RW
++      // removes X from live code, and another guest thread fetching from it
++      // dies with an instruction abort (SIGSEGV SEGV_ACCERR, ESR EC=0x20).
++      // Start every placement on a fresh page - the only thing the previous
++      // placement leaves in the last page is unwind/trap data, never executed.
++      generated_code_offset_ = xe::round_up(
++          generated_code_offset_, static_cast<size_t>(getpagesize()));
++#endif
++
+       code_execute_address =
+           generated_code_execute_base_ + generated_code_offset_;
+       code_execute_address_out = code_execute_address;
+@@ -502,6 +620,15 @@ class CodeCacheBase : public CodeCache {
          pthread_jit_write_protect_np(0);
        }
  #endif
@@ -624,7 +944,7 @@ index 57cd83547..30e6455bb 100644
  
        // Copy code.
        std::memcpy(code_write_address, machine_code, func_info.code_size.total);
-@@ -521,6 +605,13 @@ class CodeCacheBase : public CodeCache {
+@@ -521,6 +648,13 @@ class CodeCacheBase : public CodeCache {
          pthread_jit_write_protect_np(1);
        }
  #endif
@@ -638,7 +958,19 @@ index 57cd83547..30e6455bb 100644
  
        // Flush I-cache for code and fill regions.
        self().FlushCodeRange(code_write_address, func_info.code_size.total);
-@@ -558,12 +649,24 @@ class CodeCacheBase : public CodeCache {
+@@ -546,6 +680,11 @@ class CodeCacheBase : public CodeCache {
+     uint8_t* data_address = nullptr;
+     {
+       auto global_lock = global_critical_region_.Acquire();
++#if XE_PLATFORM_OHOS
++      // See PlaceGuestCode: never share a page with already-published code.
++      generated_code_offset_ = xe::round_up(
++          generated_code_offset_, static_cast<size_t>(getpagesize()));
++#endif
+       data_address = generated_code_write_base_ + generated_code_offset_;
+       generated_code_offset_ += xe::round_up(length, 16);
+       high_mark = generated_code_offset_;
+@@ -558,12 +697,24 @@ class CodeCacheBase : public CodeCache {
      if (jit_write_toggle) {
        pthread_jit_write_protect_np(0);
      }
@@ -663,6 +995,53 @@ index 57cd83547..30e6455bb 100644
  #endif
      return uint32_t(uintptr_t(data_address));
    }
+@@ -684,6 +835,18 @@ class CodeCacheBase : public CodeCache {
+   }
+ 
+   void EnsureCommitted(size_t high_mark) {
++#if XE_PLATFORM_OHOS
++    // HarmonyOS: Initialize() allocated the whole region committed read-write,
++    // and every placement toggles exactly the pages it needs (OhosMakeWritable /
++    // OhosMakeExecutable). Re-protecting from the region base here - the
++    // aliased-region branch below, which passes kExecuteReadWrite (RWX) - would
++    // rewrite PROT_READ|PROT_EXEC pages of already-placed code to RWX, which
++    // HarmonyOS does not honour as executable anonymous memory: the pages come
++    // back non-executable and the next call into old code dies with an
++    // instruction abort (SIGSEGV SEGV_ACCERR, ESR EC=0x20 / IFSC=0x0F).
++    generated_code_commit_mark_.store(high_mark, std::memory_order_relaxed);
++    return;
++#endif  // XE_PLATFORM_OHOS
+     using namespace xe::literals;
+     size_t old_commit_mark, new_commit_mark;
+     do {
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/cpu/mmio_handler.cc b/emulator-core/src/main/cpp/xenia/src/xenia/cpu/mmio_handler.cc
+index 3c2134395..3f471a3f6 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/cpu/mmio_handler.cc
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/cpu/mmio_handler.cc
+@@ -417,6 +417,10 @@ bool MMIOHandler::ExceptionCallbackThunk(Exception* ex, void* data) {
+ }
+ 
+ bool MMIOHandler::ExceptionCallback(Exception* ex) {
++  // NOTE: no XELOG* in this function. xenia's logging allocates, and running
++  // the allocator inside the SIGSEGV handler can re-enter it while the
++  // interrupted thread was mid-malloc -> heap corruption. The crash-safe file
++  // sink in the exception handler records every fault instead.
+   if (ex->code() != Exception::Code::kAccessViolation) {
+     return false;
+   }
+@@ -467,6 +471,12 @@ bool MMIOHandler::ExceptionCallback(Exception* ex) {
+     // watches were already cleared by another thread, TriggerCallbacks finds
+     // no watches and the page is unprotected by the time we retry.
+     if (access_violation_callback_) {
++      // NOTE: no XELOG* here. xenia's logging formats through fmt/std::string,
++      // i.e. it allocates; running that inside the SIGSEGV handler can re-enter
++      // the allocator while the interrupted thread was mid-malloc, which
++      // corrupts the heap (observed as a later SIGSEGV_MAPERR inside musl
++      // malloc on an unrelated thread). The fault itself is recorded through
++      // the crash-safe file sink in the exception handler instead.
+       return access_violation_callback_(std::move(lock),
+                                         access_violation_callback_context_,
+                                         fault_host_address, is_write);
 diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/cpu/xex_module.h b/emulator-core/src/main/cpp/xenia/src/xenia/cpu/xex_module.h
 index a2b6750d7..7072ae4c0 100644
 --- a/emulator-core/src/main/cpp/xenia/src/xenia/cpu/xex_module.h
@@ -790,6 +1169,27 @@ index 8a447b3dd..b92902e59 100644
    xe_shader_rules_spirv(xenia-gpu-vulkan ${CMAKE_CURRENT_SOURCE_DIR}/../shaders)
    xe_shader_rules_slang(xenia-gpu-vulkan ${CMAKE_CURRENT_SOURCE_DIR}/../shaders
                          TARGET spirv)
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_pipeline_cache.cc b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_pipeline_cache.cc
+index 254549498..00d44c4f6 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_pipeline_cache.cc
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_pipeline_cache.cc
+@@ -1309,7 +1309,15 @@ void VulkanPipelineCache::TranslateShadersForStorage(
+ 
+   std::vector<std::unique_ptr<xe::threading::Thread>> translation_threads;
+   for (size_t i = 0; i < thread_count; ++i) {
+-    auto thread = xe::threading::Thread::Create({}, translate_function);
++    // glslang's SPIR-V dump (spv::Builder::dump -> Module::dump -> Function::dump)
++  // walks the control flow graph recursively. This is a -O0 build, whose frames
++  // are much larger than the release Android build's, so the default 4 MiB stack
++  // overflows on large shaders - observed as SIGSEGV_MAPERR on a stack-adjacent
++  // page deep inside spv::Instruction::dump.
++  xe::threading::Thread::CreationParameters translate_params;
++  translate_params.stack_size = 32u * 1024u * 1024u;
++  auto thread =
++      xe::threading::Thread::Create(translate_params, translate_function);
+     if (thread) {
+       thread->set_name("Shader Translation");
+       translation_threads.push_back(std::move(thread));
 diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/kernel/kernel_state.cc b/emulator-core/src/main/cpp/xenia/src/xenia/kernel/kernel_state.cc
 index 032d6559d..519a6bd5b 100644
 --- a/emulator-core/src/main/cpp/xenia/src/xenia/kernel/kernel_state.cc
@@ -1004,10 +1404,25 @@ index 4da4e0815..5f07fe1df 100644
      last_set_thread_ = thread->handle();
      last_set_lr_ = uint32_t(thread->thread_state()->context()->lr);
 diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/kernel/xobject.cc b/emulator-core/src/main/cpp/xenia/src/xenia/kernel/xobject.cc
-index 91a4cc02e..0762fc329 100644
+index 91a4cc02e..eed2b5a2d 100644
 --- a/emulator-core/src/main/cpp/xenia/src/xenia/kernel/xobject.cc
 +++ b/emulator-core/src/main/cpp/xenia/src/xenia/kernel/xobject.cc
-@@ -362,7 +362,9 @@ void XObject::RecordCooperativeSignal(XObject* object) {
+@@ -221,7 +221,13 @@ void WaitExit(X_KTHREAD* kthread, X_STATUS result) {
+   // Runs on every cooperative wait exit, so it is also where the diagnostic
+   // wait shape is dropped. Unconditional: a thread that never waits again must
+   // not keep reporting a stale handle set.
+-  if (auto* self = XThread::GetCurrentThread()) {
++  //
++  // Host threads (e.g. ~Emulator -> GraphicsSystem::Shutdown ->
++  // CommandProcessor::Shutdown calling XObject::Wait) have no guest XThread:
++  // GetCurrentThread() would assert -> raise(SIGTRAP). Use the fiber accessor,
++  // which returns null there. The wait shape only exists for fiber-backed
++  // cooperative waits, so there is nothing to clear on a host thread.
++  if (auto* self = XThread::GetCurrentFiberThread()) {
+     self->clear_cooperative_wait_shape();
+   }
+   if (!kthread) {
+@@ -362,7 +368,9 @@ void XObject::RecordCooperativeSignal(XObject* object) {
    rec.handle = object->handle();
    rec.type = static_cast<uint8_t>(object->type());
    rec.uptime_ms = uint32_t(Clock::QueryGuestUptimeMillis());
@@ -1018,6 +1433,334 @@ index 91a4cc02e..0762fc329 100644
      rec.signaler_thread = thread->handle();
      if (auto* state = thread->thread_state()) {
        rec.signaler_lr = uint32_t(state->context()->lr);
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/memory.cc b/emulator-core/src/main/cpp/xenia/src/xenia/memory.cc
+index 5bf95420c..f199fe495 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/memory.cc
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/memory.cc
+@@ -22,12 +22,14 @@
+ #include "xenia/base/byte_stream.h"
+ #include "xenia/base/clock.h"
+ #include "xenia/base/cvar.h"
++#include "xenia/base/exception_handler.h"
+ #include "xenia/base/logging.h"
+ #include "xenia/base/math.h"
+ #include "xenia/base/threading.h"
+ 
+-#include "xenia/cpu/mmio_handler.h"
++#include <cstdio>
+ 
++#include "xenia/cpu/mmio_handler.h"
+ // TODO(benvanik): move xbox.h out
+ #include "xenia/xbox.h"
+ 
+@@ -233,12 +235,25 @@ bool Memory::Initialize() {
+     }
+ #else
+     assert(cvars::mmap_address_high>=1&&cvars::mmap_address_high<=124);
+-    auto mapping_base = reinterpret_cast<uint8_t*>(uint64_t(cvars::mmap_address_high+0) << 32);
+-    if (!MapViews(mapping_base)) {
+-        mapping_base_ = mapping_base;
+-    } else {
+-        assert_always();
+-        return false;
++    auto try_base = [&](uint64_t base) -> bool {
++      auto candidate = reinterpret_cast<uint8_t*>(base);
++      if (!MapViews(candidate)) {
++        mapping_base_ = candidate;
++        return true;
++      }
++      return false;
++    };
++    // The configured fixed base can be rejected by the OS (measured on OHOS:
++    // MapFileView errno=14 at 0x800000000), and the old single-attempt form
++    // asserted here, killing the boot. Try the configured base, then fall back
++    // to scanning 2^n bases like the generic non-xendroid path.
++    if (!try_base(uint64_t(cvars::mmap_address_high) << 32)) {
++      for (size_t n = 32; n < 64; n++) {
++        if (try_base(uint64_t(1) << n)) {
++          XELOGW("Memory: fallback mapping base 0x{:016X}", uint64_t(1) << n);
++          break;
++        }
++      }
+     }
+ #endif
+   if (!mapping_base_) {
+@@ -672,9 +687,69 @@ cpu::MMIORange* Memory::LookupVirtualMappedRange(uint32_t virtual_address) {
+   return mmio_handler_->LookupRange(virtual_address);
+ }
+ 
++#if XE_PLATFORM_OHOS
++namespace {
++
++// Fixed, lock-free per-page access violation counters. A page that keeps
++// faulting after the handler claimed to have handled it means the protection
++// was never actually lifted (or was re-armed inside the invalidation callback
++// while we were retrying) - otherwise this only manifests as a silent crash.
++constexpr uint32_t kAvDiagnosticSlots = 512;
++
++struct AvDiagnosticSlot {
++  std::atomic<uint32_t> page{0};
++  std::atomic<uint32_t> count{0};
++};
++
++AvDiagnosticSlot g_av_diagnostic_slots[kAvDiagnosticSlots];
++
++uint32_t BumpAccessViolationCount(uint32_t host_page) {
++  const uint32_t start = host_page % kAvDiagnosticSlots;
++  for (uint32_t probe = 0; probe < 8; ++probe) {
++    AvDiagnosticSlot& slot =
++        g_av_diagnostic_slots[(start + probe) % kAvDiagnosticSlots];
++    const uint32_t stored = slot.page.load(std::memory_order_relaxed);
++    if (stored == host_page) {
++      return slot.count.fetch_add(1, std::memory_order_relaxed) + 1;
++    }
++    if (stored == 0) {
++      uint32_t expected = 0;
++      if (slot.page.compare_exchange_strong(expected, host_page,
++                                            std::memory_order_relaxed)) {
++        slot.count.store(1, std::memory_order_relaxed);
++        return 1;
++      }
++      if (expected == host_page) {
++        return slot.count.fetch_add(1, std::memory_order_relaxed) + 1;
++      }
++    }
++  }
++  return 0;
++}
++
++}  // namespace
++#endif  // XE_PLATFORM_OHOS
++
+ bool Memory::AccessViolationCallback(
+     global_unique_lock_type global_lock_locked_once, void* host_address,
+     bool is_write) {
++#if XE_PLATFORM_OHOS
++  {
++    const uint32_t repeat_count = BumpAccessViolationCount(static_cast<uint32_t>(
++        reinterpret_cast<uintptr_t>(host_address) >> 12));
++    // Powers of two only: one fault is normal write-watch traffic, a repeat
++    // means the page was still (or again) read-only when we retried.
++    if (repeat_count >= 2 && (repeat_count & (repeat_count - 1)) == 0) {
++      char diag[192];
++      const int diag_length = std::snprintf(
++          diag, sizeof(diag), "OHOS-AV-repeat: host=%p count=%u is_write=%d\n",
++          host_address, repeat_count, is_write ? 1 : 0);
++      if (diag_length > 0) {
++        WriteExceptionDiagnostic(diag);
++      }
++    }
++  }
++#endif
+   // Access via physical_membase_ is special, when need to bypass everything
+   // (for instance, for a data provider to actually write the data) so only
+   // triggering callbacks on virtual memory regions.
+@@ -682,11 +757,53 @@ bool Memory::AccessViolationCallback(
+           reinterpret_cast<size_t>(virtual_membase_) ||
+       reinterpret_cast<size_t>(host_address) >=
+           reinterpret_cast<size_t>(physical_membase_)) {
++    // No XELOG*: inside the SIGSEGV handler, and xenia's logging allocates.
+     return false;
+   }
+   uint32_t virtual_address = HostToGuestVirtual(host_address);
+   BaseHeap* heap = LookupHeap(virtual_address);
+-  if (heap->heap_type() != HeapType::kGuestPhysical) {
++  if (!heap && virtual_address >= 0x7F000000 && virtual_address < 0x80000000) {
++    // The GPU writeback window [0x7F000000, 0x80000000) is a view of physical
++    // 0x00000000..0x00FFFFFF but has no heap of its own, so LookupHeap returns
++    // nullptr for it. Dereferencing that here happens inside the SIGSEGV
++    // handler, which turned every watched access in the window into a nested
++    // fault loop (measured on device: 5000+ faults, 7800+ platform DFH calls).
++    //
++    // It is also a *separate VMA* from the vA/vC/vE aliases that the write
++    // watch is armed on, so "unprotecting" an alias never makes this view
++    // writable and the retried store faults forever (measured: the same two
++    // addresses repeating 10k+ times with no refuse/forceRW record). Make the
++    // window's own page writable before retrying.
++    uintptr_t host_page = reinterpret_cast<uintptr_t>(host_address) &
++                          ~static_cast<uintptr_t>(system_page_size_ - 1);
++    const bool window_ok = xe::memory::Protect(
++        reinterpret_cast<void*>(host_page),
++        static_cast<size_t>(system_page_size_),
++        xe::memory::PageAccess::kReadWrite);
++#if XE_PLATFORM_OHOS
++    {
++      // Decisive record: can the window's own page be made writable at all?
++      // ok=1 but still faulting => something re-protects it immediately;
++      // ok=0 => the kernel refuses, so the window must never be watched.
++      static std::atomic<uint32_t> window_log_count{0};
++      if (window_log_count.fetch_add(1, std::memory_order_relaxed) < 64) {
++        char diag[160];
++        const int diag_length = std::snprintf(
++            diag, sizeof(diag), "OHOS-window: host_page=%p ok=%d gva=%08X\n",
++            reinterpret_cast<void*>(host_page), window_ok ? 1 : 0,
++            virtual_address);
++        if (diag_length > 0) {
++          WriteExceptionDiagnostic(diag);
++        }
++      }
++    }
++#endif
++    virtual_address = 0xA0000000u + (virtual_address - 0x7F000000u);
++    heap = LookupHeap(virtual_address);
++  }
++  if (!heap || heap->heap_type() != HeapType::kGuestPhysical) {
++    // No XELOG* here: this runs inside the SIGSEGV handler and xenia's logging
++    // allocates (see the note in the access violation path).
+     return false;
+   }
+ 
+@@ -2167,7 +2284,11 @@ template <bool enable_invalidation_notifications, bool enable_data_providers>
+ XE_NOINLINE void PhysicalHeap::EnableAccessCallbacksInner(
+     const uint32_t system_page_first, const uint32_t system_page_last,
+     xe::memory::PageAccess protect_access) XE_RESTRICT {
+-  uint8_t* protect_base = membase_ + heap_base_;
++  // host_address_offset() must be included - see the note in TriggerCallbacks.
++  // Omitting it locks the neighbouring page for heaps with a nonzero offset
++  // (the 4 KB emulated for vE0000000), so the armed flags never match the page
++  // the guest actually faults on.
++  uint8_t* protect_base = membase_ + heap_base_ + host_address_offset();
+   uint32_t protect_system_page_first = UINT32_MAX;
+ 
+   SystemPageFlagsBlock* XE_RESTRICT sys_page_flags = system_page_flags_.data();
+@@ -2341,7 +2462,8 @@ bool PhysicalHeap::TriggerCallbacks(
+     // read-only if it also has a write watch, otherwise restore the guest
+     // protection. Then clear the read watch.
+     if (unprotect) {
+-      uint8_t* protect_base = membase_ + heap_base_;
++      // host_address_offset() must be included here too (see TriggerCallbacks).
++      uint8_t* protect_base = membase_ + heap_base_ + host_address_offset();
+       for (uint32_t i = system_page_first; i <= system_page_last; ++i) {
+         uint64_t bit = uint64_t(1) << (i & 63);
+         SystemPageFlagsBlock& flags = system_page_flags_[i >> 6];
+@@ -2399,6 +2521,69 @@ bool PhysicalHeap::TriggerCallbacks(
+     // MMIOHandler::ExceptionCallback. If the guest doesn't permit the write
+     // either, retrying it faults forever, so report it unhandled and let the
+     // violation surface.
++#if XE_PLATFORM_OHOS
++    // No XELOG*: inside the SIGSEGV handler, and xenia's logging allocates.
++    {
++      // Keep the informative records inside the 256 KB tail window: the
++      // fault-loop noise (OHOS-fault-enter / OHOS-AV-repeat) is bounded
++      // separately and must not push these out.
++      static std::atomic<uint32_t> refuse_log_count{0};
++      if (refuse_log_count.fetch_add(1, std::memory_order_relaxed) < 64) {
++        char diag[256];
++        const int diag_length = std::snprintf(
++            diag, sizeof(diag),
++            "OHOS-TC-refuse: no watch heap_base=0x%08X rel=0x%08X sys_page=%u "
++            "guest_access=%d is_write=%d\n",
++            heap_base_, heap_relative_address, system_page_first,
++            static_cast<int>(SystemPageGuestAccess(system_page_first)),
++            is_write ? 1 : 0);
++        if (diag_length > 0) {
++          WriteExceptionDiagnostic(diag);
++        }
++      }
++    }
++#endif
++    // Trust the host, not the bookkeeping. The watch flags for this page can be
++    // cleared by another path (a wider unwatch with unprotect=false) while the
++    // host page stays read-only, and then this branch would claim the store is
++    // fine and tell the kernel to retry it - faulting forever, which is exactly
++    // the loop seen on device (same pc/fault pair repeating).
++    if (is_write &&
++        SystemPageGuestAccess(system_page_first) ==
++            xe::memory::PageAccess::kReadWrite) {
++      uint8_t* writable_base =
++          membase_ + heap_base_ + host_address_offset();
++      void* writable_target =
++          writable_base + (system_page_first << system_page_shift_);
++      const size_t writable_length =
++          static_cast<size_t>(system_page_last + 1 - system_page_first)
++          << system_page_shift_;
++      const bool writable_ok = xe::memory::Protect(
++          writable_target, writable_length,
++          xe::memory::PageAccess::kReadWrite);
++#if XE_PLATFORM_OHOS
++      {
++        // Crash-safe: if the page still faults after this, the record shows
++        // whether the mprotect targeted the right page and what it returned.
++        static std::atomic<uint32_t> force_rw_log_count{0};
++        if (force_rw_log_count.fetch_add(1, std::memory_order_relaxed) < 128) {
++          char diag[192];
++          const int diag_length = std::snprintf(
++              diag, sizeof(diag),
++              "OHOS-forceRW: target=%p len=0x%llX sys=%u..%u ok=%d\n",
++              writable_target,
++              static_cast<unsigned long long>(writable_length),
++              system_page_first, system_page_last, writable_ok ? 1 : 0);
++          if (diag_length > 0) {
++            WriteExceptionDiagnostic(diag);
++          }
++        }
++      }
++#endif
++      if (writable_ok) {
++        return true;
++      }
++    }
+     return SystemPageGuestAccess(system_page_first) ==
+            xe::memory::PageAccess::kReadWrite;
+   }
+@@ -2421,6 +2606,24 @@ bool PhysicalHeap::TriggerCallbacks(
+       heap_size_ - (physical_address_start - physical_address_offset));
+   uint32_t unwatch_first = 0;
+   uint32_t unwatch_last = UINT32_MAX;
++#if XE_PLATFORM_OHOS
++  // No XELOG*: inside the SIGSEGV handler, and xenia's logging allocates. The
++  // watch-hit record goes to the crash-safe file sink instead.
++  {
++    static std::atomic<uint32_t> watch_hit_log_count{0};
++    if (watch_hit_log_count.fetch_add(1, std::memory_order_relaxed) < 512) {
++      char diag[192];
++      const int diag_length = std::snprintf(
++          diag, sizeof(diag),
++          "OHOS-TC-hit: type=%d rel=0x%08X sys=%u..%u is_write=%d\n",
++          static_cast<int>(heap_type()), heap_relative_address,
++          system_page_first, system_page_last, is_write ? 1 : 0);
++      if (diag_length > 0) {
++        WriteExceptionDiagnostic(diag);
++      }
++    }
++  }
++#endif
+   for (auto invalidation_callback :
+        memory_->physical_memory_invalidation_callbacks_) {
+     std::pair<uint32_t, uint32_t> callback_unwatch_range =
+@@ -2467,7 +2670,12 @@ bool PhysicalHeap::TriggerCallbacks(
+ 
+   // Unprotect ranges that need unprotection.
+   if (unprotect) {
+-    uint8_t* protect_base = membase_ + heap_base_;
++    // host_address_offset() must be included: heaps whose guest base is
++    // offset from the host view (the 4 KB offset emulated for vE0000000, see
++    // GetPhysicalAddress / map_info) otherwise get mprotected 4 KB off - the
++    // faulting page stays read-only while the neighbouring page is unlocked,
++    // which showed up as a page faulting forever with forceRW reporting ok=1.
++    uint8_t* protect_base = membase_ + heap_base_ + host_address_offset();
+     uint32_t unprotect_system_page_first = UINT32_MAX;
+     for (uint32_t i = system_page_first; i <= system_page_last; ++i) {
+       // Check if need to allow writing to this page. Read-watched pages are
+@@ -2478,6 +2686,18 @@ bool PhysicalHeap::TriggerCallbacks(
+            (uint64_t(1) << (i & 63))) != 0;
+       if (unprotect_page) {
+         if (SystemPageGuestAccess(i) != xe::memory::PageAccess::kReadWrite) {
++#if XE_PLATFORM_OHOS
++          {
++            char diag[128];
++            const int diag_length = std::snprintf(
++                diag, sizeof(diag),
++                "OHOS-TC-skip-unprotect: sys_page=%u guest_access=%d\n", i,
++                static_cast<int>(SystemPageGuestAccess(i)));
++            if (diag_length > 0) {
++              WriteExceptionDiagnostic(diag);
++            }
++          }
++#endif
+           unprotect_page = false;
+         }
+       }
 diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/ui/CMakeLists.txt b/emulator-core/src/main/cpp/xenia/src/xenia/ui/CMakeLists.txt
 index 4a8bc46a4..b12683b9c 100644
 --- a/emulator-core/src/main/cpp/xenia/src/xenia/ui/CMakeLists.txt
@@ -1146,10 +1889,10 @@ index 3d64036e9..8b9c26d49 100644
    Surface(const Surface& surface) = delete;
 diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/ui/surface_ohos.cc b/emulator-core/src/main/cpp/xenia/src/xenia/ui/surface_ohos.cc
 new file mode 100644
-index 000000000..fbe3bfca7
+index 000000000..2a2bb60a5
 --- /dev/null
 +++ b/emulator-core/src/main/cpp/xenia/src/xenia/ui/surface_ohos.cc
-@@ -0,0 +1,34 @@
+@@ -0,0 +1,38 @@
 +/**
 + ******************************************************************************
 + * Xenia : Xbox 360 Emulator Research Project                                 *
@@ -1170,8 +1913,12 @@ index 000000000..fbe3bfca7
 +    return false;
 +  }
 +  int32_t width = 0, height = 0;
-+  if (OH_NativeWindow_NativeWindowHandleOpt(window_, GET_BUFFER_GEOMETRY, &width,
-+                                            &height) != 0) {
++  // GET_BUFFER_GEOMETRY's variable parameters are (height, width) in that
++  // order - see native_window/external_window.h. Passing them as (width,
++  // height) transposes the surface (1280x720 read back as 720x1280), which
++  // makes the presenter build a portrait swapchain and stretch the image.
++  if (OH_NativeWindow_NativeWindowHandleOpt(window_, GET_BUFFER_GEOMETRY, &height,
++                                            &width) != 0) {
 +    return false;
 +  }
 +  if (width <= 0 || height <= 0) {
