@@ -1074,10 +1074,10 @@ hdc -t <sn> file recv "/storage/media/100/local/files/Docs/Download/hx360e-log-<
 
 ### 8.5 下一步（按优先级）
 
-1. **修 `log_level=2` 崩溃**（P0，所有"先量再改"的前提）：`log_level=2` 会让 xenia 的
-   SPIR-V dump 爆栈（fork 只给**翻译线程**加了 32MB 栈 ✗，dump 在别的线程上）。
-   二选一：给 SPIR-V dump 加独立开关，或把 dump 所在线程的栈也提高。
-   修好后才能拿到 `log_gpu_frame_time_breakdown` 的 **pass 分桶（VS/PS/带宽）**，
+1. **打通分桶仪表**（P0）：开关本身有效 ✓，卡在输出通道 ✗（见 §8.7）。
+   最小改法：fork 里把 `vulkan_command_processor.cc` 的 `VkFrameSync` / `VkPassTime`
+   两条报告从 `XELOGI` 改成移植层的 `HXLOG`（或直接 `OH_LOG_Print`）→ 走已验证可用的
+   hilog 通道 ✓。改完才有 pass 分桶（GPU 各 pass 耗时、按 WxH 分桶 + xfer 标记），
    这直接决定 K2A（顶点取数特化，400 行）值不值得投。
 2. **全分辨率下的便宜 A/B**（cvar 级，不需重编 native）：
    - `native_2x_msaa`：guest 要 2x 时可能在做 **4x 模拟**（RT 带宽 ×4 ✗）——在 Pura X 上测过
@@ -1098,10 +1098,89 @@ hdc -t <sn> file recv "/storage/media/100/local/files/Docs/Download/hx360e-log-<
   （导出用 `[System.IO.File]::WriteAllText(..., UTF8Encoding($false))`，UTF-8 **无 BOM**）。
 - **编译代价**：`base/*.h`、`platform.h`、`mutex.h` 这类核心头 = **全量重编 4-8 分钟** ✗；
   普通 `.cc` 单文件 6-15 秒 ✓。改核心头前先查清分支/条件，一次改到位。
-- **日志**：`log_level=2` 会崩 ✗；hilog 对**高频日志**和 **WARN 配额**会整段丢弃 ✗
-  → 诊断统一走**我们自己探针的 1/s 行**（`present probe: ... xeg=[...] lock hold=...`）。
+- **日志（2026-09-13 重测后修正）**：`--log_level=2` **不是**元凶 —— `log_level` 默认就是
+  2=info（`logging.cc:74-77`），`dump_shaders` 默认空（`gpu_flags.cc:42`），所以传它等于空操作。
+  真凶是**偶发的启动期崩溃**（`hx360e-boot` 线程，见 §8.7）。xenia 的 `XELOGI` 只有两条出路：
+  ① hilog（需 `log_to_logcat=true`，**实测会崩** ✗）；② `xe.log` 文件（**懒刷新**，50 秒只落 1 行 ✗）。
+  唯一稳定通道 = **我们探针的 1/s `HXLOG` 行**（`present probe: ... xeg=[...] lock hold=...`）✓。
 - **命令行 > `--config`**（`cvar.h:230-244`：commandline → game → global），
   所以「设置页可改的项」**不能**再硬编码进启动参数 ✗。
 - **设备坐标**：手机截图 1260x2844、PC 3120x2080；点击坐标 = 截图显示坐标 ×（真实宽/显示宽）。
   点游戏前**必须先看是哪个游戏**（火影/LIMBO/DmC 行位置不同，我因此错过两次 ✗）。
+
+### 8.7 分桶仪表通路调查（2026-09-13，重要）
+
+**结论：`--log_gpu_frame_time_breakdown=true` 本身有效，但输出通道被封死；需一次 fork 小改。**
+
+调查过程（都已验证，别再重复）：
+
+| 假设 | 结果 |
+| --- | --- |
+| `log_level=2` 触发 SPIR-V dump 爆栈 | ❌ **误判**。`log_level` 默认即 2=info；`dump_shaders` 默认空。 |
+| 仪表开关没生效 | ❌ 生效 ✓。`xe.log` 里抓到了 `VkPassId:` 行。 |
+| hilog 被 Mali `MsyncLeakTest` 警告刷爆挤掉 | ❌ 不是主因（`hilog -r` 后立刻抓仍无）。 |
+| `XELOGI` → hilog 需要 `log_to_logcat=true` | ✅ 是原因之一；**但加上它会让 `hx360e-boot` 线程崩** ✗，不能用。 |
+| 改读 `xe.log` 文件 | ⚠️ 能读到旧内容，但**懒刷新**：新会话 50s 只落 1 行 ✗（55MB 是跨会话攒的）。 |
+| 删 `xe.log` 让新会话纯净 | ⚠️ 运行中的 xenia 持有旧 fd，写进已删 inode；**重启 app 后**才会新建 ✓。 |
+
+**副产品发现（已在 4xMSAA 全分辨率下抓到）**：
+
+```
+VkPassId: 640x1024  <- depth RT @ 0t, <16t>, 4xMSAA, kD24S8
+VkPassId: 1280x2048 <- (none)
+```
+
+即 guest 渲染目标是 **1280x2048**（≈1.6 倍 720p 像素 ✗）+ 640x1024 的 4xMSAA 深度 ✓
+→ 与「像素/带宽受限、约 80% 帧时间随像素数变化」的模型一致 ✓，也说明
+`native_2x_msaa`（是否在用 4x 模拟 2x）值得优先 A/B ✓。
+
+**设备侧可读路径（有用）**：
+`/data/app/el2/100/base/com.sddswsf.hx360e/haps/entry/files/logs/xe.log`（`-rw-rw-rw-` ✓ 可读可写）
+—— 而 `/data/storage/el2/...` 那条（应用视角路径）`Permission denied` ✗。
+
+**另记**：启动期崩溃是**偶发**的（同一套参数连续跑，会出现 pid 空 ✗ / 存活 ✓），
+判 DEAD 前最好连跑两次再下结论。
+
+### 8.8 首次拿到全分辨率 GPU 分桶（2026-09-13，手机 Pura 70 Pro / LIMBO）
+
+**解法**：fork `vulkan_command_processor.cc` 里给 OHOS 加 `HXFrameStatsLog()`（直接
+`OH_LOG_Print`，fmt 格式化），把 `VkFrameSync` / `VkPassTime` 两条报告从 `XELOGI` 改过去 ✓
+→ 单文件重编 25s ✓，实测能稳定抓到 ✓。（`VkPassId` 保持 `XELOGI`，它在 `xe.log` 里本来就能看到。）
+
+**菜单/轻场景**（≈30 帧/s）：
+```
+VkFrameSync: gpu exec avg=0.6-1.9ms | submit->fence avg=63-92ms | blocking=0.3/帧
+```
+→ **GPU 几乎不干活但帧仍 64ms** ⇒ 轻场景不是 GPU 受限 ✗（呈现/等待为主）。
+
+**游戏内重场景**（≈8 帧/s，GPU 打满 `gap=0.2ms`）：
+```
+VkFrameSync: 8 frames | gpu exec avg=49.8ms max=141.9ms | resolve_ms=18.53ms/帧 (19 次/帧)
+             await=0.0ms blocking=0.3 | draws=152 rp_begins=40
+VkPassTime: 1280x2048      : 48.69ms/帧 (16.5pass 64draw/帧, 2.951ms/pass)
+VkPassTime:  320x2048      : 32.12ms/帧 (10.2pass 83draw/帧, 3.133ms/pass)
+VkPassTime: xfer 320x2048  : 1.97ms/帧
+VkPassTime: xfer 1280x2048 : 0.64ms/帧
+```
+
+**结论（全分辨率优化的真正靶子）**：
+
+1. **host RT 是 `Wx2048`，比 guest 需要的 720 高 2.8 倍** ✗✗
+   —— 分桶键是 host extent，两个桶都是 2048 高（`scissor<=1280x720` / `320x8192`）
+   → 每个 pass 都在 1280x2048=2.6M 像素上跑，而 guest 只要 0.9M。
+   这正是文档 `render_area_dirty_extent`（已搁置）要解决的问题 ✓；但**我们实测开它直接崩** ✗
+   → **修正它 = 最高价值的一步**（潜在 ~2.8x 像素削减）。注意文档在 Adreno 650/Turnip 上
+   "无效"是因为驱动已跳过空 tile，**Maleoon 上结论未验证** ✗。
+2. **每个 pass ≈ 3ms，而每 pass 只有 4-8 个 draw** ✗ → 不是 draw-call 瓶颈，
+   更像 **4xMSAA 的 EDRAM 带宽**（1280x2048×4B×4MSAA×RW ≈ 84MB/pass ÷ ~50GB/s ≈ 1.7ms ✓ 量级吻合）
+   → `native_2x_msaa`（是否在用 4x 模拟 2x）A/B **优先做** ✓。
+3. **resolve 19 次/帧、约 18-20ms/帧（≈30-40% 的 GPU 时间）** ✗✓ → 直读 resolve 适配
+   （K1）在手机上是负优化 ✗ 已关，但**减少 resolve 次数**（bucketing/合并）是第二个靶子 ✓。
+4. `xfer`（ownership transfer）合计 ~2.6ms/帧 ✗ 不算大 ✓ 暂不管。
+5. 每帧 16.5 个 pass / 64 draws ✗ = **4 draws/pass** ⇒ pass 数量本身偏高 ✓ 值得看能否合并 ✗。
+
+**顺带修正的旧结论**：
+- 之前说"80% 帧时间随像素数变化" ✓ 仍成立，但**机制**是 pass 数 × 4xMSAA×2048 高的 RT ✗，
+  不是 draw 数（仅 152/帧 ✓）。
+- 轻场景 GPU 只占 1-2ms ✗ ⇒ 若某游戏/场景卡在 60ms，要先确认是 GPU 还是呈现/等待 ✗。
 

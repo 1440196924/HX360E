@@ -383,8 +383,14 @@ struct Home {
       '--hx360e_render_scale_den_y=1',
       // 先回到已知正确的 dump resolve 路径（隔离直读路径这个变量）
       '--vulkan_direct_host_resolve=false',
-      // 注意：log_level=2 会让 xenia 的 SPIR-V dump 爆栈崩溃（见 fork 注释），
-      // 所以 pass 分桶仪表用不了；这里只保留我们自己的探针。
+      // pass 分桶仪表：一个 bool 同时打开 GPU timestamp 采集 + 4 张表
+      // （GpuFrame / VkFrameSync / VkPassId / VkPassTime，均 1/s）。
+      // 注意 log_level 默认就是 2=info，不需要传；dump_shaders 默认空，
+      // 所以不会触发 SPIR-V dump 爆栈。
+      '--log_gpu_frame_time_breakdown=true',
+      // 注意：不要传 --log_to_logcat=true —— 实测会让 hx360e-boot 线程崩。
+      // xenia 的 XELOGI 只进 xe.log 文件（<filesDir>/logs/xe.log），
+      // 要看就用应用内「导出日志」，或 hdc 直接读（见 TODO）。
       '--guest_scheduler_stats=true',
       // 系统级超分（XEngine 1.5x）改由设置项 Vulkan|hx360e_xeg_spatial_upscale
       // 控制（默认开）。这里不再传参：命令行优先级高于 --config，传了就会盖掉
