@@ -764,6 +764,127 @@ index 43a50c3bc..fb33efe66 100644
    std::lock_guard guard(g_mapped_file_ranges_mutex);
    mapped_file_ranges.push_back({reinterpret_cast<uintptr_t>(result),
                                  reinterpret_cast<uintptr_t>(result) + length});
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/base/mutex.cc b/emulator-core/src/main/cpp/xenia/src/xenia/base/mutex.cc
+index bd09b1e3a..fdc704667 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/base/mutex.cc
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/base/mutex.cc
+@@ -263,10 +263,17 @@ bool xe_fast_mutex::try_lock() {
+ }
+ 
+ #endif
++#if XE_PLATFORM_OHOS
++hx360e_profiled_global_mutex& global_critical_region::mutex() {
++  static hx360e_profiled_global_mutex global_mutex;
++  return global_mutex;
++}
++#else
+ global_mutex_type& global_critical_region::mutex() {
+   static global_mutex_type global_mutex;
+   return global_mutex;
+ }
++#endif
+ 
+ bool global_critical_region::is_held_by_current_thread() {
+   return mutex().is_held_by_current_thread();
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/base/mutex.h b/emulator-core/src/main/cpp/xenia/src/xenia/base/mutex.h
+index 6fd9f054a..6efb78951 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/base/mutex.h
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/base/mutex.h
+@@ -217,7 +217,82 @@ struct null_mutex {
+   static bool try_lock() { return true; }
+ };
+ 
++// HX360E: 全局临界区（进程单例）的持锁/等锁画像 —— KERNEL-PERFORMANCE.md 的
++// K7 第一步（先画像再决定要不要拆分这把锁）。放在平台分支之外，包一层平台实现：
++// 无论 OHOS 走 generic 还是 Linux fast mutex 分支都成立。
++// 默认关闭，关闭时每次 lock/unlock 只多一次 relaxed 载入；由移植侧打开并每秒打印。
++#if XE_PLATFORM_OHOS
++struct Hx360eLockProfile {
++  std::atomic<uint64_t> hold_ns_total{0};
++  std::atomic<uint64_t> hold_ns_max{0};
++  std::atomic<uint64_t> hold_count{0};
++  std::atomic<uint64_t> wait_ns_total{0};
++  std::atomic<uint64_t> wait_ns_max{0};
++};
++inline Hx360eLockProfile& Hx360eLockProfileStats() {
++  static Hx360eLockProfile stats;
++  return stats;
++}
++inline std::atomic<bool>& Hx360eLockProfileEnabled() {
++  static std::atomic<bool> enabled{false};
++  return enabled;
++}
++inline uint64_t Hx360eLockProfileNowNs() {
++  return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
++                      std::chrono::steady_clock::now().time_since_epoch())
++                      .count());
++}
++inline void Hx360eLockProfileRecord(bool is_wait, uint64_t ns) {
++  Hx360eLockProfile& stats = Hx360eLockProfileStats();
++  std::atomic<uint64_t>& total =
++      is_wait ? stats.wait_ns_total : stats.hold_ns_total;
++  std::atomic<uint64_t>& maximum =
++      is_wait ? stats.wait_ns_max : stats.hold_ns_max;
++  total.fetch_add(ns, std::memory_order_relaxed);
++  if (!is_wait) {
++    stats.hold_count.fetch_add(1, std::memory_order_relaxed);
++  }
++  uint64_t previous = maximum.load(std::memory_order_relaxed);
++  while (ns > previous && !maximum.compare_exchange_weak(
++                              previous, ns, std::memory_order_relaxed)) {
++  }
++}
++
++class hx360e_profiled_global_mutex : public global_mutex_type {
++ public:
++  void lock() {
++    const bool profile =
++        Hx360eLockProfileEnabled().load(std::memory_order_relaxed);
++    const uint64_t wait_start_ns = profile ? Hx360eLockProfileNowNs() : 0;
++    global_mutex_type::lock();
++    if (profile) {
++      const uint64_t now_ns = Hx360eLockProfileNowNs();
++      Hx360eLockProfileRecord(true, now_ns - wait_start_ns);
++      hx360e_hold_start_ns_ = now_ns;
++    }
++  }
++  void unlock() {
++    if (hx360e_hold_start_ns_) {
++      Hx360eLockProfileRecord(false,
++                              Hx360eLockProfileNowNs() - hx360e_hold_start_ns_);
++      hx360e_hold_start_ns_ = 0;
++    }
++    global_mutex_type::unlock();
++  }
++  bool try_lock() { return global_mutex_type::try_lock(); }
++  bool is_held_by_current_thread() const {
++    return global_mutex_type::is_held_by_current_thread();
++  }
++
++ private:
++  // 只有最外层持有时才置位；start 戳仅由持有线程读写，无需原子。
++  uint64_t hx360e_hold_start_ns_ = 0;
++};
++
++using global_unique_lock_type = std::unique_lock<hx360e_profiled_global_mutex>;
++#else
+ using global_unique_lock_type = std::unique_lock<global_mutex_type>;
++#endif
+ // The global critical region mutex singleton.
+ // This must guard any operation that may suspend threads or be sensitive to
+ // being suspended such as global table locks and such.
+@@ -259,7 +334,11 @@ using global_unique_lock_type = std::unique_lock<global_mutex_type>;
+ class global_critical_region {
+  public:
+   constexpr global_critical_region() {}
++#if XE_PLATFORM_OHOS
++  static hx360e_profiled_global_mutex& mutex();
++#else
+   static global_mutex_type& mutex();
++#endif
+ 
+   // True if the calling host thread currently holds the region. Always false on
+   // the std::recursive_mutex fallback, which has no owner query.
 diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/base/platform.h b/emulator-core/src/main/cpp/xenia/src/xenia/base/platform.h
 index adeffedd3..8eeecc94a 100644
 --- a/emulator-core/src/main/cpp/xenia/src/xenia/base/platform.h

@@ -10,6 +10,7 @@
 #define LOG_TAG "HX360E"
 
 #include "xenia/ui/surface_ohos.h"
+#include "xenia/base/mutex.h"
 
 #include "ohos_emulator.h"
 #include "xeg_spatial_upscale.h"
@@ -75,11 +76,35 @@ void OhosWindowedAppContext::MainLoop() {
         const uint32_t paints = paint_count_;
         paint_count_ = 0;
         probe_report_time_ = now;
+        // 全局锁画像（KERNEL-PERFORMANCE.md K7 第一步）：第一次进这里时打开采样，
+        // 每秒取一次并清零，得到"每秒持有/等待全局锁的总时长与最长一次"。
+        xe::Hx360eLockProfileEnabled().store(true, std::memory_order_relaxed);
+        xe::Hx360eLockProfile& lock_profile = xe::Hx360eLockProfileStats();
+        const uint64_t lock_hold_total_ns =
+            lock_profile.hold_ns_total.exchange(0, std::memory_order_relaxed);
+        const uint64_t lock_hold_max_ns =
+            lock_profile.hold_ns_max.exchange(0, std::memory_order_relaxed);
+        const uint32_t lock_hold_count = uint32_t(
+            lock_profile.hold_count.exchange(0, std::memory_order_relaxed));
+        const uint64_t lock_wait_total_ns =
+            lock_profile.wait_ns_total.exchange(0, std::memory_order_relaxed);
+        const uint64_t lock_wait_max_ns =
+            lock_profile.wait_ns_max.exchange(0, std::memory_order_relaxed);
         HXLOG("present probe: paints/s=%{public}u guestInstantFps=%{public}.1f "
-              "guestAvgFps=%{public}.1f frameMs=%{public}.1f xeg=[%{public}s]",
+              "guestAvgFps=%{public}.1f frameMs=%{public}.1f xeg=[%{public}s] "
+              "lock hold=%{public}.2fms/ea max=%{public}.2fms n=%{public}u "
+              "wait=%{public}.2fms/ea max=%{public}.2fms",
               paints, hx360e::InstantFps(), hx360e::AverageFps(),
               hx360e::LastFrameTimeMs(),
-              hx360e::XegSpatialUpscale::GetStatusForDisplay().c_str());
+              hx360e::XegSpatialUpscale::GetStatusForDisplay().c_str(),
+              lock_hold_count
+                  ? double(lock_hold_total_ns) / 1e6 / double(lock_hold_count)
+                  : 0.0,
+              double(lock_hold_max_ns) / 1e6, lock_hold_count,
+              lock_hold_count
+                  ? double(lock_wait_total_ns) / 1e6 / double(lock_hold_count)
+                  : 0.0,
+              double(lock_wait_max_ns) / 1e6);
       }
     }
   }
