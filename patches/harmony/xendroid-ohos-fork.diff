@@ -2207,10 +2207,46 @@ index 254549498..b6f2d7c65 100644
    pipeline_create_info.stageCount = shader_stage_count;
    pipeline_create_info.pStages = shader_stages.data();
 diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_render_target_cache.cc b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_render_target_cache.cc
-index 88f2eb068..aac01f47d 100644
+index 88f2eb068..36ffaf1ca 100644
 --- a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_render_target_cache.cc
 +++ b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_render_target_cache.cc
-@@ -2491,7 +2491,8 @@ bool VulkanRenderTargetCache::TryDirectHostResolveCopy(
+@@ -8,6 +8,7 @@
+  */
+ 
+ #include "xenia/gpu/vulkan/vulkan_render_target_cache.h"
++#include "xenia/gpu/vulkan/hx_diag_log.h"
+ 
+ #include <algorithm>
+ #include <set>
+@@ -698,6 +699,27 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
+     msaa_2x_no_attachments_supported_ = false;
+   }
+ 
++  // Which MSAA path the guest's 2x requests will take - 2x natively, or 4x
++  // emulation (which doubles render target bandwidth and forces per-sample
++  // shading). On a fragment/bandwidth-bound device this is the difference
++  // between the guest's requested sample count and twice the traffic.
++  HX_DIAG_LOG(
++      "VulkanRenderTargetCache: MSAA 2x attachments {}, no-attachments {} "
++      "(fbColor={:X} fbDepth={:X} fbStencil={:X} fbNoAtt={:X} imgColor={:X} "
++      "imgDepth={:X} imgStencil={:X} imgInteger={:X}) => guest 2x MSAA will "
++      "use the {} path",
++      msaa_2x_attachments_supported_ ? "supported" : "unsupported",
++      msaa_2x_no_attachments_supported_ ? "supported" : "unsupported",
++      device_properties.framebufferColorSampleCounts,
++      device_properties.framebufferDepthSampleCounts,
++      device_properties.framebufferStencilSampleCounts,
++      device_properties.framebufferNoAttachmentsSampleCounts,
++      device_properties.sampledImageColorSampleCounts,
++      device_properties.sampledImageDepthSampleCounts,
++      device_properties.sampledImageStencilSampleCounts,
++      device_properties.sampledImageIntegerSampleCounts,
++      msaa_2x_attachments_supported_ ? "native 2x" : "4x emulation");
++
+   // Descriptor set layouts.
+   VkDescriptorSetLayoutBinding descriptor_set_layout_bindings[2];
+   descriptor_set_layout_bindings[0].binding = 0;
+@@ -2491,7 +2513,8 @@ bool VulkanRenderTargetCache::TryDirectHostResolveCopy(
        return false;
      }
      const uint32_t tile_size_x =
@@ -2220,7 +2256,7 @@ index 88f2eb068..aac01f47d 100644
      const uint32_t tile_pixel_size_x =
          tile_size_x >>
          uint32_t(source.key.msaa_samples >= xenos::MsaaSamples::k4X);
-@@ -2645,9 +2646,16 @@ bool VulkanRenderTargetCache::TryDirectHostResolveCopy(
+@@ -2645,9 +2668,16 @@ bool VulkanRenderTargetCache::TryDirectHostResolveCopy(
        1, size_t(vulkan_device->properties().minUniformBufferOffsetAlignment));
    const uint32_t scale_x = draw_resolution_scale_x();
    const uint32_t scale_y = draw_resolution_scale_y();
@@ -2238,7 +2274,7 @@ index 88f2eb068..aac01f47d 100644
    const uint32_t msaa_2x_sample_0 =
        draw_util::GetD3D10SampleIndexForGuest2xMSAA(
            0, msaa_2x_attachments_supported_);
-@@ -2667,8 +2675,9 @@ bool VulkanRenderTargetCache::TryDirectHostResolveCopy(
+@@ -2667,8 +2697,9 @@ bool VulkanRenderTargetCache::TryDirectHostResolveCopy(
        constants.dump_pitch_tiles = dump_pitch;
        constants.source_base_tiles = source.key.base_tiles;
        constants.source_pitch_tiles = source.key.GetPitchTiles();
@@ -2250,7 +2286,7 @@ index 88f2eb068..aac01f47d 100644
        const uint32_t tile_pixel_size_x =
            tile_size_x >>
            uint32_t(source.key.msaa_samples >= xenos::MsaaSamples::k4X);
-@@ -4242,10 +4251,11 @@ RenderTargetCache::RenderTarget* VulkanRenderTargetCache::CreateRenderTarget(
+@@ -4242,10 +4273,11 @@ RenderTargetCache::RenderTarget* VulkanRenderTargetCache::CreateRenderTarget(
    image_create_info.pNext = nullptr;
    image_create_info.flags = 0;
    image_create_info.imageType = VK_IMAGE_TYPE_2D;
@@ -2266,7 +2302,7 @@ index 88f2eb068..aac01f47d 100644
    image_create_info.extent.depth = 1;
    image_create_info.mipLevels = 1;
    image_create_info.arrayLayers = 1;
-@@ -4692,15 +4702,22 @@ VulkanRenderTargetCache::GetHostRenderTargetsFramebuffer(
+@@ -4692,15 +4724,22 @@ VulkanRenderTargetCache::GetHostRenderTargetsFramebuffer(
    uint32_t framebuffer_scale_x = draw_resolution_scale_x();
    uint32_t framebuffer_scale_y = draw_resolution_scale_y();
    if (pitch_tiles_at_32bpp) {
@@ -2298,7 +2334,7 @@ index 88f2eb068..aac01f47d 100644
    } else {
      assert_zero(render_pass_key.depth_and_color_used);
      // Still needed for occlusion queries.
-@@ -8803,6 +8820,27 @@ VkPipeline VulkanRenderTargetCache::GetDumpPipeline(DumpPipelineKey key) {
+@@ -8803,6 +8842,27 @@ VkPipeline VulkanRenderTargetCache::GetDumpPipeline(DumpPipelineKey key) {
          spv::OpUDiv, type_uint, source_pixel_y,
          builder.makeUintConstant(draw_resolution_scale_y()));
    }
