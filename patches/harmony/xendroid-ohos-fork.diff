@@ -1401,41 +1401,56 @@ index 4970a60d9..1da91d179 100644
    #endif
    resolve_info.edram_offset_scaled =
 diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/shaders/resolve_host_color.xesli b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/shaders/resolve_host_color.xesli
-index 3710b1a0a..8c528d36f 100644
+index 3710b1a0a..cf9886ffd 100644
 --- a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/shaders/resolve_host_color.xesli
 +++ b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/shaders/resolve_host_color.xesli
-@@ -123,20 +123,27 @@ const_buffer_end_xe(xe_resolve_host_color)
+@@ -122,6 +122,8 @@ const_buffer_end_xe(xe_resolve_host_color)
+   #define pass_next_after_texture_xe
  #endif
  
++// Tile size in the *scaled* (guest_extent * draw_resolution_scale) space - this
++// is what the dispatch culling and the EDRAM tile indexing work in.
  uint XeResolveHostColorTileSizeX(XeResolveInfo resolve_info) {
-+  // HX360E: the host render target is draw_resolution_scale / source_den of the
-+  // guest EDRAM layout, so a tile covers that much fewer texels. Without this
-+  // division the direct resolve shader samples the (smaller) host render target
-+  // with native-scale coordinates - observed as the game's front buffer being
-+  // drawn at 1/(scale*den) size in the corner with den > 1.
-+  uint den_x = max(resolve_info.source_den.x, 1u);
    #ifdef XE_RESOLVE_HOST_COLOR_FULL_DEST_BPP
      return (80u >> resolve_info.edram_format_ints_log2) *
--           resolve_info.resolution_scale.x;
-+           resolve_info.resolution_scale.x / den_x;
-   #else
-     #if XE_RESOLVE_HOST_COLOR_BPP == 64
--      return 40u * resolve_info.resolution_scale.x;
-+      return 40u * resolve_info.resolution_scale.x / den_x;
-     #else
--      return 80u * resolve_info.resolution_scale.x;
-+      return 80u * resolve_info.resolution_scale.x / den_x;
-     #endif
-   #endif
+@@ -139,6 +141,22 @@ uint XeResolveHostColorTileSizeY(XeResolveInfo resolve_info) {
+   return 16u * resolve_info.resolution_scale.y;
  }
  
- uint XeResolveHostColorTileSizeY(XeResolveInfo resolve_info) {
--  return 16u * resolve_info.resolution_scale.y;
-+  uint den_y = max(resolve_info.source_den.y, 1u);
-+  return 16u * resolve_info.resolution_scale.y / den_y;
- }
- 
++// HX360E: tile size in the *host render target* space, which is
++// draw_resolution_scale / source_den of the guest EDRAM layout. Only the
++// translation of a scaled-space sample coordinate into a host texture texel may
++// use this - the dispatch culling in XeResolveHostColorGetPixelIndex must keep
++// using the scaled tile size above, since it compares against the
++// scaled-space EDRAM origin / extent.
++uint XeResolveHostColorHostTileSizeX(XeResolveInfo resolve_info) {
++  return XeResolveHostColorTileSizeX(resolve_info) /
++         max(resolve_info.source_den.x, 1u);
++}
++
++uint XeResolveHostColorHostTileSizeY(XeResolveInfo resolve_info) {
++  return XeResolveHostColorTileSizeY(resolve_info) /
++         max(resolve_info.source_den.y, 1u);
++}
++
  uint XeResolveHostColorTilePixelSizeX(XeResolveInfo resolve_info) {
+   #if XE_RESOLVE_HOST_COLOR_MSAA_SAMPLES == 4
+     return XeResolveHostColorTileSizeX(resolve_info) >> 1u;
+@@ -183,8 +201,12 @@ uint2_xe XeResolveHostColorSourceSampleToTexel(
+     XeResolveInfo resolve_info, uint2_xe source_sample
+     param_next_after_const_buffer_xe
+     param_const_buffer_xe(xe_resolve_host_color)) {
+-  uint tile_size_x = XeResolveHostColorTileSizeX(resolve_info);
+-  uint tile_size_y = XeResolveHostColorTileSizeY(resolve_info);
++  // HX360E: source_sample is in the scaled space (same space the culling in
++  // XeResolveHostColorGetPixelIndex produced it in), while the bound texture is
++  // the host render target at 1/source_den of that space - so decompose the
++  // sample coordinate using the *host* tile size, not the scaled one.
++  uint tile_size_x = XeResolveHostColorHostTileSizeX(resolve_info);
++  uint tile_size_y = XeResolveHostColorHostTileSizeY(resolve_info);
+ 
+   uint source_tile_x = source_sample.x / tile_size_x;
+   uint source_tile_y = source_sample.y / tile_size_y;
 diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/texture_cache.cc b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/texture_cache.cc
 index 57a6c702e..28b20a421 100644
 --- a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/texture_cache.cc
