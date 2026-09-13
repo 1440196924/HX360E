@@ -1,5 +1,6 @@
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { common } from '@kit.AbilityKit';
+import { window, display } from '@kit.ArkUI';
 import { SettingsSchema, SettingsCategory, Setting } from '../common/SettingsSchema';
 import { SettingsStore } from '../common/SettingsStore';
 
@@ -169,9 +170,13 @@ struct SettingRow {
 export struct AdvancedPage {
   @State statusText: string = '';
   @State deviceInfo: string = '';
+  // 状态栏高度（vp）。窗口是沉浸式全屏，NavDestination 自带的标题栏会被状态栏
+  // 挡住，所以整页往下让出这个高度（标题栏/返回键随之可见）。
+  @State statusBarVp: number = 0;
   private store: SettingsStore = SettingsStore.shared();
 
   aboutToAppear(): void {
+    this.applyStatusBarInset();
     try {
       const ctx = getContext(this) as common.Context;
       this.store.open(ctx.filesDir);
@@ -181,6 +186,26 @@ export struct AdvancedPage {
     } catch (e) {
       this.statusText = '设置不可用（见 hilog）';
       hilog.error(DOMAIN, TAG, 'settings open failed: %{public}s',
+        JSON.stringify(e));
+    }
+  }
+
+  // 取系统状态栏高度（与 Home.ets 的做法一致）。
+  private applyStatusBarInset(): void {
+    try {
+      window.getLastWindow(getContext(this)).then((win: window.Window) => {
+        const avoid: window.AvoidArea =
+          win.getWindowAvoidArea(window.AvoidAreaType.TYPE_SYSTEM);
+        const px: number = avoid.topRect.height;
+        const density: number = display.getDefaultDisplaySync().densityPixels;
+        this.statusBarVp = density > 0 ? Math.ceil(px / density) : 0;
+        hilog.info(DOMAIN, TAG, 'AdvancedPage status bar inset: %{public}d vp',
+          this.statusBarVp);
+      }).catch((err: Error) => {
+        hilog.error(DOMAIN, TAG, 'getLastWindow failed: %{public}s', err.message);
+      });
+    } catch (e) {
+      hilog.error(DOMAIN, TAG, 'applyStatusBarInset failed: %{public}s',
         JSON.stringify(e));
     }
   }
@@ -243,6 +268,8 @@ export struct AdvancedPage {
       .backgroundColor($r('app.color.page_bg'))
     }
     .title('高级选项')
+    // 沉浸式窗口下把整页往下让出状态栏高度，否则自带的标题栏被状态栏挡住。
+    .margin({ top: this.statusBarVp })
     .menus([
       {
         value: '重置',

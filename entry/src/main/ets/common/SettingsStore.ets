@@ -15,7 +15,7 @@ const TAG = 'HX360E';
  *   3. 版本相同 → 直接返回，不碰文件。
  * 这样默认值的改动能真正生效，又不会覆盖用户自己改过的值。
  */
-const CONFIG_SCHEMA_VERSION: number = 3;
+const CONFIG_SCHEMA_VERSION: number = 6;
 const CONFIG_VERSION_TAG: string = 'HX360E|schema_version';
 /** [标签, 旧默认值, 新默认值] */
 const CONFIG_MIGRATIONS: string[][] = [
@@ -28,6 +28,16 @@ const CONFIG_MIGRATIONS: string[][] = [
   //   hx360e_xeg_spatial_upscale 默认 true：XEG 1.5x 超分接到上屏链路后画质更好，
   //   且创建失败会自动退回 FSR 链，非 Maleoon 设备无副作用。
   ['Vulkan|hx360e_xeg_spatial_upscale', 'false', 'true'],
+  // v4：修正上一版实验留下的 Console|internal_display_resolution=5（848x480）。
+  // 该设置会**改变告知 guest 的视频模式**，实测会让游戏在切换视频模式时
+  // 崩在 guest CPU 线程（SIGSEGV_ACCERR）。渲染分辨率改用独立的
+  // GPU|hx360e_render_scale_den_x 设置项控制，这里把它改回 1280x720。
+  ['Console|internal_display_resolution', '5', '8'],
+  // v6：渲染倍率默认改为原生 720p（den=1）。上一版曾把默认设成 2（半分辨率
+  // 360p），这里把配置里仍是 2 的值拉回 1；同时把 v5 误写的 1→2 撤销。
+  // 想要 360p 的用户可在设置页 GPU|hx360e_render_scale_den_x 里改成 2。
+  ['GPU|hx360e_render_scale_den_x', '2', '1'],
+  ['GPU|hx360e_render_scale_den_y', '2', '1'],
 ];
 
 /**
@@ -110,14 +120,24 @@ export class SettingsStore {
     try {
       let updated: number = 0;
       // 1) 迁移：只替换「还是旧默认值」的键（用户改过的值不动）。
-      for (const m of CONFIG_MIGRATIONS) {
-        const cur: string | null = testNapi.config.loadEntry(handle, m[0]);
-        if (cur !== null && cur === m[1]) {
-          testNapi.config.saveEntry(handle, m[0], m[2]);
-          updated++;
-          hilog.info(DOMAIN, TAG, 'migrate %{public}s: %{public}s → %{public}s',
-            m[0], m[1], m[2]);
+      //    关键：**版本标记缺失时（(none)）不重放迁移**。xenia 自己 SaveConfig
+      //    回写整个配置文件时会把我们的版本标记丢掉，若此时重放迁移，用户刚
+      //    在设置页改过的值（恰好等于旧默认值）会被强行改回新默认值 —— 实测
+      //    表现为"退出游戏后设置又变回去了"。
+      const replayMigrations: boolean = storedVersion !== '(none)';
+      if (replayMigrations) {
+        for (const m of CONFIG_MIGRATIONS) {
+          const cur: string | null = testNapi.config.loadEntry(handle, m[0]);
+          if (cur !== null && cur === m[1]) {
+            testNapi.config.saveEntry(handle, m[0], m[2]);
+            updated++;
+            hilog.info(DOMAIN, TAG, 'migrate %{public}s: %{public}s → %{public}s',
+              m[0], m[1], m[2]);
+          }
         }
+      } else {
+        hilog.info(DOMAIN, TAG,
+          'config version tag missing; skipping migrations (only filling defaults)');
       }
       // 2) 补齐缺失的键（默认值）。
       const cats: SettingsCategory[] = SettingsSchema.categories();

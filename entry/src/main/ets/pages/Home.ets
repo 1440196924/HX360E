@@ -318,22 +318,33 @@ struct Home {
     return parts.join(' · ');
   }
 
-  // 次原生渲染倍率（1=原生720p，2=半分辨率360p，…）。读设置页里保存的值，
-  // 没有保存过就用 schema 默认值（2）。
-  private renderScaleDen(): number {
+  // 次原生渲染倍率（列表型设置：'1' = 原生 720p，'2' = 0.5x 半分辨率，…）。
+  // 只读 X 这一个设置项，Y 用同一个值（见 startGame 传参）。
+  // 直接读配置文件而不是走 SettingsStore.shared().raw()：后者在游戏启动这个
+  // 时刻读不到条目（实测 raw 返回空 → 一直回退成 1，"设置不生效"）。
+  private renderScaleDen(filesDir: string): number {
+    let result: number = 1;
+    let rawShown: string = '(未读到)';
     try {
-      const raw: string | undefined =
-        SettingsStore.shared().raw('GPU|hx360e_render_scale_den_x');
-      if (raw !== undefined && raw !== '') {
-        const v: number = Number.parseInt(raw, 10);
-        if (!Number.isNaN(v) && v >= 1 && v <= 4) {
-          return v;
+      const cfg: string = SettingsStore.configPath(filesDir);
+      if (fileIo.accessSync(cfg)) {
+        const text: string = fileIo.readTextSync(cfg);
+        const m: RegExpMatchArray | null =
+          text.match(/^\s*hx360e_render_scale_den_x\s*=\s*"?(\d+)"?/m);
+        if (m !== null && m.length > 1) {
+          rawShown = m[1];
+          const v: number = Number.parseInt(m[1], 10);
+          if (!Number.isNaN(v) && v >= 1 && v <= 4) {
+            result = v;
+          }
         }
       }
     } catch (e) {
-      // 读配置失败就用默认值
+      rawShown = '(读取异常)';
     }
-    return 2;
+    hilog.info(DOMAIN, TAG, 'render scale den=%{public}d (raw="%{public}s")',
+      result, rawShown);
+    return result;
   }
 
   // 启动游戏：传绝对路径给 native，然后进独立游戏页（横屏）。
@@ -362,12 +373,18 @@ struct Home {
       // 次原生渲染倍率：host 尺寸 = guest / 该值。由设置页的
       // GPU|hx360e_render_scale_den_x 控制（1=原生720p，2=半分辨率360p）。
       // 命令行优先级高于 --config，所以这里读设置再同时传给 X/Y，否则设置页改不动。
-      `--hx360e_render_scale_den_x=${this.renderScaleDen()}`,
-      `--hx360e_render_scale_den_y=${this.renderScaleDen()}`,
+      `--hx360e_render_scale_den_x=${this.renderScaleDen(filesDir)}`,
+      `--hx360e_render_scale_den_y=${this.renderScaleDen(filesDir)}`,
       // direct-HR 路径对 den 的适配尚未做对（标题层会缩到左上角 1/4）。
       // 我们靠 EDRAM dump 路径（已加升采样换算）即可，且已稳定 30fps 有余量，
       // 不需要这条更快的路径。
       '--vulkan_direct_host_resolve=false',
+      // ===== 性能基线测量（临时，测完删）=====
+      // log_level=2 是为了让 xenia 的 info 级诊断日志能出来（配置里默认 1）。
+      // 这两项给出 pass 分桶 GPU 时间与 resolve 路径占比，用来决定 K1/K2 谁先做。
+      '--log_level=2',
+      '--log_gpu_frame_time_breakdown=true',
+      '--log_resolve_details=true',
       // 系统级超分（XEngine 1.5x）改由设置项 Vulkan|hx360e_xeg_spatial_upscale
       // 控制（默认开）。这里不再传参：命令行优先级高于 --config，传了就会盖掉
       // 用户在设置页里的选择。
@@ -609,12 +626,8 @@ struct Home {
         .fontColor($r('app.color.accent'))
         .maxLines(2)
         .padding({ left: 16, right: 16, bottom: 104 })
-
-      Text(this.xengineInfo)
-        .fontSize(10)
-        .fontColor($r('app.color.text_hint'))
-        .maxLines(6)
-        .padding({ left: 16, right: 16, bottom: 104 })
+      // XEngine 能力诊断行已隐藏（原来占列表底部数行，影响游戏列表展示）。
+      // 需要时看「关于」页的 XEngine 行。
     }
     .width('100%')
     .height('100%')
@@ -821,8 +834,9 @@ struct Home {
       }
       .width('100%')
       .height('100%')
-      // 沉浸：首页内容延伸到状态栏下方（标题里已按 statusBarVp 留白）。
-      .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP])
+      // 不要在这里 expandSafeArea：它会把推入的 NavDestination（高级选项/
+      // 控制/目录/关于）的标题栏也一起顶到状态栏下面。首页自己的标题已按
+      // 状态栏高度留白（见 floatingTabs 里的 statusBarVp）。
     }
     .hideTitleBar(true)
     .mode(NavigationMode.Stack)
