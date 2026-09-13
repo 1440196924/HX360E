@@ -1184,3 +1184,37 @@ VkPassTime: xfer 1280x2048 : 0.64ms/帧
   不是 draw 数（仅 152/帧 ✓）。
 - 轻场景 GPU 只占 1-2ms ✗ ⇒ 若某游戏/场景卡在 60ms，要先确认是 GPU 还是呈现/等待 ✗。
 
+### 8.9 `render_area_dirty_extent` 实测：死路（已结论）
+
+**结论：在 Maleoon 上也没有收益 ✗，保持关闭 ✓；但与文档不同的是，它确实生效了 ✓。**
+
+做法与验证（都已跑过 ✓）：
+
+1. 先查清"崩溃"传闻 ✗ —— **之前记的"开它直接崩"是误判** ✓：追踪链其实是完整的
+   （`CmdVkBeginRenderPass` / `CmdVkBeginRendering` 都调 `BeginRenderAreaTracking` ✓，
+   `CmdVkSetScissor` 更新 `current_scissor_` ✓，两条 `CmdVkDraw*` 调
+   `AccumulateDrawnScissor()` ✓）。当时判 DEAD 就是那个**偶发启动崩溃** ✗。
+2. 把 `VkShrink` 诊断从 `XELOGI` 改走 hilog（新增共享小头
+   `src/xenia/gpu/vulkan/hx_diag_log.h` 的 `HX_DIAG_LOG()` ✓，`vulkan_command_processor.cc`
+   / `deferred_command_buffer.cc` 共用 ✓），确实抓到了收缩日志 ✓：
+   ```
+   VkShrink: 1280x2048 -> 1280x736 (26 draws, dynamic=0)
+   VkShrink: 1280x2048 -> 32x32    (24 draws, dynamic=0)
+   VkShrink: kept full extent (draws=0 w=1280 h=720)
+   ```
+   → **画面完全正确** ✓（截图核对：LIMBO 标题层无裁剪 ✓），那个 32x32 是真实的小 pass ✓。
+3. **A/B（同一标题场景）**：
+   | | frameMs | fps | gpu exec | 每 pass |
+   |---|---|---|---|---|
+   | shrink **ON** | 117-150 | 9.1 | **36.4ms** | **2.18ms** |
+   | shrink **OFF** | 83-150 | 7.4-11.5 | 49.8ms | 2.95ms |
+   → **GPU 侧确实变快了**（exec −27%、每 pass −26% ✓✓），**但帧时间没变**（在噪声内 ✗）
+   ⇒ 该场景**不是 GPU 受限** ✗ ⇒ 省下的 GPU 工作被别的环节吃掉了 ✗。
+
+**这条留下的两个可复用资产**：① `HX_DIAG_LOG()`（hilog 直写诊断）✓；
+② 一个已验证的"收缩生效且画面正确"的实现 ✓（若换到真的 GPU-bound 的场景/机型可再测 ✓）。
+
+**下一靶子（按新证据）**：`VkFrameSync` 里 **`resolve_ms ≈ 19-20ms/帧`（19 次 resolve/帧，平均 ~1ms）** ✗✓
+= 帧时间的 ~20%，比 pass 收缩能省的多 ✓ → 优先削减 resolve 次数/成本 ✓；
+其次 `native_2x_msaa`（4x 模拟 2x 的带宽）✓。这两个都还没测 ✗。
+

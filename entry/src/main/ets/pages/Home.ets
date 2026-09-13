@@ -388,6 +388,10 @@ struct Home {
       // 注意 log_level 默认就是 2=info，不需要传；dump_shaders 默认空，
       // 所以不会触发 SPIR-V dump 爆栈。
       '--log_gpu_frame_time_breakdown=true',
+      // 把每个 pass 的 renderArea 缩到实际画到的范围。host RT 高 2048（guest 只要
+      // 720），在 tiler 上 renderArea 直接决定 binning 与 GMEM load/store，
+      // 收益潜在 ~2.8x。此前实测会崩，正在修。
+      '--render_area_dirty_extent=false',
       // 注意：不要传 --log_to_logcat=true —— 实测会让 hx360e-boot 线程崩。
       // xenia 的 XELOGI 只进 xe.log 文件（<filesDir>/logs/xe.log），
       // 要看就用应用内「导出日志」，或 hdc 直接读（见 TODO）。
