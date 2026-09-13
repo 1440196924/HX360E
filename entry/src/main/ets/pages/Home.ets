@@ -381,6 +381,8 @@ struct Home {
       // K1：直读 resolve 的 den 适配（剔除留在 scaled 空间，仅 host texel 映射 ÷den）。
       // 实测：resolve_ms 6.24→5.24、submit→fence 78→70ms，画面正确。
       '--vulkan_direct_host_resolve=true',
+      // K4 隔离验证：关掉块级快路径（默认 true）
+      '--hx360e_mem_arm_block_fast_path=false',
       // 系统级超分（XEngine 1.5x）改由设置项 Vulkan|hx360e_xeg_spatial_upscale
       // 控制（默认开）。这里不再传参：命令行优先级高于 --config，传了就会盖掉
       // 用户在设置页里的选择。

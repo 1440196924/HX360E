@@ -92,18 +92,13 @@ void OhosWindowedAppContext::MainLoop() {
             lock_profile.wait_ns_max.exchange(0, std::memory_order_relaxed);
         HXLOG("present probe: paints/s=%{public}u guestInstantFps=%{public}.1f "
               "guestAvgFps=%{public}.1f frameMs=%{public}.1f xeg=[%{public}s] "
-              "lock hold=%{public}.2fms/ea max=%{public}.2fms n=%{public}u "
-              "wait=%{public}.2fms/ea max=%{public}.2fms",
+              "lock hold=%{public}.2fms/s max=%{public}.2fms n=%{public}u "
+              "wait=%{public}.2fms/s max=%{public}.2fms",
               paints, hx360e::InstantFps(), hx360e::AverageFps(),
               hx360e::LastFrameTimeMs(),
               hx360e::XegSpatialUpscale::GetStatusForDisplay().c_str(),
-              lock_hold_count
-                  ? double(lock_hold_total_ns) / 1e6 / double(lock_hold_count)
-                  : 0.0,
-              double(lock_hold_max_ns) / 1e6, lock_hold_count,
-              lock_hold_count
-                  ? double(lock_wait_total_ns) / 1e6 / double(lock_hold_count)
-                  : 0.0,
+              double(lock_hold_total_ns) / 1e6, double(lock_hold_max_ns) / 1e6,
+              lock_hold_count, double(lock_wait_total_ns) / 1e6,
               double(lock_wait_max_ns) / 1e6);
       }
     }
