@@ -955,7 +955,7 @@ index 877fe4fe8..2f49beba6 100644
  namespace xe {
  namespace cpu {
 diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/cpu/backend/code_cache_base.h b/emulator-core/src/main/cpp/xenia/src/xenia/cpu/backend/code_cache_base.h
-index 57cd83547..da51376d8 100644
+index 57cd83547..332a0bc73 100644
 --- a/emulator-core/src/main/cpp/xenia/src/xenia/cpu/backend/code_cache_base.h
 +++ b/emulator-core/src/main/cpp/xenia/src/xenia/cpu/backend/code_cache_base.h
 @@ -13,6 +13,7 @@
@@ -1076,7 +1076,7 @@ index 57cd83547..da51376d8 100644
        return false;
      }
  
-@@ -452,6 +537,27 @@ class CodeCacheBase : public CodeCache {
+@@ -452,6 +537,38 @@ class CodeCacheBase : public CodeCache {
                     code_execute_address_out, code_write_address_out);
    }
  
@@ -1089,8 +1089,19 @@ index 57cd83547..da51376d8 100644
 +        (reinterpret_cast<uintptr_t>(address) + size + kPageSize - 1) &
 +        ~(kPageSize - 1);
 +    if (mprotect(reinterpret_cast<void*>(begin), end - begin, prot) != 0) {
-+      XELOGE("OhosProtect failed: begin={:p} size=0x{:X} prot={} errno={}",
-+             reinterpret_cast<void*>(begin), end - begin, prot, errno);
++      // NOTE (measured 2026-09-13): on this device/kernel build even the
++      // anonymous RW -> mprotect(RX) path documented in memory_posix.cc now
++      // fails with EINVAL (errno 22) for PROT_READ|PROT_EXEC, so JIT'd pages
++      // never become executable - the guest then jumps into the fill pattern
++      // 0xBCBCBCBC ("Host-side crash on fiber thread ... guest lr
++      // 0xBCBCBCBC") and the title never renders a frame. Log the first few
++      // failures with the protection that failed so the exec-memory strategy
++      // can be reworked without guessing.
++      static std::atomic<uint32_t> failures_logged{0};
++      if (failures_logged.fetch_add(1, std::memory_order_relaxed) < 8) {
++        XELOGE("OhosProtect failed: begin={:p} size=0x{:X} prot={} errno={}",
++               reinterpret_cast<void*>(begin), end - begin, prot, errno);
++      }
 +    }
 +  }
 +  void OhosMakeWritable(void* address, size_t size) {
@@ -1104,7 +1115,7 @@ index 57cd83547..da51376d8 100644
    void PlaceGuestCode(uint32_t guest_address, void* machine_code,
                        const EmitFunctionInfo& func_info,
                        GuestFunction* function_info,
-@@ -462,6 +568,18 @@ class CodeCacheBase : public CodeCache {
+@@ -462,6 +579,18 @@ class CodeCacheBase : public CodeCache {
      {
        auto global_lock = global_critical_region_.Acquire();
  
@@ -1123,7 +1134,7 @@ index 57cd83547..da51376d8 100644
        code_execute_address =
            generated_code_execute_base_ + generated_code_offset_;
        code_execute_address_out = code_execute_address;
-@@ -502,6 +620,15 @@ class CodeCacheBase : public CodeCache {
+@@ -502,6 +631,15 @@ class CodeCacheBase : public CodeCache {
          pthread_jit_write_protect_np(0);
        }
  #endif
@@ -1139,7 +1150,7 @@ index 57cd83547..da51376d8 100644
  
        // Copy code.
        std::memcpy(code_write_address, machine_code, func_info.code_size.total);
-@@ -521,6 +648,13 @@ class CodeCacheBase : public CodeCache {
+@@ -521,6 +659,13 @@ class CodeCacheBase : public CodeCache {
          pthread_jit_write_protect_np(1);
        }
  #endif
@@ -1153,7 +1164,7 @@ index 57cd83547..da51376d8 100644
  
        // Flush I-cache for code and fill regions.
        self().FlushCodeRange(code_write_address, func_info.code_size.total);
-@@ -546,6 +680,11 @@ class CodeCacheBase : public CodeCache {
+@@ -546,6 +691,11 @@ class CodeCacheBase : public CodeCache {
      uint8_t* data_address = nullptr;
      {
        auto global_lock = global_critical_region_.Acquire();
@@ -1165,7 +1176,7 @@ index 57cd83547..da51376d8 100644
        data_address = generated_code_write_base_ + generated_code_offset_;
        generated_code_offset_ += xe::round_up(length, 16);
        high_mark = generated_code_offset_;
-@@ -558,12 +697,24 @@ class CodeCacheBase : public CodeCache {
+@@ -558,12 +708,24 @@ class CodeCacheBase : public CodeCache {
      if (jit_write_toggle) {
        pthread_jit_write_protect_np(0);
      }
@@ -1190,7 +1201,7 @@ index 57cd83547..da51376d8 100644
  #endif
      return uint32_t(uintptr_t(data_address));
    }
-@@ -684,6 +835,18 @@ class CodeCacheBase : public CodeCache {
+@@ -684,6 +846,18 @@ class CodeCacheBase : public CodeCache {
    }
  
    void EnsureCommitted(size_t high_mark) {
