@@ -1218,3 +1218,44 @@ VkPassTime: xfer 1280x2048 : 0.64ms/帧
 = 帧时间的 ~20%，比 pass 收缩能省的多 ✓ → 优先削减 resolve 次数/成本 ✓；
 其次 `native_2x_msaa`（4x 模拟 2x 的带宽）✓。这两个都还没测 ✗。
 
+
+### 8.10 全分辨率实测进展与完整归因（2026-09-13 最新）
+
+成果（画面均截图核对无裁剪）：全分辨率 LIMBO
+
+| | frameMs | fps |
+| --- | --- | --- |
+| 会话起点 | 117-150 | 7-11 |
+| 现在 | 49.9-66.7 | 15-16 |
+
+两处核心改动：
+1. vulkan_direct_host_resolve 开回默认 true（den=1 无适配问题，消除每帧 19 次 dump）
+   -> gpu exec 49.8->21ms, resolve_ms 18.5->9.8ms。
+2. render_area_dirty_extent=true（已验证收缩生效 1280x2048->1280x736、画面正确）
+   -> 1280x2048 桶 48.7->20.6ms, 每 pass 2.95->1.13ms。
+
+CP 线程完整归因仪表（fork，已随补丁存档）：hx_diag_log.h 的 HX_DIAG_LOG()/HxDiagTimeScope
++ 计数；GpuFrame 补上 FrameStatsEndSwap 调用者（放在 IssueSwap 末尾，令 swap 覆盖呈现端）；
+HxCpuSplit(draw/copy/pass/refresh/refsub)、HxEndSub(rtcache/replay/submit)、
+HxPipe(creates/waits)、HxSubmit(fence/queue+submit/polls)，均 1/s 打印。
+
+归因结果（全分辨率 15fps 时）：
+    exec = 64.2ms
+    |- vkQueueSubmit 阻塞   28.4ms/帧   <- 仅剩最大单项
+    |- 其他 PM4/状态处理     ~24ms
+    |- draw                  10.5ms (174 次)
+    |- copy 1.8 / pass 0.1 / replay 4.8 / rtcache 0.0 ms
+    已排除: 管线创建 0/帧、管线等待 0/帧、fence 获取 0.2ms、轮询 0.2/帧(0.0ms)、
+            ProcessDeferredDestructions 0ms
+
+帧率量化：帧时间落在 vblank 整数倍（66.7≈4x16.67、49.9≈3x16.67）=> 现 15-20fps
+=> 要到 30fps 必须把每帧总工作量压到 <=33.3ms（2 vblank）。
+
+下一步候选：
+1. vkQueueSubmit 单次成本异常：submissions=3.0/帧、submit=28.4ms/帧 => 单次约 9.5ms
+   （正常应 ~50us）=> 若属实，减少每帧提交次数（合并呈现端与帧的 submit、减少 mid-frame
+   submission 切分）可省 ~19ms，是最可能一步到 30fps 的点。需先区分是 vkQueueSubmit
+   本身还是 AcquireQueue 的独占握手（CP 与呈现端共用队列）。
+2. GPU 侧：pass 数偏多（16.5-21/帧）、4xMSAA 带宽、resolve 9.8ms。
+
+注意：收尾时把 --log_gpu_frame_time_breakdown=true 与这些计数器一起撤掉。
