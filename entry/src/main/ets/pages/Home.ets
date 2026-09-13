@@ -378,9 +378,10 @@ struct Home {
       // direct-HR 路径对 den 的适配尚未做对（标题层会缩到左上角 1/4）。
       // 我们靠 EDRAM dump 路径（已加升采样换算）即可，且已稳定 30fps 有余量，
       // 不需要这条更快的路径。
-      // K1：直读 resolve 已做 den 适配（着色器 tile_size ÷ den），实测 GPU exec
-      // 14.8→9.1ms、resolve_ms −20%、submit→fence −20%，画面正确。
-      '--vulkan_direct_host_resolve=true',
+      // K1 直读 resolve：着色器已加 source_den（tile_size ÷ den），但真机上标题层
+      // 仍缩到左上角、帧时间反而变差 → 适配还不完整（目标侧 dest_xy_offset_scaled /
+      // width_div_8_scaled 的复合缩放未跟上），先保持关闭，走 dump 路径（已知正确）。
+      '--vulkan_direct_host_resolve=false',
       // 系统级超分（XEngine 1.5x）改由设置项 Vulkan|hx360e_xeg_spatial_upscale
       // 控制（默认开）。这里不再传参：命令行优先级高于 --config，传了就会盖掉
       // 用户在设置页里的选择。
