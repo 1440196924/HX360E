@@ -375,23 +375,20 @@ struct Home {
       // 命令行优先级高于 --config，所以这里读设置再同时传给 X/Y，否则设置页改不动。
       `--hx360e_render_scale_den_x=${this.renderScaleDen(filesDir)}`,
       `--hx360e_render_scale_den_y=${this.renderScaleDen(filesDir)}`,
-      // direct-HR 路径对 den 的适配尚未做对（标题层会缩到左上角 1/4）。
-      // 我们靠 EDRAM dump 路径（已加升采样换算）即可，且已稳定 30fps 有余量，
-      // 不需要这条更快的路径。
       // 全分辨率（原生）为唯一目标：不做半分辨率。
       '--hx360e_render_scale_den_x=1',
       '--hx360e_render_scale_den_y=1',
-      // 先回到已知正确的 dump resolve 路径（隔离直读路径这个变量）
-      '--vulkan_direct_host_resolve=false',
+      // 直读 resolve 开回 cvar 默认值 true。之前为 den 适配手动关过，但 den=1 下
+      // 不存在适配问题，而 dump 路径每帧贡献约 19ms 的 resolve（19 次/帧）。
+      '--vulkan_direct_host_resolve=true',
       // pass 分桶仪表：一个 bool 同时打开 GPU timestamp 采集 + 4 张表
       // （GpuFrame / VkFrameSync / VkPassId / VkPassTime，均 1/s）。
       // 注意 log_level 默认就是 2=info，不需要传；dump_shaders 默认空，
       // 所以不会触发 SPIR-V dump 爆栈。
       '--log_gpu_frame_time_breakdown=true',
-      // 把每个 pass 的 renderArea 缩到实际画到的范围。host RT 高 2048（guest 只要
-      // 720），在 tiler 上 renderArea 直接决定 binning 与 GMEM load/store，
-      // 收益潜在 ~2.8x。此前实测会崩，正在修。
-      '--render_area_dirty_extent=false',
+      // 把每个 pass 的 renderArea 缩到实际画到的范围（已验证生效且画面无裁剪，
+      // GPU 侧 gpu exec -27%、每 pass -26%）。
+      '--render_area_dirty_extent=true',
       // 注意：不要传 --log_to_logcat=true —— 实测会让 hx360e-boot 线程崩。
       // xenia 的 XELOGI 只进 xe.log 文件（<filesDir>/logs/xe.log），
       // 要看就用应用内「导出日志」，或 hdc 直接读（见 TODO）。
