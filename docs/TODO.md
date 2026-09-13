@@ -1008,3 +1008,100 @@ hdc -t <sn> file recv "/storage/media/100/local/files/Docs/Download/hx360e-log-<
   **文件映射（memfd）上的 `mprotect(PROT_EXEC)` 返回 `EACCES`（errno 13）** ⇒ 上游"独立 RW 写视图 +
   RX 执行视图"的双视图方案在本设备**不可行**（应用内 `RunMemfdTwoViewProbe()` 每次启动都会打印
   `memfd2v: ...` 结果，可直接查看）。
+
+---
+
+## Phase 8：性能优化（内核效率）
+
+> **当前方向（2026-09-13 用户明确）**：**不做半分辨率**（次原生渲染已放弃），目标是
+> **全分辨率（原生 720p/1280x640）下把模拟效率提上去**。
+> 依据文档：[KERNEL-PERFORMANCE.md](./KERNEL-PERFORMANCE.md)（K1–K12）、[PERFORMANCE.md](./PERFORMANCE.md)。
+> 方法纪律：**每一项都先在目标设备量，再采纳**（K6 就是被实测推翻的"零风险"项）。
+
+### 8.1 已完成
+
+- [x] **K1 直读 resolve 的 den 适配**（`cfd860c`）。着色器：`resolve.xesli` 从
+      `ResolveCoordinateInfo` 位 22-24/25-27 解包 `source_den`；
+      `resolve_host_color.xesli` 新增 `HostTileSizeX/Y`（÷den）**仅用于** scaled→host texel
+      映射，剔除仍用 scaled 空间的 `TileSizeX/Y`（这是上次失败的原因：剔除阈值大了 den 倍 →
+      标题层缩到左上角）。C++：`draw_util.h` 的 `ResolveCoordinateInfo` 复用空闲位存 den
+      （sizeof 不变）、`draw_util.cc` 填充。重编 98 个 bytecode（0 失败）。
+      **实测（PC/LIMBO，den=2）**：`resolve_ms 6.24→5.24`、`submit→fence 78→70ms`、画面正确。
+- [x] **K7 第一步：全局锁画像**（`610928b`）。fork `base/mutex.h` 在平台分支**之外**包一层
+      `hx360e_profiled_global_mutex`（OHOS 专用，默认关闭）；移植侧探针每秒打印
+      `lock hold=XXms/s wait=XXms/s n=N`。
+- [x] **K4 块级快路径**（`a313996`）：`PhysicalHeap::EnableAccessCallbacksInner` 增加
+      64 页块整块跳过，cvar `hx360e_mem_arm_block_fast_path`。**实测开启后 boot 期 SIGSEGV
+      → 默认关闭**，待修边界条件（`system_page_last` 位于块尾 / 跨 `page_table_` 末尾）。
+- [x] **K8**：`a64_perf_map` OHOS 默认 false（工作区，未提交）。理由：每次函数放置都写
+      map+fflush，而 OHOS 上没有 simpleperf 用例。
+- [x] **XEG 系统级超分接入**（`41e0b68`/`af82956`/`c41f910`，详见 §8.4）——虽然半分辨率路线
+      已放弃，但 XEG 本身在**全分辨率下仍可用于锐化**，代码保留。
+- [x] 设置页：系统级超分开关/锐度、渲染分辨率（1.0x/0.5x）均已可调。
+
+### 8.2 实测结论（重要，避免重复踩坑）
+
+| 项 | 结论 |
+| --- | --- |
+| **K6**（自旋 32→4） | ❌ **负优化**：PC 上帧时间 50→100ms（一帧 3 次提交，park→唤醒延迟进关键路径）。已回退并留注释。 |
+| **K9**（诊断总开关） | ⏭ **不做**：现有诊断已有界（`<512`/`<128` 次），一次性成本约 0.5ms。文档高估。 |
+| **直读 resolve 路径（手机）** | ❌ **比 dump 路径慢 2 倍**：全分辨率下 133.5ms vs 66.5ms（PC 上则略快）。**手机必须保持 `--vulkan_direct_host_resolve=false`**。 |
+| 全局锁（手机，全分辨率） | hold 57-70ms/s + wait 59-93ms/s，n≈14,700/s ≈ 单核 13% → **不是瓶颈**，K7 拆锁不必做。 |
+| 全局锁（手机，火影 30fps 锁定） | n≈**800,000/s**（PC 的 36 倍）→ 锁压力随负载上升，但锁定帧率时仍吃得下。 |
+| guest 调度器 | 无病态：forced preempts=0、io 调用 0；手机切换 17k-31k/s（PC 的 10 倍）。 |
+
+### 8.3 基线（供对比）
+
+| 场景 | frameMs | fps |
+| --- | --- | --- |
+| 手机/Pura 70 Pro/LIMBO/**全分辨率**/dump 路径/XEG 关 | **66.5** | 15 |
+| 手机/Pura 70 Pro/LIMBO/全分辨率/**直读**路径 | 133.5 | 10 |
+| 手机/Pura 70 Pro/火影 UNS3（标题）/半分辨率+XEG | 33.0-33.9 | 30（锁定） |
+| PC/LIMBO/半分辨率+XEG/直读(K1) | 33.0-33.6 | 30（锁定） |
+
+**像素缩放模型（早前实测）**：`frame ≈ 13ms 固定 + 53ms ×（渲染分辨率倍数）` →
+全分辨率 66ms、2x 分辨率 225ms。即**约 80% 帧时间与像素数成正比** → 全分辨率优化的核心是
+**降低每像素成本**（着色器/带宽/overdraw），而不是 CPU/锁。
+
+### 8.4 XEG（系统级超分）现状
+
+- 封装：`entry/src/main/cpp/xeg_spatial_upscale.{h,cc}`（dlopen/dlsym，不硬链接）。
+- 接入点：`vulkan_presenter.cc` —— 用 XEG 取代 FSR 链第 0 段（EASU），输出自建
+  **RGBA8** 图（10-bit 打包格式会让驱动 SIGSEGV ✗），第 1 段改 bilinear 放大到窗口。
+- 尺寸：1.5x（如 1280x640 → 1920x960，落在文档建议的 1.2-1.5 区间）。
+- 探针可读状态：`xeg=[已创建 1280x640 -> 1920x960（Render 调用 N 次）]`。
+- 前置：桌面 app 才有的 guest 输出后处理配置已在移植侧补上（开 XEG 时强制 FSR 链）。
+
+### 8.5 下一步（按优先级）
+
+1. **修 `log_level=2` 崩溃**（P0，所有"先量再改"的前提）：`log_level=2` 会让 xenia 的
+   SPIR-V dump 爆栈（fork 只给**翻译线程**加了 32MB 栈 ✗，dump 在别的线程上）。
+   二选一：给 SPIR-V dump 加独立开关，或把 dump 所在线程的栈也提高。
+   修好后才能拿到 `log_gpu_frame_time_breakdown` 的 **pass 分桶（VS/PS/带宽）**，
+   这直接决定 K2A（顶点取数特化，400 行）值不值得投。
+2. **全分辨率下的便宜 A/B**（cvar 级，不需重编 native）：
+   - `native_2x_msaa`：guest 要 2x 时可能在做 **4x 模拟**（RT 带宽 ×4 ✗）——在 Pura X 上测过
+     无变化，**但这台（Pura 70 Pro）没测过**。
+   - `vulkan_mid_frame_submission_draws=0`（每帧一次提交 vs 每 1300 draws 一次）。
+   - 呈现端固定成本：1280x640 → **2844x1260**（guest 的 4.5 倍像素 ✗），与 guest 分辨率无关，
+     值得单独量（例如临时缩小 XComponent）。
+3. **K2A（顶点取数特化）**：等 pass 分桶确认 VS 主导再投。
+4. **K4 边界条件修正**（可选）：修好后才可能削减手机上 80 万次/秒的锁流量。
+5. K11（DeferredCommandBuffer 直录）文档自己也建议暂缓 ✗。
+
+### 8.6 回退点与工程注意事项
+
+- **HX360E 提交链**：`eda6d7a`（K1 前检查点）→ `c0eec05`（K1 首版+K6）→ `da5485b`（回退 K6/关直读）
+  → `cfd860c`（K1 修正）→ `610928b`（K7 画像）→ `a313996`（K4 默认关 + 锁总量）。
+- **fork 备份**：`%TEMP%\deveco\k1-backup\`（8 个文件 + 152KB 补丁）；更早的 `stage-a-backup\`。
+- **fork 补丁**：改动通过 `patches/harmony/xendroid-ohos-fork.diff` 承载
+  （导出用 `[System.IO.File]::WriteAllText(..., UTF8Encoding($false))`，UTF-8 **无 BOM**）。
+- **编译代价**：`base/*.h`、`platform.h`、`mutex.h` 这类核心头 = **全量重编 4-8 分钟** ✗；
+  普通 `.cc` 单文件 6-15 秒 ✓。改核心头前先查清分支/条件，一次改到位。
+- **日志**：`log_level=2` 会崩 ✗；hilog 对**高频日志**和 **WARN 配额**会整段丢弃 ✗
+  → 诊断统一走**我们自己探针的 1/s 行**（`present probe: ... xeg=[...] lock hold=...`）。
+- **命令行 > `--config`**（`cvar.h:230-244`：commandline → game → global），
+  所以「设置页可改的项」**不能**再硬编码进启动参数 ✗。
+- **设备坐标**：手机截图 1260x2844、PC 3120x2080；点击坐标 = 截图显示坐标 ×（真实宽/显示宽）。
+  点游戏前**必须先看是哪个游戏**（火影/LIMBO/DmC 行位置不同，我因此错过两次 ✗）。
+

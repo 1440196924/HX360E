@@ -378,11 +378,14 @@ struct Home {
       // direct-HR 路径对 den 的适配尚未做对（标题层会缩到左上角 1/4）。
       // 我们靠 EDRAM dump 路径（已加升采样换算）即可，且已稳定 30fps 有余量，
       // 不需要这条更快的路径。
-      // K1：直读 resolve 的 den 适配（剔除留在 scaled 空间，仅 host texel 映射 ÷den）。
-      // 实测：resolve_ms 6.24→5.24、submit→fence 78→70ms，画面正确。
-      '--vulkan_direct_host_resolve=true',
-      // K4 隔离验证：关掉块级快路径（默认 true）
-      '--hx360e_mem_arm_block_fast_path=false',
+      // 全分辨率（原生）为唯一目标：不做半分辨率。
+      '--hx360e_render_scale_den_x=1',
+      '--hx360e_render_scale_den_y=1',
+      // 先回到已知正确的 dump resolve 路径（隔离直读路径这个变量）
+      '--vulkan_direct_host_resolve=false',
+      // 注意：log_level=2 会让 xenia 的 SPIR-V dump 爆栈崩溃（见 fork 注释），
+      // 所以 pass 分桶仪表用不了；这里只保留我们自己的探针。
+      '--guest_scheduler_stats=true',
       // 系统级超分（XEngine 1.5x）改由设置项 Vulkan|hx360e_xeg_spatial_upscale
       // 控制（默认开）。这里不再传参：命令行优先级高于 --config，传了就会盖掉
       // 用户在设置页里的选择。
