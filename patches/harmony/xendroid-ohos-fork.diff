@@ -955,7 +955,7 @@ index 877fe4fe8..2f49beba6 100644
  namespace xe {
  namespace cpu {
 diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/cpu/backend/code_cache_base.h b/emulator-core/src/main/cpp/xenia/src/xenia/cpu/backend/code_cache_base.h
-index 57cd83547..ff7db2987 100644
+index 57cd83547..332a0bc73 100644
 --- a/emulator-core/src/main/cpp/xenia/src/xenia/cpu/backend/code_cache_base.h
 +++ b/emulator-core/src/main/cpp/xenia/src/xenia/cpu/backend/code_cache_base.h
 @@ -13,6 +13,7 @@
@@ -983,61 +983,26 @@ index 57cd83547..ff7db2987 100644
  #include "xenia/base/literals.h"
  #include "xenia/base/logging.h"
  #include "xenia/base/math.h"
-@@ -174,6 +182,113 @@ class CodeCacheBase : public CodeCache {
+@@ -174,6 +182,78 @@ class CodeCacheBase : public CodeCache {
    virtual bool Initialize() {
      file_name_ =
          fmt::format("xenia_code_cache_{}", Clock::QueryHostTickCount());
 +
 +#if XE_PLATFORM_OHOS
-+    // HarmonyOS executable memory (measured 2026-09-13 on this device/kernel):
-+    // neither an anonymous RW region toggled with mprotect(RX) (EINVAL, errno
-+    // 22) nor a memfd view toggled with mprotect(RX) (EACCES, errno 13) is
-+    // allowed any more - see the memfd2v probe line at startup. What remains is
-+    // to never ask for RWX or mprotect at all: back the cache with a memfd and
-+    // map it twice, once PROT_READ|PROT_EXEC for execution and once
-+    // PROT_READ|PROT_WRITE for placement. PlaceGuestCode only performs the W^X
-+    // toggle when the execute and write bases alias, so with two distinct views
-+    // no protection change happens after initialization.
-+    file_name_ = fmt::format("xenia_code_cache_{}", Clock::QueryHostTickCount());
-+    mapping_ = xe::memory::CreateFileMappingHandle(
-+        file_name_, kGeneratedCodeSize,
-+        xe::memory::PageAccess::kExecuteReadWrite, false);
-+    if (mapping_ == xe::memory::kFileMappingHandleInvalid) {
-+      XELOGE("Unable to create OHOS code cache mapping (size=0x{:X})",
++    // HarmonyOS rejects file-backed executable mappings and strips W from
++    // anonymous RWX (see docs/phase0-result.md). Use one anonymous RW region
++    // as both the write and execute view, and toggle its page protection per
++    // placement (OhosMakeWritable / OhosMakeExecutable below).
++    generated_code_execute_base_ = reinterpret_cast<uint8_t*>(
++        xe::memory::AllocFixed(nullptr, kGeneratedCodeSize,
++                               xe::memory::AllocationType::kReserveCommit,
++                               xe::memory::PageAccess::kReadWrite));
++    if (!generated_code_execute_base_) {
++      XELOGE("Unable to allocate OHOS code cache region (size=0x{:X})",
 +             static_cast<uint64_t>(kGeneratedCodeSize));
 +      return false;
 +    }
-+    const uintptr_t kOhosCodeExecMapped =
-+        execute_address_high() | kGeneratedCodeExecuteBaseLow;
-+    const uintptr_t kOhosCodeWriteMapped =
-+        execute_address_high() | kGeneratedCodeWriteBaseLow;
-+    generated_code_execute_base_ = reinterpret_cast<uint8_t*>(
-+        xe::memory::MapFileView(mapping_,
-+                                reinterpret_cast<void*>(kOhosCodeExecMapped),
-+                                kGeneratedCodeSize,
-+                                xe::memory::PageAccess::kExecuteReadOnly, 0));
-+    if (!generated_code_execute_base_) {
-+      generated_code_execute_base_ = reinterpret_cast<uint8_t*>(
-+          xe::memory::MapFileView(mapping_, nullptr, kGeneratedCodeSize,
-+                                  xe::memory::PageAccess::kExecuteReadOnly, 0));
-+    }
-+    generated_code_write_base_ = reinterpret_cast<uint8_t*>(
-+        xe::memory::MapFileView(mapping_,
-+                                reinterpret_cast<void*>(kOhosCodeWriteMapped),
-+                                kGeneratedCodeSize,
-+                                xe::memory::PageAccess::kReadWrite, 0));
-+    if (!generated_code_write_base_) {
-+      generated_code_write_base_ = reinterpret_cast<uint8_t*>(
-+          xe::memory::MapFileView(mapping_, nullptr, kGeneratedCodeSize,
-+                                  xe::memory::PageAccess::kReadWrite, 0));
-+    }
-+    if (!generated_code_execute_base_ || !generated_code_write_base_) {
-+      XELOGE(
-+          "Unable to map OHOS code cache views (exec={:p} write={:p})",
-+          static_cast<void*>(generated_code_execute_base_),
-+          static_cast<void*>(generated_code_write_base_));
-+      return false;
-+    }
++    generated_code_write_base_ = generated_code_execute_base_;
 +
 +    encoded_indirection_ = true;
 +    indirection_table_base_ = reinterpret_cast<uint8_t*>(xe::memory::AllocFixed(
@@ -1097,7 +1062,7 @@ index 57cd83547..ff7db2987 100644
      mapping_ = xe::memory::CreateFileMappingHandle(
          file_name_, kGeneratedCodeSize,
          xe::memory::PageAccess::kExecuteReadWrite, false);
-@@ -310,7 +425,12 @@ class CodeCacheBase : public CodeCache {
+@@ -310,7 +390,12 @@ class CodeCacheBase : public CodeCache {
        }
      }
      if (!generated_code_execute_base_ || !generated_code_write_base_) {
@@ -1111,7 +1076,7 @@ index 57cd83547..ff7db2987 100644
        return false;
      }
  
-@@ -452,6 +572,38 @@ class CodeCacheBase : public CodeCache {
+@@ -452,6 +537,38 @@ class CodeCacheBase : public CodeCache {
                     code_execute_address_out, code_write_address_out);
    }
  
@@ -1150,7 +1115,7 @@ index 57cd83547..ff7db2987 100644
    void PlaceGuestCode(uint32_t guest_address, void* machine_code,
                        const EmitFunctionInfo& func_info,
                        GuestFunction* function_info,
-@@ -462,6 +614,18 @@ class CodeCacheBase : public CodeCache {
+@@ -462,6 +579,18 @@ class CodeCacheBase : public CodeCache {
      {
        auto global_lock = global_critical_region_.Acquire();
  
@@ -1169,7 +1134,7 @@ index 57cd83547..ff7db2987 100644
        code_execute_address =
            generated_code_execute_base_ + generated_code_offset_;
        code_execute_address_out = code_execute_address;
-@@ -502,6 +666,15 @@ class CodeCacheBase : public CodeCache {
+@@ -502,6 +631,15 @@ class CodeCacheBase : public CodeCache {
          pthread_jit_write_protect_np(0);
        }
  #endif
@@ -1185,7 +1150,7 @@ index 57cd83547..ff7db2987 100644
  
        // Copy code.
        std::memcpy(code_write_address, machine_code, func_info.code_size.total);
-@@ -521,6 +694,13 @@ class CodeCacheBase : public CodeCache {
+@@ -521,6 +659,13 @@ class CodeCacheBase : public CodeCache {
          pthread_jit_write_protect_np(1);
        }
  #endif
@@ -1199,7 +1164,7 @@ index 57cd83547..ff7db2987 100644
  
        // Flush I-cache for code and fill regions.
        self().FlushCodeRange(code_write_address, func_info.code_size.total);
-@@ -546,6 +726,11 @@ class CodeCacheBase : public CodeCache {
+@@ -546,6 +691,11 @@ class CodeCacheBase : public CodeCache {
      uint8_t* data_address = nullptr;
      {
        auto global_lock = global_critical_region_.Acquire();
@@ -1211,7 +1176,7 @@ index 57cd83547..ff7db2987 100644
        data_address = generated_code_write_base_ + generated_code_offset_;
        generated_code_offset_ += xe::round_up(length, 16);
        high_mark = generated_code_offset_;
-@@ -558,12 +743,24 @@ class CodeCacheBase : public CodeCache {
+@@ -558,12 +708,24 @@ class CodeCacheBase : public CodeCache {
      if (jit_write_toggle) {
        pthread_jit_write_protect_np(0);
      }
@@ -1236,7 +1201,7 @@ index 57cd83547..ff7db2987 100644
  #endif
      return uint32_t(uintptr_t(data_address));
    }
-@@ -684,6 +881,18 @@ class CodeCacheBase : public CodeCache {
+@@ -684,6 +846,18 @@ class CodeCacheBase : public CodeCache {
    }
  
    void EnsureCommitted(size_t high_mark) {
@@ -3653,7 +3618,7 @@ index fb6d09930..50e8bfe3c 100644
      bool ext_EXT_shader_stencil_export = false;         // #141
      bool ext_1_1_KHR_get_memory_requirements2 = false;  // #147
 diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_gpu_completion_timeline.cc b/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_gpu_completion_timeline.cc
-index f488d0a11..e112e276f 100644
+index f488d0a11..d89de4aca 100644
 --- a/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_gpu_completion_timeline.cc
 +++ b/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_gpu_completion_timeline.cc
 @@ -14,11 +14,20 @@
@@ -3677,29 +3642,8 @@ index f488d0a11..e112e276f 100644
  VulkanGPUCompletionTimeline::~VulkanGPUCompletionTimeline() {
  #ifndef NDEBUG
    assert_zero(fences_acquired_);
-@@ -60,14 +69,23 @@ VulkanGPUCompletionTimeline::AcquireFenceForSubmission(
-   // Prefer reusing fences already reclaimed by awaits without polling the
-   // driver: the status query of a still-pending fence blocks until it retires
-   // on Turnip/kgsl (vkGetFenceStatus is not non-blocking there), which would
--  // serialize the CPU with the GPU on every submit. Only poll when fences
--  // would otherwise accumulate (users like the presenter's guest output
--  // refresher never await in steady state) - by the time this many
--  // submissions are pending, the oldest one has long retired, so the poll
--  // reclaims it without a meaningful wait.
--  constexpr size_t kMaxPendingBeforeReclaimPoll = 8;
-+  // serialize the CPU with the GPU on every submit.
-+  //
-+  // Measured on Maleoon (HarmonyOS, HX360E): the status query is cheap here
-+  // (measured 0.0 ms per poll), and the users of this timeline - the GPU
-+  // command processor's frame submissions and the presenter's guest output
-+  // refresher - do not await in steady state, so with a high threshold the
-+  // pending fence list grew without bound (one new fence per submission, three
-+  // submissions per frame). After a few minutes of running that showed up as a
-+  // progressive slowdown of vkQueueSubmit (frame time 66 ms -> 630 ms, GPU
-+  // resolve time 10 ms -> 237 ms). Reclaiming as soon as the free list is empty
-+  // keeps the number of live fences bounded - the oldest submission has long
-+  // retired by then, so the poll does not actually wait.
-+  constexpr size_t kMaxPendingBeforeReclaimPoll = 1;
+@@ -68,6 +77,8 @@ VulkanGPUCompletionTimeline::AcquireFenceForSubmission(
+   constexpr size_t kMaxPendingBeforeReclaimPoll = 8;
    if (free_fences_.empty() &&
        pending_submission_fences_.size() >= kMaxPendingBeforeReclaimPoll) {
 +    HxDiagTimeScope hx_scope(&hx_sub_poll_ns);
@@ -3707,7 +3651,7 @@ index f488d0a11..e112e276f 100644
      UpdateCompletedSubmission();
    }
  
-@@ -116,19 +134,33 @@ VkResult VulkanGPUCompletionTimeline::AcquireFenceAndSubmit(
+@@ -116,19 +127,33 @@ VkResult VulkanGPUCompletionTimeline::AcquireFenceAndSubmit(
      const uint32_t queue_family_index, const uint32_t queue_index,
      const uint32_t submit_count, const VkSubmitInfo* const submits) {
    VkResult fence_acquire_result;
