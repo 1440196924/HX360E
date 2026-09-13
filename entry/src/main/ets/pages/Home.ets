@@ -387,6 +387,9 @@ struct Home {
       // 所以不会触发 SPIR-V dump 爆栈。
       // 实测：开着它与关着它帧时间一致（66.6 vs 67.5ms），不构成劣化，可以一直开。
       '--log_gpu_frame_time_breakdown=true',
+      // 实测结论: 关掉中帧提交反而更慢(exec 63->133ms, GPU/提交 21->137ms),
+      // 因为 GPU 无法提前开工、呈现端要等整帧。保持默认开启。
+      '--log_resolve_details=true',
       // 把每个 pass 的 renderArea 缩到实际画到的范围（已验证生效且画面无裁剪，
       // GPU 侧 gpu exec -27%、每 pass -26%）。
       '--render_area_dirty_extent=true',
