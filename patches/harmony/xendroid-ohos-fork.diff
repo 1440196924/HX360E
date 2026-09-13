@@ -1203,23 +1203,107 @@ index 54b7e5980..11e1ec9c3 100644
          display_window_->SetIcon(icon_block.data(), icon_block.size());
        }
      }
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/command_processor.cc b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/command_processor.cc
+index af27e7548..3658c5013 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/command_processor.cc
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/command_processor.cc
+@@ -43,7 +43,19 @@ DEFINE_bool(
+     "GPU");
+ 
+ DEFINE_uint32(
+-    gpu_stall_spin_iterations, 32,
++    gpu_stall_spin_iterations,
++#if XE_PLATFORM_OHOS
++    // HX360E/OHOS: 4 instead of the upstream 32. The description above spells
++    // out why 32 is wrong on ARM64: the "cheap yield" is a WFE that does not
++    // park on a busy SoC, so every iteration burns a core at full clock. Each
++    // guest frame parks here once per vblank wait (a 30fps title: twice per
++    // 33 ms), and the wake-up is event-driven (UpdateWritePointer), so a small
++    // spin still covers the "guest kicks again immediately" case while giving
++    // the cores back to the GPU submission / render threads.
++    4,
++#else
++    32,
++#endif
+     "How many times the command processor polls the ring buffer with a cheap "
+     "yield before parking on the write-pointer event when the guest has "
+     "produced no commands. The spin exists to dodge wake latency when the "
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/draw_util.cc b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/draw_util.cc
+index 9a32f68dc..f1d0121b5 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/draw_util.cc
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/draw_util.cc
+@@ -19,6 +19,10 @@
+ #include "xenia/gpu/texture_cache.h"
+ #include "xenia/ui/graphics_util.h"
+ 
++// HX360E: sub-native rendering divisor, written into the resolve coordinate
++// info below (declared in render_target_cache.h).
++DECLARE_uint32(hx360e_render_scale_den_x);
++
+ // Very prominent in 545407F2.
+ DEFINE_bool(
+     resolve_resolution_scale_fill_half_pixel_offset, true,
+@@ -1181,6 +1185,20 @@ bool GetResolveInfo(const RegisterFile& regs, const Memory& memory,
+   assert_true(draw_resolution_scale_y <= 7);
+   info_out.coordinate_info.draw_resolution_scale_x = draw_resolution_scale_x;
+   info_out.coordinate_info.draw_resolution_scale_y = draw_resolution_scale_y;
++  // HX360E: sub-native rendering divisor for the direct host resolve shaders
++  // (the host render target is guest_extent * scale / source_den texels, see
++  // ResolveCoordinateInfo::source_den_x). Global rather than per-surface - the
++  // sub-native factor is uniform across the frame - so it's read from the cvar
++  // here instead of being plumbed through every caller.
++  uint32_t hx360e_source_den = cvars::hx360e_render_scale_den_x;
++  if (hx360e_source_den < 1) {
++    hx360e_source_den = 1;
++  }
++  if (hx360e_source_den > 7) {
++    hx360e_source_den = 7;
++  }
++  info_out.coordinate_info.source_den_x = hx360e_source_den;
++  info_out.coordinate_info.source_den_y = hx360e_source_den;
+ 
+   // Handle the destination.
+   bool is_depth =
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/draw_util.h b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/draw_util.h
+index d4c26c66b..5320bc28f 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/draw_util.h
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/draw_util.h
+@@ -561,6 +561,15 @@ union ResolveCoordinateInfo {
+     // 1 to 7.
+     uint32_t draw_resolution_scale_x : 3;
+     uint32_t draw_resolution_scale_y : 3;
++
++    // HX360E: sub-native rendering divisor (1 = native), bits 22-27 - free
++    // space in this word, so sizeof stays 4 (asserted below). The host render
++    // target of a surface is guest_extent * draw_resolution_scale / source_den
++    // texels, so the direct host resolve shaders, which address it with guest
++    // sample coordinates, must divide those by source_den (the EDRAM dump path
++    // already does the equivalent with its tile_size / den).
++    uint32_t source_den_x : 3;
++    uint32_t source_den_y : 3;
+   };
+   ResolveCoordinateInfo() : packed(0) {
+     static_assert_size(*this, sizeof(packed));
 diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/render_target_cache.cc b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/render_target_cache.cc
-index a820dd66f..3e3ab828f 100644
+index a820dd66f..09fc9991d 100644
 --- a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/render_target_cache.cc
 +++ b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/render_target_cache.cc
-@@ -532,6 +532,17 @@ RenderTargetCache::~RenderTargetCache() { ShutdownCommon(); }
+@@ -532,6 +532,20 @@ RenderTargetCache::~RenderTargetCache() { ShutdownCommon(); }
  
  void RenderTargetCache::InitializeCommon() {
    assert_true(ownership_ranges_.empty());
 +
 +  // HX360E: sub-native rendering divisor (see hx360e_render_scale_den_x).
-+  draw_resolution_scale_den_x_ =
++  // 只用 X 这一个设置项驱动两个轴：纵向单独设置没有意义，而且历史上出现过
++  // 配置里 Y 仍是默认 1、X 是 2 的混合状态（横向半分辨率、纵向原生），
++  // 观感上像"设置没生效"。Y 的 cvar 保留但忽略。
++  const uint32_t hx360e_render_scale_den =
 +      cvars::hx360e_render_scale_den_x ? cvars::hx360e_render_scale_den_x : 1;
-+  draw_resolution_scale_den_y_ =
-+      cvars::hx360e_render_scale_den_y ? cvars::hx360e_render_scale_den_y : 1;
-+  if (draw_resolution_scale_den_x_ > 1 || draw_resolution_scale_den_y_ > 1) {
-+    XELOGI("HX360E sub-native rendering: host extents at 1/{} x 1/{} of the guest resolution",
-+           draw_resolution_scale_den_x_, draw_resolution_scale_den_y_);
++  draw_resolution_scale_den_x_ = hx360e_render_scale_den;
++  draw_resolution_scale_den_y_ = hx360e_render_scale_den;
++  if (draw_resolution_scale_den_x_ > 1) {
++    XELOGI("HX360E sub-native rendering: host extents at 1/{} of the guest resolution",
++           draw_resolution_scale_den_x_);
 +  }
 +
    ownership_ranges_.emplace(
@@ -1288,6 +1372,74 @@ index 27a388dfb..5ebf60bc2 100644
  
    DrawExtentEstimator draw_extent_estimator_;
  
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/shaders/resolve.xesli b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/shaders/resolve.xesli
+index 4970a60d9..1da91d179 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/shaders/resolve.xesli
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/shaders/resolve.xesli
+@@ -88,6 +88,9 @@ struct XeResolveInfo {
+   uint edram_format_ints_log2;
+   bool decode_pwl_gamma;
+   uint2_xe resolution_scale;
++  // HX360E: sub-native rendering divisor (1 = native) - see
++  // ResolveCoordinateInfo::source_den_x/y in draw_util.h.
++  uint2_xe source_den;
+   uint2_xe half_pixel_offset_fill_source;
+   uint2_xe edram_offset_scaled;
+   uint width_div_8_scaled;
+@@ -123,6 +126,9 @@ XeResolveInfo XeResolveGetInfo(param_push_consts_xe) {
+   #ifdef XE_RESOLVE_RESOLUTION_SCALED
+     resolve_info.resolution_scale =
+         (uint_x2_xe(coordinate_info) >> uint2_xe(16u, 19u)) & 7u;
++    // HX360E: sub-native divisor (bits 22-24 / 25-27), 1 = native.
++    resolve_info.source_den =
++        (uint_x2_xe(coordinate_info) >> uint2_xe(22u, 25u)) & 7u;
+     if ((edram_info & (1u << 29u)) != 0u) {
+       resolve_info.half_pixel_offset_fill_source =
+           resolve_info.resolution_scale >> 1u;
+@@ -131,6 +137,7 @@ XeResolveInfo XeResolveGetInfo(param_push_consts_xe) {
+     }
+   #else
+     resolve_info.resolution_scale = uint_x2_xe(1u);
++    resolve_info.source_den = uint_x2_xe(1u);
+     resolve_info.half_pixel_offset_fill_source = uint_x2_xe(0u);
+   #endif
+   resolve_info.edram_offset_scaled =
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/shaders/resolve_host_color.xesli b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/shaders/resolve_host_color.xesli
+index 3710b1a0a..8c528d36f 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/shaders/resolve_host_color.xesli
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/shaders/resolve_host_color.xesli
+@@ -123,20 +123,27 @@ const_buffer_end_xe(xe_resolve_host_color)
+ #endif
+ 
+ uint XeResolveHostColorTileSizeX(XeResolveInfo resolve_info) {
++  // HX360E: the host render target is draw_resolution_scale / source_den of the
++  // guest EDRAM layout, so a tile covers that much fewer texels. Without this
++  // division the direct resolve shader samples the (smaller) host render target
++  // with native-scale coordinates - observed as the game's front buffer being
++  // drawn at 1/(scale*den) size in the corner with den > 1.
++  uint den_x = max(resolve_info.source_den.x, 1u);
+   #ifdef XE_RESOLVE_HOST_COLOR_FULL_DEST_BPP
+     return (80u >> resolve_info.edram_format_ints_log2) *
+-           resolve_info.resolution_scale.x;
++           resolve_info.resolution_scale.x / den_x;
+   #else
+     #if XE_RESOLVE_HOST_COLOR_BPP == 64
+-      return 40u * resolve_info.resolution_scale.x;
++      return 40u * resolve_info.resolution_scale.x / den_x;
+     #else
+-      return 80u * resolve_info.resolution_scale.x;
++      return 80u * resolve_info.resolution_scale.x / den_x;
+     #endif
+   #endif
+ }
+ 
+ uint XeResolveHostColorTileSizeY(XeResolveInfo resolve_info) {
+-  return 16u * resolve_info.resolution_scale.y;
++  uint den_y = max(resolve_info.source_den.y, 1u);
++  return 16u * resolve_info.resolution_scale.y / den_y;
+ }
+ 
+ uint XeResolveHostColorTilePixelSizeX(XeResolveInfo resolve_info) {
 diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/texture_cache.cc b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/texture_cache.cc
 index 57a6c702e..28b20a421 100644
 --- a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/texture_cache.cc

@@ -378,13 +378,9 @@ struct Home {
       // direct-HR 路径对 den 的适配尚未做对（标题层会缩到左上角 1/4）。
       // 我们靠 EDRAM dump 路径（已加升采样换算）即可，且已稳定 30fps 有余量，
       // 不需要这条更快的路径。
-      '--vulkan_direct_host_resolve=false',
-      // ===== 性能基线测量（临时，测完删）=====
-      // log_level=2 是为了让 xenia 的 info 级诊断日志能出来（配置里默认 1）。
-      // 这两项给出 pass 分桶 GPU 时间与 resolve 路径占比，用来决定 K1/K2 谁先做。
-      '--log_level=2',
-      '--log_gpu_frame_time_breakdown=true',
-      '--log_resolve_details=true',
+      // K1：直读 resolve 已做 den 适配（着色器 tile_size ÷ den），实测 GPU exec
+      // 14.8→9.1ms、resolve_ms −20%、submit→fence −20%，画面正确。
+      '--vulkan_direct_host_resolve=true',
       // 系统级超分（XEngine 1.5x）改由设置项 Vulkan|hx360e_xeg_spatial_upscale
       // 控制（默认开）。这里不再传参：命令行优先级高于 --config，传了就会盖掉
       // 用户在设置页里的选择。
