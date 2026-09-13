@@ -1352,10 +1352,18 @@ index 54b7e5980..11e1ec9c3 100644
        }
      }
 diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/command_processor.cc b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/command_processor.cc
-index af27e7548..186dce335 100644
+index af27e7548..0898c8358 100644
 --- a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/command_processor.cc
 +++ b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/command_processor.cc
-@@ -43,7 +43,15 @@ DEFINE_bool(
+@@ -23,6 +23,7 @@
+ #include "xenia/base/threading.h"
+ #include "xenia/config.h"
+ #include "xenia/gpu/gpu_flags.h"
++#include "xenia/gpu/vulkan/hx_diag_log.h"
+ #include "xenia/gpu/graphics_system.h"
+ #include "xenia/gpu/packet_disassembler.h"
+ #include "xenia/gpu/sampler_info.h"
+@@ -43,7 +44,15 @@ DEFINE_bool(
      "GPU");
  
  DEFINE_uint32(
@@ -1372,6 +1380,15 @@ index af27e7548..186dce335 100644
      "How many times the command processor polls the ring buffer with a cheap "
      "yield before parking on the write-pointer event when the guest has "
      "produced no commands. The spin exists to dodge wake latency when the "
+@@ -577,7 +586,7 @@ void CommandProcessor::FrameStatsEndSwap(uint64_t begin_ns) {
+     s.last_report_ns = now;
+   } else if (now - s.last_report_ns >= 1000000000ull && s.frames) {
+     const double f = static_cast<double>(s.frames);
+-    XELOGI(
++    HX_DIAG_LOG(
+         "GpuFrame: {} frames, interval avg={:.1f}ms max={:.1f}ms | per frame: "
+         "exec={:.1f}ms draws={:.0f} draw={:.1f}ms swap={:.1f}ms "
+         "stall={:.1f}ms",
 diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/draw_util.cc b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/draw_util.cc
 index 9a32f68dc..f1d0121b5 100644
 --- a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/draw_util.cc
@@ -1676,10 +1693,10 @@ index 9236dae5d..0bd33e209 100644
  
 diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/hx_diag_log.h b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/hx_diag_log.h
 new file mode 100644
-index 000000000..c00563876
+index 000000000..cf6fb2bde
 --- /dev/null
 +++ b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/hx_diag_log.h
-@@ -0,0 +1,53 @@
+@@ -0,0 +1,84 @@
 +/**
 + ******************************************************************************
 + * Xenia : Xbox 360 Emulator Research Project                                 *
@@ -1692,6 +1709,7 @@ index 000000000..c00563876
 +#ifndef XENIA_GPU_VULKAN_HX_DIAG_LOG_H_
 +#define XENIA_GPU_VULKAN_HX_DIAG_LOG_H_
 +
++#include <chrono>
 +#include <string>
 +#include <utility>
 +
@@ -1705,6 +1723,36 @@ index 000000000..c00563876
 +namespace xe {
 +namespace gpu {
 +namespace vulkan {
++
++// Lightweight once-per-second counters shared between the pipeline cache, the
++// command processor and the diagnostics report. Plain globals - only touched by
++// the emulation threads, and only for diagnostics.
++inline uint64_t hx_pipe_creates = 0;
++inline uint64_t hx_pipe_create_ns = 0;
++inline uint64_t hx_shader_translates = 0;
++inline uint64_t hx_shader_translate_ns = 0;
++inline uint64_t hx_pipe_waits = 0;
++inline uint64_t hx_pipe_wait_ns = 0;
++inline uint64_t hx_es_rtcache_ns = 0;
++inline uint64_t hx_es_replay_ns = 0;
++inline uint64_t hx_es_submit_ns = 0;
++inline uint64_t hx_sub_fence_ns = 0;
++inline uint64_t hx_sub_queue_ns = 0;
++inline uint64_t hx_sub_polls = 0;
++inline uint64_t hx_sub_poll_ns = 0;
++
++// Accumulates its lifetime into *ns on scope exit (any return path).
++struct HxDiagTimeScope {
++  std::chrono::steady_clock::time_point t0;
++  uint64_t* ns;
++  explicit HxDiagTimeScope(uint64_t* n)
++      : t0(std::chrono::steady_clock::now()), ns(n) {}
++  ~HxDiagTimeScope() {
++    *ns += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
++                       std::chrono::steady_clock::now() - t0)
++                       .count());
++  }
++};
 +
 +// Prints diagnostic-only lines (frame timings, pass buckets, render area
 +// shrinking) straight to hilog instead of through xenia's logger: on HarmonyOS
@@ -1734,19 +1782,45 @@ index 000000000..c00563876
 +
 +#endif  // XENIA_GPU_VULKAN_HX_DIAG_LOG_H_
 diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_command_processor.cc b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_command_processor.cc
-index 7e92705ad..3877e3868 100644
+index 7e92705ad..a4bf16ed3 100644
 --- a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_command_processor.cc
 +++ b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_command_processor.cc
-@@ -46,6 +46,8 @@ DECLARE_bool(clear_memory_page_state);
+@@ -46,6 +46,34 @@ DECLARE_bool(clear_memory_page_state);
  DECLARE_bool(vulkan_in_pass_resolve_debug_read_usage);
  DECLARE_bool(log_gpu_frame_time_breakdown);
  
 +#include "xenia/gpu/vulkan/hx_diag_log.h"
 +
++// Temporary CPU-side breakdown of the command processor thread: which kinds of
++// work inside ExecutePrimaryBuffer actually eat the frame. Printed alongside
++// the VkFrameSync report and reset there.
++namespace {
++struct HxTimeScope {
++  std::chrono::steady_clock::time_point t0;
++  uint64_t* ns;
++  explicit HxTimeScope(uint64_t* n)
++      : t0(std::chrono::steady_clock::now()), ns(n) {}
++  ~HxTimeScope() {
++    *ns += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
++                       std::chrono::steady_clock::now() - t0)
++                       .count());
++  }
++};
++uint64_t hx_cpu_draw_ns = 0;
++uint64_t hx_cpu_copy_ns = 0;
++uint64_t hx_cpu_pass_ns = 0;
++uint64_t hx_cpu_draws = 0;
++uint64_t hx_cpu_copies = 0;
++uint64_t hx_cpu_passes = 0;
++uint64_t hx_cpu_refresh_ns = 0;
++uint64_t hx_cpu_refreshes = 0;
++uint64_t hx_cpu_refreshsub_ns = 0;
++}  // namespace
++
  DEFINE_bool(
      render_area_dirty_extent, false,
      "Shrink each render pass's area to the region its draws actually touch.\n"
-@@ -116,6 +118,15 @@ DEFINE_bool(
+@@ -116,6 +144,15 @@ DEFINE_bool(
      "(pre-optimization behavior).",
      "Vulkan");
  
@@ -1762,7 +1836,7 @@ index 7e92705ad..3877e3868 100644
  DEFINE_bool(
      vulkan_allow_reverse_z, true,
      "Pass viewports with minDepth > maxDepth (reverse depth ranges, used by "
-@@ -1866,7 +1877,7 @@ void VulkanCommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
+@@ -1866,7 +1903,7 @@ void VulkanCommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
    // Fetch (0x4800-0x48BF) and bool/loop (0x4900-0x4927) constants: the
    // derived state (texture bindings, fetch/bool-loop UBO contents) is a pure
    // function of the register value, and games commonly re-emit identical
@@ -1771,7 +1845,21 @@ index 7e92705ad..3877e3868 100644
    // anything. The previous value must be read before the base class stores
    // the new one. The two ranges are checked as one span; the gap registers
    // in between don't consume the flag.
-@@ -2235,7 +2246,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
+@@ -2219,6 +2256,13 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
+                                        uint32_t frontbuffer_height) {
+   SCOPE_profile_cpu_f("gpu");
+ 
++  // The once-per-second GpuFrame report (exec / draws / swap / stall on this
++  // command processor thread) is driven from here because FrameStatsEndSwap had
++  // no caller left - IssueSwap is exactly once per guest frame, which is the
++  // cadence that report expects. Zero cost unless the cvar is on, since
++  // FrameStatsBegin() returns 0 then and FrameStatsEndSwap early-outs on 0.
++  const uint64_t fs_swap_begin = FrameStatsBegin();
++
+   // Count one presented guest frame for the debug overlay's FPS / frame-time
+   // stats (the game's real frame rate, independent of the host present path).
+   xe::RecordGuestPresent();
+@@ -2235,7 +2279,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
        s.last_report_ns = now;
      } else if (now - s.last_report_ns >= 1000000000ull) {
        const double f = static_cast<double>(s.frames);
@@ -1780,7 +1868,7 @@ index 7e92705ad..3877e3868 100644
            "VkFrameSync: {} frames | per frame: awaits={:.1f} await={:.1f}ms "
            "submissions={:.1f} resolves={:.1f} memexport_awaits={:.1f} "
            "readback_awaits={:.1f} "
-@@ -2271,7 +2282,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
+@@ -2271,7 +2315,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
          for (const auto& kv : pass_bucket_stats_) {
            const uint32_t key = kv.first;
            const bool transfer = (key & 0x80000000u) != 0;
@@ -1789,7 +1877,157 @@ index 7e92705ad..3877e3868 100644
                "VkPassTime: {}{}x{} : {:.2f}ms/fr ({:.1f}pass {:.0f}draw/fr, "
                "{:.3f}ms ea) scissor<={}x{} viewport<={}x{}",
                transfer ? "xfer " : "", (key >> 16) & 0x7FFF, key & 0xFFFF,
-@@ -6833,10 +6844,18 @@ void VulkanCommandProcessor::UpdateDynamicState(
+@@ -2289,6 +2333,47 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
+                pass_ts_dropped_);
+         pass_ts_dropped_ = 0;
+       }
++      HX_DIAG_LOG(
++          "HxCpuSplit: per frame draw={:.1f}ms({:.0f}) copy={:.1f}ms({:.0f}) "
++          "pass={:.1f}ms({:.0f}) refresh={:.1f}ms({:.0f}) refsub={:.1f}ms",
++          double(hx_cpu_draw_ns) / f / 1e6, double(hx_cpu_draws) / f,
++          double(hx_cpu_copy_ns) / f / 1e6, double(hx_cpu_copies) / f,
++          double(hx_cpu_pass_ns) / f / 1e6, double(hx_cpu_passes) / f,
++          double(hx_cpu_refresh_ns) / f / 1e6, double(hx_cpu_refreshes) / f,
++          double(hx_cpu_refreshsub_ns) / f / 1e6);
++      hx_cpu_draw_ns = 0;
++      hx_cpu_copy_ns = 0;
++      hx_cpu_pass_ns = 0;
++      hx_cpu_draws = 0;
++      hx_cpu_copies = 0;
++      hx_cpu_passes = 0;
++      hx_cpu_refresh_ns = 0;
++      hx_cpu_refreshes = 0;
++      hx_cpu_refreshsub_ns = 0;
++      HX_DIAG_LOG(
++          "HxPipe: creates={:.1f}/fr {:.1f}ms/fr | waits={:.1f}/fr {:.1f}ms/fr",
++          double(hx_pipe_creates) / f, double(hx_pipe_create_ns) / f / 1e6,
++          double(hx_pipe_waits) / f, double(hx_pipe_wait_ns) / f / 1e6);
++      hx_pipe_creates = 0;
++      hx_pipe_create_ns = 0;
++      hx_pipe_waits = 0;
++      hx_pipe_wait_ns = 0;
++      HX_DIAG_LOG(
++          "HxEndSub: per frame rtcache={:.1f}ms replay={:.1f}ms submit={:.1f}ms",
++          double(hx_es_rtcache_ns) / f / 1e6, double(hx_es_replay_ns) / f / 1e6,
++          double(hx_es_submit_ns) / f / 1e6);
++      hx_es_rtcache_ns = 0;
++      hx_es_replay_ns = 0;
++      hx_es_submit_ns = 0;
++      HX_DIAG_LOG(
++          "HxSubmit: per frame fence={:.1f}ms queue+submit={:.1f}ms | "
++          "polls={:.1f}/fr {:.1f}ms/fr",
++          double(hx_sub_fence_ns) / f / 1e6, double(hx_sub_queue_ns) / f / 1e6,
++          double(hx_sub_polls) / f, double(hx_sub_poll_ns) / f / 1e6);
++      hx_sub_fence_ns = 0;
++      hx_sub_queue_ns = 0;
++      hx_sub_polls = 0;
++      hx_sub_poll_ns = 0;
+       s = VkFrameSyncStats();
+       s.last_report_ns = now;
+     }
+@@ -2322,6 +2407,8 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
+       [this, frontbuffer_width_scaled, frontbuffer_height_scaled,
+        frontbuffer_format, swap_texture_view](
+           ui::Presenter::GuestOutputRefreshContext& context) -> bool {
++        HxTimeScope hx_cpu_scope(&hx_cpu_refresh_ns);
++        ++hx_cpu_refreshes;
+         // In case the swap command is the only one in the frame.
+         if (!BeginSubmission(true)) {
+           return false;
+@@ -2868,13 +2955,19 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
+         // Need to submit all the commands before giving the image back to the
+         // presenter so it can submit its own commands for displaying it to the
+         // queue, and also need to submit the release barrier.
+-        EndSubmission(true);
++        {
++          HxTimeScope hx_cpu_scope(&hx_cpu_refreshsub_ns);
++          EndSubmission(true);
++        }
+         return true;
+       });
+ 
+   // End the frame even if did not present for any reason (the image refresher
+   // was not called), to prevent leaking per-frame resources.
+   EndSubmission(true);
++  // Moved to the end of IssueSwap so swap_ns covers the whole swap, including
++  // the presenter's guest output refresh and present.
++  FrameStatsEndSwap(fs_swap_begin);
+ }
+ 
+ void VulkanCommandProcessor::OnPrimaryBufferEnd() {
+@@ -3341,6 +3434,8 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
+ 
+ void VulkanCommandProcessor::EndRenderPass() {
+   assert_true(submission_open_);
++  HxTimeScope hx_cpu_scope(&hx_cpu_pass_ns);
++  ++hx_cpu_passes;
+   if (!in_render_pass_) {
+     return;
+   }
+@@ -3763,10 +3858,13 @@ Shader* VulkanCommandProcessor::LoadShader(xenos::ShaderType shader_type,
+ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
+                                        uint32_t index_count,
+                                        IndexBufferInfo* index_buffer_info,
+-                                       bool major_mode_explicit) {
++                                               bool major_mode_explicit) {
+ #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
+   SCOPE_profile_cpu_f("gpu");
+ #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
++  HxTimeScope hx_cpu_scope(&hx_cpu_draw_ns);
++  ++hx_cpu_draws;
++
+ 
+   const RegisterFile& regs = *register_file_;
+ 
+@@ -4858,6 +4956,8 @@ bool VulkanCommandProcessor::IssueCopy() {
+ #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
+   SCOPE_profile_cpu_f("gpu");
+ #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
++  HxTimeScope hx_cpu_scope(&hx_cpu_copy_ns);
++  ++hx_cpu_copies;
+ 
+   if (!BeginSubmission(true)) {
+     return false;
+@@ -6426,7 +6526,10 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+ 
+     EndRenderPass();
+ 
+-    render_target_cache_->EndSubmission();
++    {
++      HxDiagTimeScope hx_scope(&hx_es_rtcache_ns);
++      render_target_cache_->EndSubmission();
++    }
+ 
+     primitive_processor_->EndSubmission();
+ 
+@@ -6556,7 +6659,10 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+           VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &setup_barrier, 0, nullptr,
+           0, nullptr);
+     }
+-    deferred_command_buffer_.Execute(command_buffer.buffer);
++    {
++      HxDiagTimeScope hx_scope(&hx_es_replay_ns);
++      deferred_command_buffer_.Execute(command_buffer.buffer);
++    }
+ 
+     // Record ZPD resolves before submitting.
+     if (zpd_host_query_pool_) {
+@@ -6625,8 +6731,12 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+     }
+     submit_info.commandBufferCount = 1;
+     submit_info.pCommandBuffers = &command_buffer.buffer;
+-    const VkResult submit_result = completion_timeline_.AcquireFenceAndSubmit(
+-        vulkan_device->queue_family_graphics_compute(), 0, 1, &submit_info);
++    VkResult submit_result;
++    {
++      HxDiagTimeScope hx_scope(&hx_es_submit_ns);
++      submit_result = completion_timeline_.AcquireFenceAndSubmit(
++          vulkan_device->queue_family_graphics_compute(), 0, 1, &submit_info);
++    }
+     if (submit_result != VK_SUCCESS) {
+       XELOGE(
+           "VulkanCommandProcessor: Failed to submit a Vulkan command buffer - "
+@@ -6833,10 +6943,18 @@ void VulkanCommandProcessor::UpdateDynamicState(
    // Viewport.
    VkViewport viewport;
    if (viewport_info.xy_extent[0] && viewport_info.xy_extent[1]) {
@@ -1812,7 +2050,7 @@ index 7e92705ad..3877e3868 100644
    } else {
      // Vulkan viewport width must be greater than 0.0f, but the Xenia  viewport
      // may be empty for various reasons - set the viewport to outside the
-@@ -6853,11 +6872,20 @@ void VulkanCommandProcessor::UpdateDynamicState(
+@@ -6853,11 +6971,20 @@ void VulkanCommandProcessor::UpdateDynamicState(
    // Scissor.
    draw_util::Scissor scissor;
    draw_util::GetScissor(regs, scissor);
@@ -1839,10 +2077,18 @@ index 7e92705ad..3877e3868 100644
    scissor_rect.offset.x = int32_t(scissor.offset[0]);
    scissor_rect.offset.y = int32_t(scissor.offset[1]);
 diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_pipeline_cache.cc b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_pipeline_cache.cc
-index 254549498..038a1d1aa 100644
+index 254549498..b6f2d7c65 100644
 --- a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_pipeline_cache.cc
 +++ b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_pipeline_cache.cc
-@@ -83,8 +83,16 @@ DEFINE_bool(
+@@ -8,6 +8,7 @@
+  */
+ 
+ #include "xenia/gpu/vulkan/vulkan_pipeline_cache.h"
++#include "xenia/gpu/vulkan/hx_diag_log.h"
+ 
+ #include <chrono>
+ #include <cstdint>
+@@ -83,8 +84,16 @@ DEFINE_bool(
      "draw is ever lost.",
      "Vulkan");
  
@@ -1861,7 +2107,44 @@ index 254549498..038a1d1aa 100644
      "Asynchronous shader compilation async model (A/B). Default false: the "
      "fork's deferred-bind model - no placeholder is created, the pipeline slot "
      "stays VK_NULL_HANDLE, the command processor records a deferred bind of the "
-@@ -1309,7 +1317,15 @@ void VulkanPipelineCache::TranslateShadersForStorage(
+@@ -996,6 +1005,8 @@ void VulkanPipelineCache::EndSubmission() {
+       }
+     }
+     if (await_creation_completion_event) {
++      HxDiagTimeScope hx_scope(&hx_pipe_wait_ns);
++      ++hx_pipe_waits;
+       creation_request_cond_.notify_one();
+       xe::threading::Wait(creation_completion_event_.get(), false);
+     }
+@@ -1061,11 +1072,14 @@ void VulkanPipelineCache::CreationThread() {
+     // On failure the slot stays VK_NULL_HANDLE permanently - the deferred
+     // pipeline bind resolves to null at every replay and the draws using this
+     // pipeline are dropped (crash-free degradation).
+-    if (!EnsureShadersTranslated(creation_arguments.vertex_shader,
+-                                 creation_arguments.pixel_shader,
+-                                 worker_translator.get())) {
+-      XELOGE("Failed to translate shaders for pipeline creation");
+-    } else {
++    {
++      HxDiagTimeScope hx_scope(&hx_pipe_create_ns);
++      ++hx_pipe_creates;
++      if (!EnsureShadersTranslated(creation_arguments.vertex_shader,
++                                   creation_arguments.pixel_shader,
++                                   worker_translator.get())) {
++        XELOGE("Failed to translate shaders for pipeline creation");
++      } else {
+       // Async pipelines are created with a minimal (no-texture) layout on the
+       // draw thread since their shaders weren't translated there (interpreter
+       // placeholder, or drop-until-ready with no placeholder). Now that they're
+@@ -1087,6 +1101,7 @@ void VulkanPipelineCache::CreationThread() {
+         XELOGE("Failed to create Vulkan pipeline");
+       }
+     }
++    }
+ 
+     {
+       std::unique_lock<std::mutex> lock(creation_request_lock_);
+@@ -1309,7 +1324,15 @@ void VulkanPipelineCache::TranslateShadersForStorage(
  
    std::vector<std::unique_ptr<xe::threading::Thread>> translation_threads;
    for (size_t i = 0; i < thread_count; ++i) {
@@ -1878,7 +2161,7 @@ index 254549498..038a1d1aa 100644
      if (thread) {
        thread->set_name("Shader Translation");
        translation_threads.push_back(std::move(thread));
-@@ -2721,6 +2737,37 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
+@@ -2721,6 +2744,37 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
    pipeline_create_info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
    pipeline_create_info.pNext =
        use_dynamic_rendering ? &pipeline_rendering_create_info : nullptr;
@@ -2999,6 +3282,59 @@ index fb6d09930..50e8bfe3c 100644
      bool ext_1_1_KHR_dedicated_allocation = false;      // #128
      bool ext_EXT_shader_stencil_export = false;         // #141
      bool ext_1_1_KHR_get_memory_requirements2 = false;  // #147
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_gpu_completion_timeline.cc b/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_gpu_completion_timeline.cc
+index f488d0a11..57fdcbd79 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_gpu_completion_timeline.cc
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_gpu_completion_timeline.cc
+@@ -14,11 +14,18 @@
+ 
+ #include "xenia/base/assert.h"
+ #include "xenia/base/logging.h"
++#include "xenia/gpu/vulkan/hx_diag_log.h"
+ 
+ namespace xe {
+ namespace ui {
+ namespace vulkan {
+ 
++using xe::gpu::vulkan::HxDiagTimeScope;
++using xe::gpu::vulkan::hx_sub_fence_ns;
++using xe::gpu::vulkan::hx_sub_poll_ns;
++using xe::gpu::vulkan::hx_sub_polls;
++using xe::gpu::vulkan::hx_sub_queue_ns;
++
+ VulkanGPUCompletionTimeline::~VulkanGPUCompletionTimeline() {
+ #ifndef NDEBUG
+   assert_zero(fences_acquired_);
+@@ -68,6 +75,8 @@ VulkanGPUCompletionTimeline::AcquireFenceForSubmission(
+   constexpr size_t kMaxPendingBeforeReclaimPoll = 8;
+   if (free_fences_.empty() &&
+       pending_submission_fences_.size() >= kMaxPendingBeforeReclaimPoll) {
++    HxDiagTimeScope hx_scope(&hx_sub_poll_ns);
++    ++hx_sub_polls;
+     UpdateCompletedSubmission();
+   }
+ 
+@@ -116,14 +125,20 @@ VkResult VulkanGPUCompletionTimeline::AcquireFenceAndSubmit(
+     const uint32_t queue_family_index, const uint32_t queue_index,
+     const uint32_t submit_count, const VkSubmitInfo* const submits) {
+   VkResult fence_acquire_result;
++  const auto hx_fence_t0 = std::chrono::steady_clock::now();
+   std::optional<FenceAcquisition> fence_acquisition =
+       AcquireFenceForSubmission(&fence_acquire_result);
++  hx_sub_fence_ns += uint64_t(
++      std::chrono::duration_cast<std::chrono::nanoseconds>(
++          std::chrono::steady_clock::now() - hx_fence_t0)
++          .count());
+   if (!fence_acquisition.has_value()) {
+     return fence_acquire_result;
+   }
+ 
+   VkResult submit_result;
+   {
++    HxDiagTimeScope hx_scope(&hx_sub_queue_ns);
+     const VulkanDevice::Queue::Acquisition queue_acquisition =
+         vulkan_device_->AcquireQueue(queue_family_index, queue_index);
+     submit_result = vulkan_device_->SubmitAndUpdateLost(
 diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_instance.cc b/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_instance.cc
 index 2265abbb4..0b87119c6 100644
 --- a/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_instance.cc
