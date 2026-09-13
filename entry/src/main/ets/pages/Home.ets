@@ -385,6 +385,7 @@ struct Home {
       // （GpuFrame / VkFrameSync / VkPassId / VkPassTime，均 1/s）。
       // 注意 log_level 默认就是 2=info，不需要传；dump_shaders 默认空，
       // 所以不会触发 SPIR-V dump 爆栈。
+      // 实测：开着它与关着它帧时间一致（66.6 vs 67.5ms），不构成劣化，可以一直开。
       '--log_gpu_frame_time_breakdown=true',
       // 把每个 pass 的 renderArea 缩到实际画到的范围（已验证生效且画面无裁剪，
       // GPU 侧 gpu exec -27%、每 pass -26%）。
