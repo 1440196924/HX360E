@@ -927,6 +927,33 @@ index a1adabd55..717de6434 100644
    }
  
    size_t hash() const { return utf8::hash_fnv1a(view()); }
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/cpu/backend/a64/a64_code_cache.cc b/emulator-core/src/main/cpp/xenia/src/xenia/cpu/backend/a64/a64_code_cache.cc
+index 877fe4fe8..2f49beba6 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/cpu/backend/a64/a64_code_cache.cc
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/cpu/backend/a64/a64_code_cache.cc
+@@ -27,11 +27,18 @@
+ #include <cstring>
+ #endif
+ 
++#if XE_PLATFORM_OHOS
++// HX360E: 默认关闭。这个 map 文件的生成是**每次函数放置**都 snprintf + write +
++// fflush，而 OHOS 上没有 simpleperf/`perf` 用例（我们的性能仪表是 VkFrameSync /
++// 锁画像 / 探针），纯付出没有收益。需要时可用 --a64_perf_map=true 打开。
++DEFINE_bool(a64_perf_map, false,
++#else
+ DEFINE_bool(a64_perf_map, true,
+-            "Write a simpleperf/perf 'generic JIT symbols' map file "
+-            "(perf-<pid>.map) mapping generated code to guest function "
+-            "names, so profilers can attribute JIT samples.",
+-            "CPU");
++#endif
++    "Write a simpleperf/perf 'generic JIT symbols' map file "
++    "(perf-<pid>.map) mapping generated code to guest function "
++    "names, so profilers can attribute JIT samples.",
++    "CPU");
+ 
+ namespace xe {
+ namespace cpu {
 diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/cpu/backend/code_cache_base.h b/emulator-core/src/main/cpp/xenia/src/xenia/cpu/backend/code_cache_base.h
 index 57cd83547..da51376d8 100644
 --- a/emulator-core/src/main/cpp/xenia/src/xenia/cpu/backend/code_cache_base.h
@@ -1611,11 +1638,115 @@ index 8a447b3dd..b92902e59 100644
    xe_shader_rules_spirv(xenia-gpu-vulkan ${CMAKE_CURRENT_SOURCE_DIR}/../shaders)
    xe_shader_rules_slang(xenia-gpu-vulkan ${CMAKE_CURRENT_SOURCE_DIR}/../shaders
                          TARGET spirv)
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/deferred_command_buffer.cc b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/deferred_command_buffer.cc
+index 9236dae5d..0bd33e209 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/deferred_command_buffer.cc
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/deferred_command_buffer.cc
+@@ -17,6 +17,7 @@
+ #include "xenia/base/math.h"
+ #include "xenia/base/profiling.h"
+ #include "xenia/gpu/gpu_flags.h"
++#include "xenia/gpu/vulkan/hx_diag_log.h"
+ #include "xenia/gpu/vulkan/vulkan_command_processor.h"
+ #include "xenia/ui/vulkan/vulkan_instance.h"
+ 
+@@ -706,8 +707,8 @@ void DeferredCommandBuffer::ShrinkRenderAreaToDrawn(
+     // extent is the only safe answer.
+     if (cvars::log_gpu_frame_time_breakdown && xe_shrink_logged < 200) {
+       ++xe_shrink_logged;
+-      XELOGI("VkShrink: kept full extent (draws={} w={} h={})",
+-             pass_recorded_draws_, pass_drawn_width_, pass_drawn_height_);
++      HX_DIAG_LOG("VkShrink: kept full extent (draws={} w={} h={})",
++                  pass_recorded_draws_, pass_drawn_width_, pass_drawn_height_);
+     }
+     return;
+   }
+@@ -739,9 +740,9 @@ void DeferredCommandBuffer::ShrinkRenderAreaToDrawn(
+   if (cvars::log_gpu_frame_time_breakdown && was_h >= 2000 &&
+       xe_shrink_logged < 200) {
+     ++xe_shrink_logged;
+-    XELOGI("VkShrink: {}x{} -> {}x{} ({} draws, dynamic={})", was_w, was_h,
+-           render_area->extent.width, render_area->extent.height,
+-           pass_recorded_draws_, render_area_patch_dynamic_ ? 1 : 0);
++    HX_DIAG_LOG("VkShrink: {}x{} -> {}x{} ({} draws, dynamic={})", was_w, was_h,
++                render_area->extent.width, render_area->extent.height,
++                pass_recorded_draws_, render_area_patch_dynamic_ ? 1 : 0);
+   }
+ }
+ 
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/hx_diag_log.h b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/hx_diag_log.h
+new file mode 100644
+index 000000000..c00563876
+--- /dev/null
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/hx_diag_log.h
+@@ -0,0 +1,53 @@
++/**
++ ******************************************************************************
++ * Xenia : Xbox 360 Emulator Research Project                                 *
++ ******************************************************************************
++ * Copyright 2022 Ben Vanik. All rights reserved.                             *
++ * Released under the BSD license - see LICENSE in the root for more details. *
++ ******************************************************************************
++ */
++
++#ifndef XENIA_GPU_VULKAN_HX_DIAG_LOG_H_
++#define XENIA_GPU_VULKAN_HX_DIAG_LOG_H_
++
++#include <string>
++#include <utility>
++
++#include "xenia/base/logging.h"
++#include "xenia/base/platform.h"
++
++#if XE_PLATFORM_OHOS
++
++#include <hilog/log.h>
++
++namespace xe {
++namespace gpu {
++namespace vulkan {
++
++// Prints diagnostic-only lines (frame timings, pass buckets, render area
++// shrinking) straight to hilog instead of through xenia's logger: on HarmonyOS
++// neither of the logger's sinks is usable for high-volume diagnostics - the
++// hilog sink requires log_to_logcat=true and crashes the boot thread, and the
++// file sink flushes lazily (roughly one line per 50 seconds) so the reports
++// never show up while they are still relevant. The port's own logging goes
++// through the same hilog tag, so the existing capture tooling sees these too.
++template <typename... Args>
++inline void HXDiagLog(fmt::format_string<Args...> fmt, Args&&... args) {
++  const std::string line = fmt::format(fmt, std::forward<Args>(args)...);
++  OH_LOG_Print(LOG_APP, LOG_INFO, 0x0000, "HX360E", "%{public}s", line.c_str());
++}
++
++}  // namespace vulkan
++}  // namespace gpu
++}  // namespace xe
++
++#define HX_DIAG_LOG(...) \
++  ::xe::gpu::vulkan::HXDiagLog(__VA_ARGS__)
++
++#else  // XE_PLATFORM_OHOS
++
++#define HX_DIAG_LOG(...) XELOGI(__VA_ARGS__)
++
++#endif  // XE_PLATFORM_OHOS
++
++#endif  // XENIA_GPU_VULKAN_HX_DIAG_LOG_H_
 diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_command_processor.cc b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_command_processor.cc
-index 7e92705ad..74fdcb502 100644
+index 7e92705ad..3877e3868 100644
 --- a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_command_processor.cc
 +++ b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_command_processor.cc
-@@ -116,6 +116,15 @@ DEFINE_bool(
+@@ -46,6 +46,8 @@ DECLARE_bool(clear_memory_page_state);
+ DECLARE_bool(vulkan_in_pass_resolve_debug_read_usage);
+ DECLARE_bool(log_gpu_frame_time_breakdown);
+ 
++#include "xenia/gpu/vulkan/hx_diag_log.h"
++
+ DEFINE_bool(
+     render_area_dirty_extent, false,
+     "Shrink each render pass's area to the region its draws actually touch.\n"
+@@ -116,6 +118,15 @@ DEFINE_bool(
      "(pre-optimization behavior).",
      "Vulkan");
  
@@ -1631,7 +1762,34 @@ index 7e92705ad..74fdcb502 100644
  DEFINE_bool(
      vulkan_allow_reverse_z, true,
      "Pass viewports with minDepth > maxDepth (reverse depth ranges, used by "
-@@ -6833,10 +6842,18 @@ void VulkanCommandProcessor::UpdateDynamicState(
+@@ -1866,7 +1877,7 @@ void VulkanCommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
+   // Fetch (0x4800-0x48BF) and bool/loop (0x4900-0x4927) constants: the
+   // derived state (texture bindings, fetch/bool-loop UBO contents) is a pure
+   // function of the register value, and games commonly re-emit identical
+-  // constants every draw — a same-value write doesn't need to dirty
++  // constants every draw 鈥?a same-value write doesn't need to dirty
+   // anything. The previous value must be read before the base class stores
+   // the new one. The two ranges are checked as one span; the gap registers
+   // in between don't consume the flag.
+@@ -2235,7 +2246,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
+       s.last_report_ns = now;
+     } else if (now - s.last_report_ns >= 1000000000ull) {
+       const double f = static_cast<double>(s.frames);
+-      XELOGI(
++      HX_DIAG_LOG(
+           "VkFrameSync: {} frames | per frame: awaits={:.1f} await={:.1f}ms "
+           "submissions={:.1f} resolves={:.1f} memexport_awaits={:.1f} "
+           "readback_awaits={:.1f} "
+@@ -2271,7 +2282,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
+         for (const auto& kv : pass_bucket_stats_) {
+           const uint32_t key = kv.first;
+           const bool transfer = (key & 0x80000000u) != 0;
+-          XELOGI(
++          HX_DIAG_LOG(
+               "VkPassTime: {}{}x{} : {:.2f}ms/fr ({:.1f}pass {:.0f}draw/fr, "
+               "{:.3f}ms ea) scissor<={}x{} viewport<={}x{}",
+               transfer ? "xfer " : "", (key >> 16) & 0x7FFF, key & 0xFFFF,
+@@ -6833,10 +6844,18 @@ void VulkanCommandProcessor::UpdateDynamicState(
    // Viewport.
    VkViewport viewport;
    if (viewport_info.xy_extent[0] && viewport_info.xy_extent[1]) {
@@ -1654,7 +1812,7 @@ index 7e92705ad..74fdcb502 100644
    } else {
      // Vulkan viewport width must be greater than 0.0f, but the Xenia  viewport
      // may be empty for various reasons - set the viewport to outside the
-@@ -6853,11 +6870,20 @@ void VulkanCommandProcessor::UpdateDynamicState(
+@@ -6853,11 +6872,20 @@ void VulkanCommandProcessor::UpdateDynamicState(
    // Scissor.
    draw_util::Scissor scissor;
    draw_util::GetScissor(regs, scissor);
