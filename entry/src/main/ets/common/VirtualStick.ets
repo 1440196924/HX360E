@@ -31,6 +31,10 @@ export struct PadButton {
       .width(this.btnWidth)
       .height(this.btnHeight)
       .padding(0)
+      // 虚拟手柄按钮不参与焦点：手柄十字键默认会用来做焦点导航，
+      // 会在这些按钮之间跳焦点（游戏页不需要任何焦点）。
+      .focusable(false)
+      .focusOnTouch(false)
       .scale({ x: this.pressed ? 0.92 : 1, y: this.pressed ? 0.92 : 1 })
       .onTouch((e: TouchEvent) => {
         if (e.type === TouchType.Down) {

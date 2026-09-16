@@ -484,15 +484,23 @@ struct GamePage {
     }
   }
 
-  private handlePhysicalKey(event: KeyEvent): void {
+  /**
+   * 物理手柄按键 → 360 手柄键位。
+   *
+   * 返回 true = 事件已消费。**必须消费**：手柄十字键一般是 KEYCODE_DPAD_*，
+   * onKeyEvent 不返回 true 的话 ArkUI 会拿它当焦点导航用，在虚拟手柄的按钮
+   * 之间来回跳焦点（实测就是这个现象）。
+   */
+  private handlePhysicalKey(event: KeyEvent): boolean {
     const key: number = this.physicalPadKey(event.keyCode);
     if (key < 0) {
-      return;
+      return false;
     }
     const pressed: boolean = event.type === KeyType.Down;
     this.padPress(key, pressed);
     hilog.info(DOMAIN, TAG, 'physical pad keyCode=%{public}d -> %{public}d %{public}s',
       event.keyCode, key, pressed ? 'down' : 'up');
+    return true;
   }
 
   // 圆形按键（ABXY / L3 / R3 / Back / Start）：按住生效，自带按下反馈。
@@ -779,8 +787,9 @@ struct GamePage {
     // 游戏页背景纯黑（黑边/拉伸时露出的区域也是黑的）。
     .backgroundColor('#000000')
     // 物理手柄：USB 有线手柄以 HID 按键事件进来，在这里映射成 360 手柄按键。
-    .onKeyEvent((event: KeyEvent) => {
-      this.handlePhysicalKey(event);
+    // 回调返回 true 消费事件，避免十字键被 ArkUI 当成焦点导航。
+    .onKeyEvent((event: KeyEvent): boolean => {
+      return this.handlePhysicalKey(event);
     })
     // 摇杆是模拟轴，走轴事件（USB 手柄实测不派发，保留映射入口以便蓝牙手柄可用）。
     .onAxisEvent((event: AxisEvent) => {
