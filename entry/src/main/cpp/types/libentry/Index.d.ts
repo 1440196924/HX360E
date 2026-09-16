@@ -177,6 +177,38 @@ export interface ContentApi {
                 language: number, country: number): number;
 }
 
+/** ZIP 解压任务的状态快照（ArkTS 侧轮询用）。 */
+export interface ZipPollResult {
+  /** 是否有任务在跑。 */
+  active: boolean;
+  finished: boolean;
+  /** 已写出 / 总解压字节数。 */
+  done: number;
+  total: number;
+  /** 当前正在解压的条目名。 */
+  name: string;
+  ok: boolean;
+  files: number;
+  /** 失败原因（可直接显示）。 */
+  error: string;
+  /** 包内有加密项但没有密码 → 需要弹密码框。 */
+  needPassword: boolean;
+  /** 给了密码但校验不过。 */
+  badPassword: boolean;
+  canceled: boolean;
+}
+
+export interface ZipApi {
+  /** 启动解压任务，返回非空句柄表示已启动（同一时刻只允许一个）。 */
+  extractStart(zipPath: string, destDir: string, password: string): string;
+  /** 轮询任务状态。 */
+  extractPoll(): ZipPollResult;
+  /** 请求取消（解压器在下一块检查）。 */
+  extractCancel(): void;
+  /** 收尾：等后台线程结束并释放任务。 */
+  extractFinish(): void;
+}
+
 export const jitProbe: () => JitProbeResult;
 export const vulkanStatus: () => VulkanStatus;
 export const attachSurface: (surfaceId: string) => boolean;
@@ -185,3 +217,4 @@ export const config: ConfigApi;
 export const meta: MetaApi;
 export const prompt: PromptApi;
 export const content: ContentApi;
+export const zip: ZipApi;

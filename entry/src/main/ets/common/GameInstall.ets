@@ -36,6 +36,8 @@ export class InstallProgress {
   percent: number = 0;
   copied: number = 0;
   total: number = 0;
+  /** 已解出/已复制的文件数（压缩包安装用）。 */
+  files: number = 0;
 }
 
 /** 取消开关：UI 线程置 true，安装循环在下一批任务前检查。 */
@@ -232,6 +234,209 @@ export class GameInstall {
     p.stats = `${GameLibrary.formatSize(copied)} · ${plan.rels.length} 个文件`;
     onProgress(p);
     return `已安装：${meta.name}（${plan.rels.length} 个文件）`;
+  }
+
+  /**
+   * 选「压缩包」安装（.zip → 直接解压进沙箱）。
+   *
+   * 解压在原生后台线程跑（几 GB 不能占 UI 线程），这里用 200ms 轮询刷新进度。
+   * 加密包的处理：第一次不带密码试跑，原生侧扫到加密项会立刻返回 needPassword
+   * （此时一个文件都没落），再调 askPassword 拿密码重跑；口令错可重试。
+   *
+   * @param askPassword 需要密码时的回调（retry=true 表示上次口令不对）。
+   */
+  static async installArchive(ctx: common.Context, filesDir: string,
+                              onProgress: (p: InstallProgress) => void,
+                              control: InstallControl,
+                              askPassword: (retry: boolean) => Promise<string>):
+                              Promise<string> {
+    const p = new InstallProgress();
+    p.active = false;
+    p.detail = '请选择压缩包…';
+    onProgress(p);
+
+    const options = new picker.DocumentSelectOptions();
+    options.maxSelectNumber = 1;
+    options.fileSuffixFilters = ['压缩包|.zip'];
+    let uris: string[] = [];
+    try {
+      const docPicker = new picker.DocumentViewPicker(ctx);
+      uris = await docPicker.select(options);
+    } catch (e) {
+      hilog.error(DOMAIN, TAG, 'archive pick failed: %{public}s', JSON.stringify(e));
+      return '选择压缩包失败（见 hilog）';
+    }
+    if (uris.length === 0) {
+      return '已取消';
+    }
+
+    const srcPath: string = GameInstall.uriToPath(uris[0]);
+    const displayName: string = GameInstall.uriBaseName(srcPath);
+    hilog.info(DOMAIN, TAG, 'install archive: path=%{public}s', srcPath);
+
+    const id: string = GameLibrary.makeId(displayName, Date.now());
+    const dir: string = GameLibrary.gameDir(filesDir, id);
+    GameLibrary.ensureDir(dir);
+
+    // 1) 解压（可能需要密码，最多让用户重试 3 次）。
+    let password: string = '';
+    let attempts: number = 0;
+    while (true) {
+      const r: string = await GameInstall.runExtract(srcPath, dir, password,
+        p, onProgress, control);
+      if (r === '') {
+        break;   // 解压成功
+      }
+      if (r === 'canceled') {
+        GameInstall.cleanup(filesDir, id);
+        return '已取消安装';
+      }
+      if ((r === 'need_password' || r === 'bad_password') && attempts < 3) {
+        attempts++;
+        password = await askPassword(r === 'bad_password');
+        if (password === '') {
+          GameInstall.cleanup(filesDir, id);
+          return '已取消（未输入密码）';
+        }
+        continue;
+      }
+      GameInstall.cleanup(filesDir, id);
+      return r === 'bad_password' ? '密码错误（已尝试多次）' : r;
+    }
+
+    // 2) 收尾：找启动目标 + 读标题/封面 + 落元数据（与文件夹安装同一套）。
+    p.detail = '正在读取游戏信息…';
+    p.percent = 99;
+    onProgress(p);
+    const target: string = GameLibrary.resolveTarget(dir, 0);
+    if (target === '') {
+      GameInstall.cleanup(filesDir, id);
+      return '已解压但未找到可启动文件（default.xex / STFS / game*）';
+    }
+
+    const tm: TitleMeta = GameInstall.readTitleMeta(target);
+    const meta = new GameMeta();
+    meta.id = id;
+    meta.name = tm.name !== '' ? tm.name : GameInstall.displayNameFor(displayName);
+    meta.titleId = tm.titleId;
+    meta.target = GameLibrary.toRelative(dir, target);
+    meta.kind = 'folder';
+    meta.fileCount = p.files;
+    meta.sizeBytes = p.copied;
+    meta.installedAt = Date.now();
+    if (tm.iconBytes !== undefined && tm.iconBytes.byteLength > 0) {
+      const iconPath: string = GameLibrary.iconPathOf(filesDir, id);
+      if (GameInstall.writeBytes(iconPath, tm.iconBytes)) {
+        meta.iconPath = iconPath;
+      }
+    }
+    if (meta.titleId === '') {
+      meta.titleId = GameInstall.titleIdFor(target);
+    }
+    GameLibrary.saveMeta(filesDir, meta);
+    hilog.info(DOMAIN, TAG,
+      'installed from archive slot=%{public}s target=%{public}s files=%{public}d',
+      id, target, p.files);
+
+    p.active = false;
+    p.percent = 100;
+    p.detail = meta.name;
+    p.stats = `${GameLibrary.formatSize(p.copied)} · ${p.files} 个文件`;
+    onProgress(p);
+    return `已安装：${meta.name}（${p.files} 个文件）`;
+  }
+
+  /**
+   * 跑一次解压任务并轮询到结束。
+   *
+   * @return 空串 = 成功；'canceled' / 'need_password' / 'bad_password' / 其他错误文案。
+   */
+  private static async runExtract(zipPath: string, destDir: string,
+                                  password: string, p: InstallProgress,
+                                  onProgress: (p: InstallProgress) => void,
+                                  control: InstallControl): Promise<string> {
+    p.active = true;
+    p.detail = '正在解压…';
+    p.percent = 0;
+    p.stats = '';
+    onProgress(p);
+
+    let handle: string = '';
+    try {
+      handle = testNapi.zip.extractStart(zipPath, destDir, password);
+    } catch (e) {
+      hilog.error(DOMAIN, TAG, 'extractStart failed: %{public}s', JSON.stringify(e));
+      return '解压失败（见 hilog）';
+    }
+    if (handle === '') {
+      return '已有解压任务在进行';
+    }
+
+    let canceled: boolean = false;
+    while (true) {
+      const st = testNapi.zip.extractPoll();
+      if (st.active && !st.finished && !canceled) {
+        p.copied = st.done;
+        p.total = st.total;
+        p.percent = st.total > 0
+          ? Math.min(99, st.done * 100 / st.total) : 0;
+        if (st.name !== '') {
+          p.detail = `正在解压：${st.name}`;
+        }
+        if (st.total > 0) {
+          p.stats = `${GameLibrary.formatSize(st.done)} / ` +
+            `${GameLibrary.formatSize(st.total)}`;
+        }
+        onProgress(p);
+      }
+      if (control.canceled && !canceled) {
+        canceled = true;
+        testNapi.zip.extractCancel();
+      }
+      if (st.finished) {
+        break;
+      }
+      if (!st.active) {
+        break;
+      }
+      await GameInstall.sleep(200);
+    }
+
+    const st = testNapi.zip.extractPoll();
+    const error: string = st.error;
+    const ok: boolean = st.ok;
+    const files: number = st.files;
+    const done: number = st.done;
+    const total: number = st.total;
+    const needPw: boolean = st.needPassword;
+    const badPw: boolean = st.badPassword;
+    const wasCanceled: boolean = st.canceled || canceled;
+    testNapi.zip.extractFinish();
+
+    if (wasCanceled) {
+      return 'canceled';
+    }
+    if (ok) {
+      p.copied = done;
+      p.total = total > 0 ? total : done;
+      p.files = files;
+      return '';
+    }
+    if (needPw) {
+      return 'need_password';
+    }
+    if (badPw) {
+      return 'bad_password';
+    }
+    return error !== '' ? error : '解压失败';
+  }
+
+  private static sleep(ms: number): Promise<void> {
+    return new Promise<void>((resolve: () => void) => {
+      setTimeout(() => {
+        resolve();
+      }, ms);
+    });
   }
 
   // ---- 内部工具 ----

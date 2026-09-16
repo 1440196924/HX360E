@@ -210,6 +210,11 @@ struct Home {
   @State installTitle: string = '正在安装';
   @State installDetail: string = '';
   @State installStats: string = '';
+  // 压缩包加密时的密码浮层。
+  @State passwordVisible: boolean = false;
+  @State passwordPrompt: string = '';
+  @State passwordInput: string = '';
+  private passwordResolver: ((v: string) => void) | undefined = undefined;
   /** XEngine Kit（Maleoon GPU 加速）特性清单（临时诊断显示，同时见「关于」页）。 */
   @State xengineInfo: string = '';
   private installControl: InstallControl = new InstallControl();
@@ -484,6 +489,114 @@ struct Home {
     this.installPercent = p.percent;
   }
 
+  // ---- 压缩包安装 ----
+
+  // 从压缩包安装：解压进沙箱，加密包会弹密码框（最多重试 3 次）。
+  async importArchive(): Promise<void> {
+    if (this.busy) {
+      return;
+    }
+    const ctx: common.Context | undefined = this.appContext();
+    if (ctx === undefined) {
+      this.statusText = '导入失败：无 context';
+      return;
+    }
+    this.busy = true;
+    this.installCanceling = false;
+    this.installPercent = 0;
+    this.installControl = new InstallControl();
+    try {
+      this.statusText = await GameInstall.installArchive(ctx, ctx.filesDir,
+        (p: InstallProgress) => {
+          this.onInstallProgress(p);
+        },
+        this.installControl,
+        (retry: boolean) => this.askArchivePassword(retry));
+      this.reloadGames();
+    } catch (e) {
+      this.statusText = '导入失败（见 hilog）';
+      hilog.error(DOMAIN, TAG, 'import archive failed: %{public}s',
+        JSON.stringify(e));
+    } finally {
+      this.busy = false;
+      this.installing = false;
+      this.installCanceling = false;
+    }
+  }
+
+  // 弹密码框并等用户输入（同一次安装里可能被调多次：口令错要重试）。
+  private askArchivePassword(retry: boolean): Promise<string> {
+    this.passwordPrompt = retry ? '密码错误，请重新输入' : '该压缩包已加密，请输入密码';
+    this.passwordInput = '';
+    this.passwordVisible = true;
+    return new Promise<string>((resolve: (v: string) => void) => {
+      this.passwordResolver = resolve;
+    });
+  }
+
+  private finishPasswordInput(value: string): void {
+    this.passwordVisible = false;
+    const resolver: ((v: string) => void) | undefined = this.passwordResolver;
+    this.passwordResolver = undefined;
+    if (resolver !== undefined) {
+      resolver(value);
+    }
+  }
+
+  // 密码浮层：解压暂停在等密码，取消等同于放弃安装。
+  @Builder
+  passwordOverlay() {
+    Column({ space: 12 }) {
+      Text('压缩包密码')
+        .fontSize(18)
+        .fontWeight(FontWeight.Bold)
+        .fontColor($r('app.color.text_primary'))
+      Text(this.passwordPrompt)
+        .fontSize(12)
+        .fontColor($r('app.color.text_secondary'))
+      TextInput({ text: this.passwordInput, placeholder: '请输入密码' })
+        .type(InputType.Password)
+        .height(42)
+        .onChange((v: string) => {
+          this.passwordInput = v;
+        })
+        .onSubmit(() => {
+          this.finishPasswordInput(this.passwordInput);
+        })
+      Row({ space: 12 }) {
+        Button('取消')
+          .fontSize(14)
+          .height(36)
+          .layoutWeight(1)
+          .backgroundColor($r('app.color.chip_bg'))
+          .fontColor($r('app.color.text_primary'))
+          .onClick(() => {
+            this.finishPasswordInput('');
+          })
+        Button('确定')
+          .fontSize(14)
+          .height(36)
+          .layoutWeight(1)
+          .backgroundColor($r('app.color.accent'))
+          .fontColor($r('app.color.text_primary'))
+          .onClick(() => {
+            this.finishPasswordInput(this.passwordInput);
+          })
+      }
+      .width('100%')
+    }
+    .width('86%')
+    .padding(18)
+    .backgroundColor($r('app.color.card_bg'))
+    .borderRadius(20)
+    .shadow({
+      radius: 32,
+      color: $r('app.color.mask'),
+      offsetX: 0,
+      offsetY: 8,
+    })
+  }
+
   async doExportLogs(): Promise<void> {
     const ctx: common.Context | undefined = this.appContext();
     if (ctx === undefined) {
@@ -582,7 +695,20 @@ struct Home {
         .height(40)
         .padding(0)
         .backgroundColor($r('app.color.card_bg'))
-        .onClick(() => this.importGame())
+        .bindMenu([
+          {
+            value: '从文件夹安装',
+            action: () => {
+              this.importGame();
+            },
+          },
+          {
+            value: '从压缩包安装（zip）',
+            action: () => {
+              this.importArchive();
+            },
+          },
+        ])
       }
       .width('100%')
       .padding({
@@ -833,6 +959,9 @@ struct Home {
 
         if (this.installing) {
           this.installOverlay()
+        }
+        if (this.passwordVisible) {
+          this.passwordOverlay()
         }
       }
       .width('100%')
