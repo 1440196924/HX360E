@@ -6,6 +6,7 @@ import { gamePlayer } from '@kit.GameServiceKit';
 import { common } from '@kit.AbilityKit';
 import testNapi from 'libentry.so';
 import { XPadKey } from '../common/PadKey';
+import { inputDevice } from '@kit.InputKit';
 import { Orientation } from '../common/Orientation';
 import { VirtualStick, VirtualDpad, PadButton } from '../common/VirtualStick';
 import { SettingsStore } from '../common/SettingsStore';
@@ -134,6 +135,17 @@ struct GamePage {
     }
     this.setImmersive(true);
     this.declareGameScene();
+    // 物理手柄：进入游戏页时重新武装一次 GameControllerKit 监视器（在游戏启动
+    // 之前就连好的手柄也能收到事件），并注册系统热插拔监听，插入/拔出后再次
+    // 武装 —— 否则监视器只在开局注册那一刻有效，后插的手柄不会有任何输入。
+    this.rearmPhysicalPad('enter');
+    try {
+      inputDevice.on('change', this.deviceWatcher);
+      hilog.info(DOMAIN, TAG, 'gamepad hot-plug watcher registered');
+    } catch (e) {
+      hilog.error(DOMAIN, TAG, 'gamepad watcher failed: %{public}s',
+        JSON.stringify(e));
+    }
     try {
       this.showPad = testNapi.emulator.showTouchOverlayEnabled();
     } catch (e) {
@@ -182,6 +194,31 @@ struct GamePage {
   }
 
   /**
+   * 物理手柄热插拔监听：系统上报 add/remove 时重新武装 GameControllerKit 的
+   * 按键/摇杆监视器。GameControllerKit 的监视器需要在手柄已连接时注册才会
+   * 持续回调，因此每次插拔都重来一遍（Stop + Start）。
+   */
+  private deviceWatcher: (data: inputDevice.DeviceListener) => void =
+    (data: inputDevice.DeviceListener) => {
+      hilog.info(DOMAIN, TAG, 'input device %{public}s (id=%{public}d)',
+        data.type, data.deviceId);
+      this.rearmPhysicalPad(data.type);
+    };
+
+  /** 重新武装物理手柄监视器（幂等：原生侧自己处理已启动的情况）。 */
+  private rearmPhysicalPad(reason: string): void {
+    try {
+      testNapi.emulator.padStopPhysical();
+      testNapi.emulator.padStartPhysical();
+      hilog.info(DOMAIN, TAG, 'physical pad monitors re-armed (%{public}s)',
+        reason);
+    } catch (e) {
+      hilog.warn(DOMAIN, TAG, 're-arm physical pad failed: %{public}s',
+        JSON.stringify(e));
+    }
+  }
+
+  /**
    * 从游戏界面返回 = 退出游戏：先让原生侧停掉模拟器（guest 线程 / Vulkan / 音频
    * 全部收尾），再回到游戏库。返回 true 表示按键已被消费，不再走系统默认返回。
    */
@@ -201,6 +238,11 @@ struct GamePage {
   }
 
   aboutToDisappear(): void {
+    try {
+      inputDevice.off('change', this.deviceWatcher);
+    } catch (e) {
+      // 忽略
+    }
     try {
       const ctx = getContext(this) as common.Context;
       Orientation.portrait(ctx);
