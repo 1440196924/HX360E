@@ -31,6 +31,8 @@ struct GamePage {
   @State promptDiscLabels: string[] = [];
   @State promptDiscPaths: string[] = [];
   private promptId: bigint = BigInt(0);
+  /** 返回键触发：离开页面后再退出游戏。 */
+  private quitAfterLeave: boolean = false;
   private lastSurfaceId: string = '';
   private promptTimer: number = -1;
   private attachTimer: number = -1;
@@ -219,23 +221,15 @@ struct GamePage {
   }
 
   /**
-   * 从游戏界面返回 = 退出游戏：先让原生侧停掉模拟器（guest 线程 / Vulkan / 音频
-   * 全部收尾），再回到游戏库。返回 true 表示按键已被消费，不再走系统默认返回。
-   * 注意：ArkUI 的页面级回调名是 onBackPress（不是 onBackPressed）。
+   * 从游戏界面返回 = 退出游戏。
+   *
+   * 注意顺序：不能在 onBackPress 里直接 quit —— 那时页面与 XComponent(surface)
+   * 都还活着，原生侧拆 Vulkan/window 会用到正在被销毁的 surface，实测直接闪退。
+   * 正确做法是先让系统完成返回（页面销毁、surface detach），再延迟停模拟器。
    */
   onBackPress(): boolean {
-    try {
-      testNapi.emulator.quit();
-      hilog.info(DOMAIN, TAG, 'game quit requested by back');
-    } catch (e) {
-      hilog.warn(DOMAIN, TAG, 'game quit failed: %{public}s', JSON.stringify(e));
-    }
-    try {
-      router.back();
-    } catch (e) {
-      // 忽略：路由栈异常时不影响退出
-    }
-    return true;
+    this.quitAfterLeave = true;
+    return false;  // 交给系统返回
   }
 
   aboutToDisappear(): void {
@@ -243,6 +237,20 @@ struct GamePage {
       inputDevice.off('change', this.deviceWatcher);
     } catch (e) {
       // 忽略
+    }
+    // 返回退出：等页面（含 XComponent surface）真正销毁后再停模拟器，
+    // 避免在 surface 仍被使用时拆 Vulkan/window（实测会闪退）。
+    if (this.quitAfterLeave) {
+      this.quitAfterLeave = false;
+      setTimeout(() => {
+        try {
+          hilog.info(DOMAIN, TAG, 'game quit after leaving page');
+          testNapi.emulator.quit();
+        } catch (e) {
+          hilog.warn(DOMAIN, TAG, 'quit after leave failed: %{public}s',
+            JSON.stringify(e));
+        }
+      }, 400);
     }
     try {
       const ctx = getContext(this) as common.Context;
