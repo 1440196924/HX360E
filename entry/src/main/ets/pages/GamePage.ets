@@ -475,7 +475,9 @@ struct GamePage {
   private handlePhysicalAxis(event: AxisEvent): void {
     try {
       const ax: number = event.getHorizontalAxisValue();
-      const ay: number = event.getVerticalAxisValue();
+      // ArkUI 的垂直轴与屏幕坐标一致（正方向朝下），而 stickToKeys 约定
+      // y 正方向朝上，所以取反；否则上下颠倒。
+      const ay: number = -event.getVerticalAxisValue();
       if (ax !== 0 || ay !== 0) {
         this.stickToKeys(true, ax, ay);
       }

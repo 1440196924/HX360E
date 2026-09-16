@@ -143,6 +143,11 @@ void HandlePadAxis(PadAxisGroup group, const struct GamePad_AxisEvent* event) {
       double y = 0.0;
       OH_GamePad_AxisEvent_GetXAxisValue(event, &x);
       OH_GamePad_AxisEvent_GetYAxisValue(event, &y);
+      // 轴向统一：HarmonyOS 的 y 轴正方向朝下（与屏幕坐标一致），而本文件的
+      // 约定（以及 XInput 的 thumb_ly）是 y 正方向朝上，所以取反。
+      // 证据：同一平台上的 RPCS3_RE/core/ohos/input/ohos_gamepad.cpp 把
+      // hat_y < 0 判为 UP。X 轴两边一致（正=右），不动。
+      y = -y;
       const int16_t x_value = ScaleStick(x);
       const int16_t y_value = ScaleStick(y);
       (void)source;
@@ -154,6 +159,7 @@ void HandlePadAxis(PadAxisGroup group, const struct GamePad_AxisEvent* event) {
         double hat_y = 0.0;
         OH_GamePad_AxisEvent_GetHatXAxisValue(event, &hat_x);
         OH_GamePad_AxisEvent_GetHatYAxisValue(event, &hat_y);
+        hat_y = -hat_y;   // 同上：hat 的 y 正方向同样朝下
         constexpr double kHatEps = 0.5;
         ApplyDirections(driver, kPadDpadLeft, kPadDpadRight, kPadDpadUp,
                         kPadDpadDown, hat_x, hat_y,
