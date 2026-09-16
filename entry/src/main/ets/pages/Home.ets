@@ -211,6 +211,8 @@ struct Home {
   @State statusText: string = '';
   // 状态栏高度（vp），沉浸式下标题不能压到状态栏上。
   @State statusBarVp: number = 0;
+  /** 底部避让高度（小横条/导航栏），给悬浮页签留位。 */
+  @State bottomInsetVp: number = 0;
   /**
    * 沉浸光感材质档位：默认最精美，设备不支持 IMMERSIVE 时降级到 SMOOTH
    * （官方建议的降级路径，见 pickMaterialLevel）。
@@ -363,7 +365,20 @@ struct Home {
       }
       const px: number = avoid.topRect.height;
       this.statusBarVp = density > 0 ? Math.ceil(px / density) : 0;
-      hilog.info(DOMAIN, TAG, 'status bar %{public}d px → %{public}d vp',
+      // 底部：优先取「小横条」高度，取不到再退回系统导航栏高度。
+      let bottomPx: number = 0;
+      try {
+        const indicator = win.getWindowAvoidArea(
+          window.AvoidAreaType.TYPE_NAVIGATION_INDICATOR);
+        bottomPx = indicator.bottomRect.height;
+      } catch (e) {
+        bottomPx = 0;
+      }
+      if (bottomPx <= 0) {
+        bottomPx = avoid.bottomRect.height;
+      }
+      this.bottomInsetVp = density > 0 ? Math.ceil(bottomPx / density) : 0;
+      hilog.info(DOMAIN, TAG, 'status bar %{public}d px 鈫?%{public}d vp',
         Math.round(px), this.statusBarVp);
     } catch (e) {
       hilog.error(DOMAIN, TAG, 'getWindowAvoidArea failed: %{public}s',
@@ -842,10 +857,13 @@ struct Home {
         }
         .width('100%')
         .layoutWeight(1)
-        .padding({ left: 12, right: 12, bottom: 104 })
+        .padding({ left: 12, right: 12 })
         .scrollBar(BarState.Off)
         // 初始让开悬浮的 HDS 标题栏；上滑时列表从标题栏下方穿过，被沉浸材质糊掉。
         .contentStartOffset(this.titleBarHeightVp())
+        // 末尾给悬浮页签 + 小横条留出余量（用 offset 而不是 padding，
+        // 这样内容能滚到页签下面被材质糊住，而不是被硬生生截断）。
+        .contentEndOffset(this.bottomInsetVp + 96)
         // 上下划到尽头时的回弹（内容不足一屏时也能拖出弹性）。
         .edgeEffect(EdgeEffect.Spring, { alwaysEnabled: true })
       }
@@ -940,10 +958,7 @@ struct Home {
     .vertical(false)
     .barFloatingStyle({
       barBottomMargin: 16,
-      gradientMask: {
-        maskColor: $r('app.color.scroll_mask'),
-        maskHeight: 92,
-      },
+      // 不要 gradientMask：它会在列表底部画一条半透明色带，看着像有东西挡住列表。
       systemMaterialEffect: {
         materialType: hdsMaterial.MaterialType.IMMERSIVE,
         materialLevel: this.materialLevel,
