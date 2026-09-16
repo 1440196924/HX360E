@@ -1,6 +1,6 @@
 import { hilog } from '@kit.PerformanceAnalysisKit';
-import { common, bundleManager } from '@kit.AbilityKit';
-import { window, display } from '@kit.ArkUI';
+import { bundleManager } from '@kit.AbilityKit';
+import { HdsNavDestination, HdsNavDestinationTitleMode } from '@kit.UIDesignKit';
 
 const DOMAIN = 0x0000;
 const TAG = 'HX360E';
@@ -8,12 +8,9 @@ const TAG = 'HX360E';
 /** 关于：应用信息（logo / 名称 / 版本）+ 免责声明。 */
 @Component
 export struct AboutPage {
-  /** 沉浸式窗口下需要自己让出状态栏高度，否则自带标题栏被状态栏挡住。 */
-  @State statusBarVp: number = 0;
   @State version: string = '';
 
   aboutToAppear(): void {
-    this.applyStatusBarInset();
     try {
       const info: bundleManager.BundleInfo =
         bundleManager.getBundleInfoForSelfSync(
@@ -22,24 +19,6 @@ export struct AboutPage {
     } catch (e) {
       hilog.error(DOMAIN, TAG, 'read version failed: %{public}s', JSON.stringify(e));
       this.version = '(未知)';
-    }
-  }
-
-  // 取系统状态栏高度（与 Home.ets / AdvancedPage.ets 的做法一致）。
-  private applyStatusBarInset(): void {
-    try {
-      window.getLastWindow(getContext(this)).then((win: window.Window) => {
-        const avoid: window.AvoidArea =
-          win.getWindowAvoidArea(window.AvoidAreaType.TYPE_SYSTEM);
-        const px: number = avoid.topRect.height;
-        const density: number = display.getDefaultDisplaySync().densityPixels;
-        this.statusBarVp = density > 0 ? Math.ceil(px / density) : 0;
-      }).catch((err: Error) => {
-        hilog.error(DOMAIN, TAG, 'getLastWindow failed: %{public}s', err.message);
-      });
-    } catch (e) {
-      hilog.error(DOMAIN, TAG, 'applyStatusBarInset failed: %{public}s',
-        JSON.stringify(e));
     }
   }
 
@@ -55,9 +34,7 @@ export struct AboutPage {
   }
 
   build() {
-    NavDestination() {
-      Column() {
-
+    HdsNavDestination() {
       Scroll() {
         Column() {
           Column({ space: 10 }) {
@@ -91,15 +68,22 @@ export struct AboutPage {
         }
         .width('100%')
       }
+      .width('100%')
       .layoutWeight(1)
-      .width('100%')
+      .scrollBar(BarState.Off)
     }
-      .width('100%')
-      .height('100%')
-      .backgroundColor($r('app.color.page_bg'))
-    }
-    .title('关于')
-    // 沉浸式窗口下把整页往下让出状态栏高度，否则自带的标题栏被状态栏挡住。
-    .margin({ top: this.statusBarVp })
+    .titleBar({
+      avoidLayoutSafeArea: true,
+      content: {
+        title: { mainTitle: '关于' },
+      },
+    })
+    .titleMode(HdsNavDestinationTitleMode.MINI)
+    // 内容铺满全屏（状态栏区域也盖住），标题栏自己避让状态栏。
+    .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM],
+      [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
+    .width('100%')
+    .height('100%')
+    .backgroundColor($r('app.color.page_bg'))
   }
 }

@@ -201,6 +201,12 @@ struct Home {
   @State statusText: string = '';
   // 状态栏高度（vp），沉浸式下标题不能压到状态栏上。
   @State statusBarVp: number = 0;
+  /**
+   * 沉浸光感材质档位：默认最精美，设备不支持 IMMERSIVE 时降级到 SMOOTH
+   * （官方建议的降级路径，见 pickMaterialLevel）。
+   */
+  @State materialLevel: hdsMaterial.MaterialLevel =
+    hdsMaterial.MaterialLevel.EXQUISITE;
   // 安装中（避免重复触发选择器）。
   @State busy: boolean = false;
   // 安装进度浮层（复制在后台线程跑，这里只显示进度）。
@@ -232,6 +238,28 @@ struct Home {
     }
     this.reloadGames();
     this.probeXEngine();
+    this.pickMaterialLevel();
+  }
+
+  /**
+   * 选沉浸光感材质档位。
+   *
+   * hdsMaterial 的 IMMERSIVE 材质需要设备算力支持，先查系统支持的材质类型；
+   * 不支持就退回 SMOOTH（更省性能的薄档），避免在低端机上强制开精致档导致掉帧。
+   */
+  private pickMaterialLevel(): void {
+    try {
+      const types: Array<hdsMaterial.MaterialType> =
+        hdsMaterial.getSystemMaterialTypes();
+      this.materialLevel = types.includes(hdsMaterial.MaterialType.IMMERSIVE)
+        ? hdsMaterial.MaterialLevel.EXQUISITE
+        : hdsMaterial.MaterialLevel.SMOOTH;
+    } catch (e) {
+      this.materialLevel = hdsMaterial.MaterialLevel.SMOOTH;
+      hilog.error(DOMAIN, TAG, 'getSystemMaterialTypes failed: %{public}s',
+        JSON.stringify(e));
+    }
+    hilog.info(DOMAIN, TAG, 'material level: %{public}d', this.materialLevel);
   }
 
   // XEngine Kit（Maleoon GPU 加速）能力探测，只查一次（临时诊断：显示在游戏库底部）。
@@ -735,6 +763,8 @@ struct Home {
         .layoutWeight(1)
         .padding({ left: 12, right: 12, bottom: 104 })
         .scrollBar(BarState.Off)
+        // 上下划到尽头时的回弹（列表内容不足一屏时也能拖出弹性）。
+        .edgeEffect(EdgeEffect.Spring, { alwaysEnabled: true })
       }
 
       Text(this.statusText)
@@ -851,8 +881,8 @@ struct Home {
         maskHeight: 92,
       },
       systemMaterialEffect: {
-        materialType: hdsMaterial.MaterialType.ADAPTIVE,
-        materialLevel: hdsMaterial.MaterialLevel.ADAPTIVE,
+        materialType: hdsMaterial.MaterialType.IMMERSIVE,
+        materialLevel: this.materialLevel,
       },
     })
     .onChange((index: number) => {
