@@ -378,10 +378,12 @@ struct Home {
       // 全分辨率（原生）为唯一目标：不做半分辨率。
       '--hx360e_render_scale_den_x=1',
       '--hx360e_render_scale_den_y=1',
-      // 回退到内核优化前的状态（该状态实测 LIMBO 有十几帧）。
-      '--vulkan_direct_host_resolve=false',
-      // 下面三项是"安全带"：之前的实验值被 app 退出时写进了 xenia.config.toml，
-      // 而命令行优先级最高，这里显式钉住安全值，避免坏配置继续生效。
+      // 直读 resolve（默认值 true）：eliminate 每帧 19 次 EDRAM dump。
+      '--vulkan_direct_host_resolve=true',
+      // 把每个 pass 的 renderArea 缩到实际画到的范围（已验证收缩生效、画面无裁剪，
+      // 实测 LIMBO 66.5ms -> 50.2ms）。
+      '--render_area_dirty_extent=true',
+      // 安全带：之前实验值被 app 写进 xenia.config.toml，命令行优先级最高，这里钉住。
       '--vulkan_in_pass_resolve=false',
       '--log_gpu_frame_time_breakdown=false',
       '--log_resolve_details=false',

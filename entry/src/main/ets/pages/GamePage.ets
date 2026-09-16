@@ -139,7 +139,6 @@ struct GamePage {
     // 之前就连好的手柄也能收到事件），并注册系统热插拔监听，插入/拔出后再次
     // 武装 —— 否则监视器只在开局注册那一刻有效，后插的手柄不会有任何输入。
     this.rearmPhysicalPad('enter');
-    this.logInputDevices('enter');
     try {
       inputDevice.on('change', this.deviceWatcher);
       hilog.info(DOMAIN, TAG, 'gamepad hot-plug watcher registered');
@@ -194,31 +193,6 @@ struct GamePage {
     }
   }
 
-  /** 列出系统输入设备（诊断手柄为什么收不到事件）。 */
-  private logInputDevices(tagText: string): void {
-    inputDevice.getDeviceList().then((ids: number[]) => {
-      hilog.info(DOMAIN, TAG, 'inputDevices(%{public}s): count=%{public}d',
-        tagText, ids.length);
-      for (const id of ids) {
-        inputDevice.getDeviceInfo(id).then((info: inputDevice.InputDeviceData) => {
-          hilog.info(DOMAIN, TAG,
-            'inputDevice id=%{public}d name=%{public}s sources=%{public}d',
-            info.id, info.name, info.sources.length);
-          for (const s of info.sources) {
-            hilog.info(DOMAIN, TAG, '  source id=%{public}d type=%{public}d',
-              info.id, s);
-          }
-        }).catch((e: BusinessError) => {
-          hilog.warn(DOMAIN, TAG, 'getDeviceInfo(%{public}d) failed: %{public}d',
-            id, e.code);
-        });
-      }
-    }).catch((e: BusinessError) => {
-      hilog.error(DOMAIN, TAG, 'getDeviceList failed: %{public}d %{public}s',
-        e.code, e.message);
-    });
-  }
-
   /**
    * 物理手柄热插拔监听：系统上报 add/remove 时重新武装 GameControllerKit 的
    * 按键/摇杆监视器。GameControllerKit 的监视器需要在手柄已连接时注册才会
@@ -228,7 +202,6 @@ struct GamePage {
     (data: inputDevice.DeviceListener) => {
       hilog.info(DOMAIN, TAG, 'input device %{public}s (id=%{public}d)',
         data.type, data.deviceId);
-      this.logInputDevices(`after-${data.type}`);
       this.rearmPhysicalPad(data.type);
     };
 
@@ -248,8 +221,9 @@ struct GamePage {
   /**
    * 从游戏界面返回 = 退出游戏：先让原生侧停掉模拟器（guest 线程 / Vulkan / 音频
    * 全部收尾），再回到游戏库。返回 true 表示按键已被消费，不再走系统默认返回。
+   * 注意：ArkUI 的页面级回调名是 onBackPress（不是 onBackPressed）。
    */
-  onBackPressed(): boolean {
+  onBackPress(): boolean {
     try {
       testNapi.emulator.quit();
       hilog.info(DOMAIN, TAG, 'game quit requested by back');
@@ -489,15 +463,17 @@ struct GamePage {
     }
   }
 
-  /** 指针类事件诊断（上限 60 条，避免刷屏）。 */
-  private pointerEventLogged: number = 0;
-  private notePointerEvent(text: string): void {
-    if (this.pointerEventLogged >= 60) {
-      return;
+  /** 轴事件 → 摇杆（蓝牙手柄经 GameControllerKit/轴事件时会走这里）。 */
+  private handlePhysicalAxis(event: AxisEvent): void {
+    try {
+      const ax: number = event.getHorizontalAxisValue();
+      const ay: number = event.getVerticalAxisValue();
+      if (ax !== 0 || ay !== 0) {
+        this.stickToKeys(true, ax, ay);
+      }
+    } catch (e) {
+      // 忽略：某些设备不提供轴取值接口
     }
-    this.pointerEventLogged++;
-    hilog.info(DOMAIN, TAG, 'pointer#%{public}d %{public}s',
-      this.pointerEventLogged, text);
   }
 
   private handlePhysicalKey(event: KeyEvent): void {
@@ -785,24 +761,9 @@ struct GamePage {
     .onKeyEvent((event: KeyEvent) => {
       this.handlePhysicalKey(event);
     })
-    // 摇杆是模拟轴，走轴事件（先原样打日志，确认字段后再映射）。
+    // 摇杆是模拟轴，走轴事件（USB 手柄实测不派发，保留映射入口以便蓝牙手柄可用）。
     .onAxisEvent((event: AxisEvent) => {
-      try {
-        hilog.info(DOMAIN, TAG, 'axis event: %{public}s', JSON.stringify(event));
-      } catch (e) {
-        hilog.info(DOMAIN, TAG, 'axis event (unstringifiable)');
-      }
-    })
-    // 还有一条可能的通道：有些系统把 HID 的 ABS_X/ABS_Y 映射成指针移动，
-    // 所以把触摸/鼠标/悬停也记下来（有次数上限，避免刷屏）。
-    .onTouch((event: TouchEvent) => {
-      this.notePointerEvent(`touch type=${event.type} n=${event.touches.length}`);
-    })
-    .onMouse((event: MouseEvent) => {
-      this.notePointerEvent(`mouse action=${event.action} x=${event.x} y=${event.y}`);
-    })
-    .onHover((isHover: boolean, event: HoverEvent) => {
-      this.notePointerEvent(`hover on=${isHover} x=${event.x} y=${event.y}`);
+      this.handlePhysicalAxis(event);
     })
     .onAreaChange((oldArea: Area, newArea: Area) => {
       // Area 宽高是 vp；densityPixels = px/vp，换算成 px。

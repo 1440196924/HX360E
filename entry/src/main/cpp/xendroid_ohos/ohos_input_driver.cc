@@ -6,6 +6,8 @@
 #include <cstdio>
 #include <mutex>
 
+#include <GameControllerKit/game_device.h>
+#include <GameControllerKit/game_device_event.h>
 #include <GameControllerKit/game_pad.h>
 #include <hilog/log.h>
 
@@ -145,10 +147,18 @@ void HandlePadAxis(PadAxisGroup group, const struct GamePad_AxisEvent* event) {
       const int16_t y_value = ScaleStick(y);
       (void)source;
       if (group == PadAxisGroup::kDpad) {
+        // 参考 RPCS3_RE 的实测结论：部分手柄固件（尤其有线）的 D-pad 只报
+        // Hat 轴、完全不发 Dpad_*Button 事件，必须读 hat 而不是左摇杆的 X/Y，
+        // 否则方向键永远不动。
+        double hat_x = 0.0;
+        double hat_y = 0.0;
+        OH_GamePad_AxisEvent_GetHatXAxisValue(event, &hat_x);
+        OH_GamePad_AxisEvent_GetHatYAxisValue(event, &hat_y);
+        constexpr double kHatEps = 0.5;
         ApplyDirections(driver, kPadDpadLeft, kPadDpadRight, kPadDpadUp,
-                        kPadDpadDown, x, y,
-                        x < 0 ? int16_t(-32767) : int16_t(32767),
-                        y < 0 ? int16_t(-32767) : int16_t(32767));
+                        kPadDpadDown, hat_x, hat_y,
+                        hat_x < 0 ? int16_t(-32767) : int16_t(32767),
+                        hat_y < 0 ? int16_t(-32767) : int16_t(32767));
       } else if (group == PadAxisGroup::kLeftStick) {
         ApplyDirections(driver, kPadLThumbLeft, kPadLThumbRight, kPadLThumbUp,
                         kPadLThumbDown, x, y, x_value, y_value);
@@ -293,6 +303,53 @@ void OhosInputDriver::StartPhysicalGamepad() {
   }
   physical_pad_started_ = true;
 
+  // 设备级注册（参考 RPCS3_RE/core/ohos/input/ohos_gamepad.cpp 的顺序：
+  // 先枚举 + 注册 DeviceMonitor，再注册 pad 的按键/轴监视器）。
+  // 只注册 pad 监视器时，部分设备（尤其 USB 有线手柄）不会派发任何事件。
+  {
+    GameDevice_AllDeviceInfos* all_infos = nullptr;
+    if (OH_GameDevice_GetAllDeviceInfos(&all_infos) == GAME_CONTROLLER_SUCCESS &&
+        all_infos) {
+      int32_t device_count = 0;
+      if (OH_GameDevice_AllDeviceInfos_GetCount(all_infos, &device_count) ==
+          GAME_CONTROLLER_SUCCESS) {
+        PADLOG("gamepad: GameDevice count=%{public}d",
+               static_cast<int>(device_count));
+        for (int32_t i = 0; i < device_count; ++i) {
+          GameDevice_DeviceInfo* device_info = nullptr;
+          if (OH_GameDevice_AllDeviceInfos_GetDeviceInfo(all_infos, i,
+                                                         &device_info) !=
+                  GAME_CONTROLLER_SUCCESS ||
+              !device_info) {
+            continue;
+          }
+          char* device_id = nullptr;
+          char* device_name = nullptr;
+          OH_GameDevice_DeviceInfo_GetDeviceId(device_info, &device_id);
+          OH_GameDevice_DeviceInfo_GetName(device_info, &device_name);
+          PADLOG("gamepad: device id=%{public}s name=%{public}s",
+                 device_id ? device_id : "(null)",
+                 device_name ? device_name : "(null)");
+          OH_GameDevice_DestroyDeviceInfo(&device_info);
+        }
+      }
+      OH_GameDevice_DestroyAllDeviceInfos(&all_infos);
+    }
+    const GameController_ErrorCode mon_err = OH_GameDevice_RegisterDeviceMonitor(
+        [](const struct GameDevice_DeviceEvent* event) {
+          GameDevice_StatusChangedType changed_type{};
+          if (OH_GameDevice_DeviceEvent_GetChangedType(event, &changed_type) ==
+              GAME_CONTROLLER_SUCCESS) {
+            PADLOG("gamepad: device changed type=%{public}d",
+                   static_cast<int>(changed_type));
+          }
+        });
+    if (mon_err != GAME_CONTROLLER_SUCCESS) {
+      PADLOGE("gamepad: RegisterDeviceMonitor failed: %{public}d",
+              static_cast<int>(mon_err));
+    }
+  }
+
   int ok_buttons = 0;
   for (const auto& monitor : kButtonMonitors) {
     const GameController_ErrorCode rc = monitor.reg(monitor.cb);
@@ -325,6 +382,7 @@ void OhosInputDriver::StopPhysicalGamepad() {
     return;
   }
   physical_pad_started_ = false;
+  OH_GameDevice_UnregisterDeviceMonitor();
   OH_GamePad_Dpad_UnregisterAxisInputMonitor();
   OH_GamePad_LeftThumbstick_UnregisterAxisInputMonitor();
   OH_GamePad_RightThumbstick_UnregisterAxisInputMonitor();
