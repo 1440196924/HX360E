@@ -10,10 +10,9 @@ import {
   TitleBarStyleOptions,
   HdsNavigationMenuItemOptions,
   HdsNavigationIconOptions,
-  BlurStrategy,
-  ScrollEffectType,
   hdsMaterial,
 } from '@kit.UIDesignKit';
+import { TitleBarSupport, TITLE_BAR_CONTENT_HEIGHT } from '../common/TitleBarSupport';
 import testNapi from 'libentry.so';
 import { GameLibrary, GameMeta } from '../common/GameLibrary';
 import { GameInstall, InstallControl, InstallProgress } from '../common/GameInstall';
@@ -27,8 +26,6 @@ import { Orientation } from '../common/Orientation';
 
 const DOMAIN = 0x0000;
 const TAG = 'HX360E';
-/** 系统单行标题栏的内容高度（不含状态栏避让区）。 */
-const TITLE_BAR_CONTENT_HEIGHT: number = 56;
 
 /**
  * 游戏卡片：封面 + 名称，长按弹系统上下文菜单（背景模糊、卡片预览浮起、菜单贴下方）。
@@ -301,33 +298,9 @@ struct Home {
     return items;
   }
 
-  // 标题栏样式（按官方 HDS 写法）：不设任何背景色，纯靠 systemMaterialEffect
-  // 拿系统「沉浸光感」材质；滚动时切到 IMMERSIVE_GRADIENT_BLUR 做渐次磨砂。
+  // 标题栏样式走公共模块（材质档位 + 渐次磨砂 + 不设背景色）。
   private titleBarStyle(): TitleBarStyleOptions {
-    const style: TitleBarStyleOptions = {
-      originalStyle: {
-        contentStyle: {
-          titleStyle: { mainTitleColor: $r('app.color.text_primary') },
-        },
-      },
-      scrollEffectStyle: {
-        contentStyle: {
-          titleStyle: { mainTitleColor: $r('app.color.text_primary') },
-        },
-      },
-      systemMaterialEffect: {
-        materialType: hdsMaterial.MaterialType.IMMERSIVE,
-        materialLevel: this.materialLevel,
-      },
-      blurStrategy: BlurStrategy.ADAPTIVE,
-      scrollEffectOpts: {
-        enableScrollEffect: true,
-        scrollEffectType: ScrollEffectType.IMMERSIVE_GRADIENT_BLUR,
-        blurEffectiveStartOffset: LengthMetrics.vp(0),
-        blurEffectiveEndOffset: LengthMetrics.vp(TITLE_BAR_CONTENT_HEIGHT),
-      },
-    };
-    return style;
+    return TitleBarSupport.style($r('app.color.text_primary'));
   }
 
   /**
@@ -337,17 +310,7 @@ struct Home {
    * 不支持就退回 SMOOTH（更省性能的薄档），避免在低端机上强制开精致档导致掉帧。
    */
   private pickMaterialLevel(): void {
-    try {
-      const types: Array<hdsMaterial.MaterialType> =
-        hdsMaterial.getSystemMaterialTypes();
-      this.materialLevel = types.includes(hdsMaterial.MaterialType.IMMERSIVE)
-        ? hdsMaterial.MaterialLevel.EXQUISITE
-        : hdsMaterial.MaterialLevel.SMOOTH;
-    } catch (e) {
-      this.materialLevel = hdsMaterial.MaterialLevel.SMOOTH;
-      hilog.error(DOMAIN, TAG, 'getSystemMaterialTypes failed: %{public}s',
-        JSON.stringify(e));
-    }
+    this.materialLevel = TitleBarSupport.materialLevel();
     hilog.info(DOMAIN, TAG, 'material level: %{public}d', this.materialLevel);
   }
 

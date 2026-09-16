@@ -1,6 +1,7 @@
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { common, bundleManager, Want } from '@kit.AbilityKit';
 import { HdsNavDestination, HdsNavDestinationTitleMode } from '@kit.UIDesignKit';
+import { TitleBarSupport } from '../common/TitleBarSupport';
 
 const DOMAIN = 0x0000;
 const TAG = 'HX360E';
@@ -153,6 +154,7 @@ export struct AboutPage {
     }
     .titleBar({
       avoidLayoutSafeArea: true,
+      style: TitleBarSupport.style($r('app.color.text_primary')),
       content: {
         title: { mainTitle: '关于' },
       },

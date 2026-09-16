@@ -1,8 +1,15 @@
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { common } from '@kit.AbilityKit';
-import { window, display } from '@kit.ArkUI';
+import { window, display, LengthMetrics } from '@kit.ArkUI';
+import {
+  HdsNavDestination,
+  HdsNavDestinationTitleMode,
+  HdsNavigationMenuItemOptions,
+  HdsNavigationIconOptions,
+} from '@kit.UIDesignKit';
 import { SettingsSchema, SettingsCategory, Setting } from '../common/SettingsSchema';
 import { SettingsStore } from '../common/SettingsStore';
+import { TitleBarSupport, TITLE_BAR_CONTENT_HEIGHT } from '../common/TitleBarSupport';
 
 const DOMAIN = 0x0000;
 const TAG = 'HX360E';
@@ -234,7 +241,7 @@ export struct AdvancedPage {
   }
 
   build() {
-    NavDestination() {
+    HdsNavDestination() {
       Column() {
         Scroll() {
           Column({ space: 12 }) {
@@ -255,6 +262,8 @@ export struct AdvancedPage {
         .width('100%')
         .scrollBar(BarState.Off)
         .align(Alignment.Top)
+        // 让开浮在上面的 HDS 标题栏（状态栏避让区 + 标题栏内容高）。
+        .contentStartOffset(this.statusBarVp + TITLE_BAR_CONTENT_HEIGHT)
 
         Text(this.statusText)
           .fontSize(11)
@@ -267,17 +276,42 @@ export struct AdvancedPage {
       .height('100%')
       .backgroundColor($r('app.color.page_bg'))
     }
-    .title('高级选项')
-    // 沉浸式窗口下把整页往下让出状态栏高度，否则自带的标题栏被状态栏挡住。
-    .margin({ top: this.statusBarVp })
-    .menus([
-      {
-        value: '重置',
-        action: () => {
-          this.store.resetAll();
-          this.statusText = '已恢复默认（返回时保存）';
+    .titleBar({
+      padding: {
+        start: LengthMetrics.vp(16),
+        end: LengthMetrics.vp(16),
+      },
+      avoidLayoutSafeArea: true,
+      style: TitleBarSupport.style($r('app.color.text_primary')),
+      content: {
+        title: { mainTitle: '高级选项' },
+        menu: {
+          value: this.titleBarMenu(),
         },
       },
-    ])
+    })
+    .titleMode(HdsNavDestinationTitleMode.MINI)
+    // 内容铺满全屏（状态栏区域也盖住），标题栏自己避让状态栏。
+    .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM],
+      [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
+    .width('100%')
+    .height('100%')
+    .backgroundColor($r('app.color.page_bg'))
+  }
+
+  /** 标题栏右侧的「重置」按钮（HDS 系统级菜单项）。 */
+  private titleBarMenu(): Array<HdsNavigationMenuItemOptions> {
+    const items: Array<HdsNavigationMenuItemOptions> = [];
+    const item: HdsNavigationIconOptions = {
+      label: '重置',
+      isEnabled: true,
+      action: () => {
+        this.store.resetAll();
+        this.statusText = '已恢复默认（返回时保存）';
+      },
+    };
+    const menuItem: HdsNavigationMenuItemOptions = { content: item };
+    items.push(menuItem);
+    return items;
   }
 }
