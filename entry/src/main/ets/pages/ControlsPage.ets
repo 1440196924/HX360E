@@ -18,7 +18,7 @@ export struct ControlsPage {
   sectionTitle(title: string) {
     Text(title)
       .fontSize(12)
-      .fontColor('#6cf')
+      .fontColor($r('app.color.accent'))
       .width('100%')
       .padding({ left: 16, right: 16, top: 14, bottom: 4 })
   }

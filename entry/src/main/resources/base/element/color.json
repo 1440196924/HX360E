@@ -53,6 +53,10 @@
       "value": "#000000"
     },
     {
+      "name": "text_on_accent",
+      "value": "#FFFFFFFF"
+    },
+    {
       "name": "mask",
       "value": "#66000000"
     }

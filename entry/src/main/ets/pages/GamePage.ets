@@ -715,15 +715,22 @@ struct GamePage {
             if (this.promptKind === 'keyboard') {
               TextInput({ placeholder: '请输入…', text: this.promptInput })
                 .width('100%')
+                .fontColor('#FFFFFF')
+                .backgroundColor('#26FFFFFF')
+                .placeholderColor('#80FFFFFF')
                 .onChange((value: string) => {
                   this.promptInput = value;
                 })
               Row({ space: 8 }) {
                 Button('确定')
                   .layoutWeight(1)
+                  .fontColor('#FFFFFF')
+                  .backgroundColor('#33FFFFFF')
                   .onClick(() => this.submitKeyboard(true))
                 Button('取消')
                   .layoutWeight(1)
+                  .fontColor('#FFFFFF')
+                  .backgroundColor('#33FFFFFF')
                   .onClick(() => this.submitKeyboard(false))
               }
               .width('100%')
@@ -732,6 +739,8 @@ struct GamePage {
                 ForEach(this.promptButtons, (label: string, index: number) => {
                   Button(label)
                     .margin(4)
+                    .fontColor('#FFFFFF')
+                    .backgroundColor('#33FFFFFF')
                     .onClick(() => this.submitMsgbox(index))
                 })
               }
@@ -741,10 +750,14 @@ struct GamePage {
                 ForEach(this.promptDiscLabels, (label: string, index: number) => {
                   Button(label)
                     .width('100%')
+                    .fontColor('#FFFFFF')
+                    .backgroundColor('#33FFFFFF')
                     .onClick(() => this.submitDisc(true, this.promptDiscPaths[index]))
                 })
                 Button('取消')
                   .width('100%')
+                  .fontColor('#FFFFFF')
+                  .backgroundColor('#33FFFFFF')
                   .onClick(() => this.submitDisc(false, ''))
               }
               .width('100%')

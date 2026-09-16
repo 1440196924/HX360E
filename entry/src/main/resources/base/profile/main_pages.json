@@ -1,7 +1,6 @@
 {
   "src": [
     "pages/Home",
-    "pages/Index",
     "pages/GamePage"
   ]
 }

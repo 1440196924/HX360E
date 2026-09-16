@@ -162,9 +162,9 @@ struct GameRow {
   deleteAction() {
     Row() {
       Column() {
-        SymbolGlyph($r('sys.symbol.trash_fill'))
-          .fontSize(22)
-          .fontColor([Color.White])
+            SymbolGlyph($r('sys.symbol.trash_fill'))
+              .fontSize(22)
+              .fontColor([$r('app.color.text_on_accent')])
       }
       .width(56)
       .height(56)
@@ -671,7 +671,9 @@ struct Home {
           .height(36)
           .layoutWeight(1)
           .backgroundColor($r('app.color.accent'))
-          .fontColor($r('app.color.text_primary'))
+          // 彩底上的文字必须用 text_on_accent：用 text_primary 在浅色模式
+          // 会变成深灰字压深蓝底，几乎看不清。
+          .fontColor($r('app.color.text_on_accent'))
           .onClick(() => {
             this.finishPasswordInput(this.passwordInput);
           })
