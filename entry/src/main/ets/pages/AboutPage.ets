@@ -1,9 +1,12 @@
 import { hilog } from '@kit.PerformanceAnalysisKit';
-import { bundleManager } from '@kit.AbilityKit';
+import { common, bundleManager, Want } from '@kit.AbilityKit';
 import { HdsNavDestination, HdsNavDestinationTitleMode } from '@kit.UIDesignKit';
 
 const DOMAIN = 0x0000;
 const TAG = 'HX360E';
+/** 作者 B 站主页。 */
+const AUTHOR_URL = 'https://space.bilibili.com/297193944';
+const AUTHOR_NAME = '山东的大蒜王师傅';
 
 /** 关于：应用信息（logo / 名称 / 版本）+ 免责声明。 */
 @Component
@@ -19,6 +22,26 @@ export struct AboutPage {
     } catch (e) {
       hilog.error(DOMAIN, TAG, 'read version failed: %{public}s', JSON.stringify(e));
       this.version = '(未知)';
+    }
+  }
+
+  /** 用系统浏览器打开作者 B 站主页。 */
+  private openAuthorPage(): void {
+    try {
+      // 与 GamePage.ets:103 同款：getContext 返回的是基类 Context，
+      // 起 Ability 需要 UIAbilityContext。
+      const ctx = getContext(this) as common.UIAbilityContext;
+      const want: Want = {
+        action: 'ohos.want.action.viewData',
+        entities: ['entity.system.browsable'],
+        uri: AUTHOR_URL,
+      };
+      ctx.startAbility(want).catch((err: Error) => {
+        hilog.error(DOMAIN, TAG, 'openAuthorPage failed: %{public}s', err.message);
+      });
+    } catch (e) {
+      hilog.error(DOMAIN, TAG, 'openAuthorPage failed: %{public}s',
+        JSON.stringify(e));
     }
   }
 
@@ -57,6 +80,44 @@ export struct AboutPage {
 
           this.infoRow('包名', 'com.sddswsf.hx360e')
           this.infoRow('版本', this.version)
+
+          Divider().color($r('app.color.divider'))
+
+          // 求充电：整块可点，跳系统浏览器打开 B 站主页。
+          Column({ space: 8 }) {
+            Row({ space: 8 }) {
+              SymbolGlyph($r('sys.symbol.heart_fill'))
+                .fontSize(18)
+                .fontColor([$r('app.color.accent')])
+              Text('支持作者')
+                .fontSize(15)
+                .fontWeight(FontWeight.Medium)
+                .fontColor($r('app.color.text_primary'))
+            }
+            .width('100%')
+
+            Text('用爱发电不易，如果这个模拟器对你有帮助，欢迎到 B 站关注 / 充电支持，你的支持就是我更新最大的动力～')
+              .fontSize(12)
+              .fontColor($r('app.color.text_secondary'))
+              .width('100%')
+
+            Row({ space: 4 }) {
+              Text(`B 站：${AUTHOR_NAME}`)
+                .fontSize(13)
+                .fontColor($r('app.color.accent'))
+              Blank()
+              Text('前往充电 ›')
+                .fontSize(13)
+                .fontColor($r('app.color.accent'))
+            }
+            .width('100%')
+          }
+          .width('100%')
+          .alignItems(HorizontalAlign.Start)
+          .padding({ left: 16, right: 16, top: 14, bottom: 14 })
+          .onClick(() => {
+            this.openAuthorPage();
+          })
 
           Divider().color($r('app.color.divider'))
 
