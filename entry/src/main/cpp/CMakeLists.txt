@@ -71,6 +71,8 @@ add_library(entry SHARED
         vulkan_context.cpp
         xeg_spatial_upscale.cc
         xendroid_ohos/ohos_emulator.cc
+        xendroid_ohos/napi_zip.cc
+        xendroid_ohos/zip_extract.cc
         xendroid_ohos/ohos_input_driver.cc
         xendroid_ohos/ohos_window.cc
         xendroid_ohos/ohaudio_audio_driver.cc

@@ -430,6 +430,11 @@ napi_value EmulatorFlushGpuCaches(napi_env env, napi_callback_info info) {
 
 }  // namespace
 
+namespace hx360e {
+// ZIP 解压桥接（定义在 xendroid_ohos/napi_zip.cc）。
+void RegisterZip(napi_env env, napi_value exports);
+}  // namespace hx360e
+
 EXTERN_C_START
 static napi_value Init(napi_env env, napi_value exports) {
     napi_property_descriptor desc[] = {
@@ -508,6 +513,7 @@ static napi_value Init(napi_env env, napi_value exports) {
     hx360e::RegisterMeta(env, exports);
     hx360e::RegisterPrompt(env, exports);
     hx360e::RegisterContent(env, exports);
+    hx360e::RegisterZip(env, exports);
 
     RegisterXComponent(env, exports);
 
