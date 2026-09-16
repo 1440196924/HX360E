@@ -4,8 +4,6 @@ import { window, display, LengthMetrics } from '@kit.ArkUI';
 import {
   HdsNavDestination,
   HdsNavDestinationTitleMode,
-  HdsNavigationMenuItemOptions,
-  HdsNavigationIconOptions,
 } from '@kit.UIDesignKit';
 import { SettingsSchema, SettingsCategory, Setting } from '../common/SettingsSchema';
 import { SettingsStore } from '../common/SettingsStore';
@@ -242,39 +240,21 @@ export struct AdvancedPage {
 
   build() {
     HdsNavDestination() {
-      Column() {
-        Scroll() {
-          Column({ space: 12 }) {
-            ForEach(SettingsSchema.categories(), (cat: SettingsCategory) => {
-              this.categoryCard(cat)
-            }, (cat: SettingsCategory) => cat.title)
-
-            Text(this.deviceInfo)
-              .fontSize(11)
-              .fontColor($r('app.color.text_hint'))
-              .width('100%')
-              .padding({ left: 16, right: 16, bottom: 8 })
-          }
-          .width('100%')
-          .padding({ left: 12, right: 12, top: 8, bottom: 24 })
+      Scroll() {
+        Column({ space: 12 }) {
+          ForEach(SettingsSchema.categories(), (cat: SettingsCategory) => {
+            this.categoryCard(cat)
+          }, (cat: SettingsCategory) => cat.title)
         }
-        .layoutWeight(1)
         .width('100%')
-        .scrollBar(BarState.Off)
-        .align(Alignment.Top)
-        // 让开浮在上面的 HDS 标题栏（状态栏避让区 + 标题栏内容高）。
-        .contentStartOffset(this.statusBarVp + TITLE_BAR_CONTENT_HEIGHT)
-
-        Text(this.statusText)
-          .fontSize(11)
-          .fontColor($r('app.color.accent'))
-          .maxLines(2)
-          .width('100%')
-          .padding({ left: 16, right: 16, bottom: 10 })
+        .padding({ left: 12, right: 12, top: 8, bottom: 24 })
       }
       .width('100%')
       .height('100%')
-      .backgroundColor($r('app.color.page_bg'))
+      .scrollBar(BarState.Off)
+      .align(Alignment.Top)
+      // 让开浮在上面的 HDS 标题栏（状态栏避让区 + 标题栏内容高）。
+      .contentStartOffset(this.statusBarVp + TITLE_BAR_CONTENT_HEIGHT)
     }
     .titleBar({
       padding: {
@@ -285,9 +265,6 @@ export struct AdvancedPage {
       style: TitleBarSupport.style($r('app.color.text_primary')),
       content: {
         title: { mainTitle: '高级选项' },
-        menu: {
-          value: this.titleBarMenu(),
-        },
       },
     })
     .titleMode(HdsNavDestinationTitleMode.MINI)
@@ -297,21 +274,5 @@ export struct AdvancedPage {
     .width('100%')
     .height('100%')
     .backgroundColor($r('app.color.page_bg'))
-  }
-
-  /** 标题栏右侧的「重置」按钮（HDS 系统级菜单项）。 */
-  private titleBarMenu(): Array<HdsNavigationMenuItemOptions> {
-    const items: Array<HdsNavigationMenuItemOptions> = [];
-    const item: HdsNavigationIconOptions = {
-      label: '重置',
-      isEnabled: true,
-      action: () => {
-        this.store.resetAll();
-        this.statusText = '已恢复默认（返回时保存）';
-      },
-    };
-    const menuItem: HdsNavigationMenuItemOptions = { content: item };
-    items.push(menuItem);
-    return items;
   }
 }

@@ -849,14 +849,6 @@ struct Home {
         // 上下划到尽头时的回弹（内容不足一屏时也能拖出弹性）。
         .edgeEffect(EdgeEffect.Spring, { alwaysEnabled: true })
       }
-
-      Text(this.statusText)
-        .fontSize(11)
-        .fontColor($r('app.color.accent'))
-        .maxLines(2)
-        .padding({ left: 16, right: 16, bottom: 104 })
-      // XEngine 能力诊断行已隐藏（原来占列表底部数行，影响游戏列表展示）。
-      // 需要时看「关于」页的 XEngine 行。
     }
     .width('100%')
     .height('100%')
