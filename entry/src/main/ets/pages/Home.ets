@@ -1,8 +1,15 @@
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { common } from '@kit.AbilityKit';
-import { window, display, SymbolGlyphModifier } from '@kit.ArkUI';
+import { window, display, LengthMetrics, SymbolGlyphModifier } from '@kit.ArkUI';
 import { fileIo } from '@kit.CoreFileKit';
-import { HdsTabs, HdsTabsController, hdsMaterial } from '@kit.UIDesignKit';
+import {
+  HdsTabs,
+  HdsTabsController,
+  HdsNavDestination,
+  HdsNavDestinationTitleMode,
+  TitleBarStyleOptions,
+  hdsMaterial,
+} from '@kit.UIDesignKit';
 import testNapi from 'libentry.so';
 import { GameLibrary, GameMeta } from '../common/GameLibrary';
 import { GameInstall, InstallControl, InstallProgress } from '../common/GameInstall';
@@ -227,6 +234,10 @@ struct Home {
   private hdsTabController: HdsTabsController = new HdsTabsController();
   // 官方路由栈：子页（高级选项/控制/目录/关于）以 NavDestination 推入。
   private pathStack: NavPathStack = new NavPathStack();
+  /** 外壳是否已作为栈底页推入（只推一次）。 */
+  private shellPushed: boolean = false;
+  /** 游戏列表的 Scroller：给标题栏做滚动联动（bindToScrollable）。 */
+  private homeScroller: Scroller = new Scroller();
 
   aboutToAppear(): void {
     const ctx: common.Context | undefined = this.appContext();
@@ -239,6 +250,28 @@ struct Home {
     this.reloadGames();
     this.probeXEngine();
     this.pickMaterialLevel();
+    // 外壳（HDS 标题栏 + 底部悬浮页签）作为栈底 NavDestination 推入，
+    // 这样标题栏才能吃到系统「沉浸光感」材质（与官方范式一致）。
+    if (!this.shellPushed) {
+      this.shellPushed = true;
+      this.pathStack.pushPath({ name: 'shell' }, false);
+    }
+  }
+
+  // 标题栏样式：沉浸光感材质 + 滚动时渐变模糊（对齐 ohbili 推荐视频页）。
+  private titleBarStyle(): TitleBarStyleOptions {
+    const style: TitleBarStyleOptions = {
+      originalStyle: {
+        backgroundStyle: {
+          backgroundColor: $r('app.color.page_bg'),
+        },
+      },
+      systemMaterialEffect: {
+        materialType: hdsMaterial.MaterialType.IMMERSIVE,
+        materialLevel: this.materialLevel,
+      },
+    };
+    return style;
   }
 
   /**
@@ -648,7 +681,9 @@ struct Home {
   // NavDestination 路由表：子页自带系统标题栏与返回按钮。
   @Builder
   pageMap(name: string, param: Object) {
-    if (name === 'advanced') {
+    if (name === 'shell') {
+      this.mainShell()
+    } else if (name === 'advanced') {
       AdvancedPage()
     } else if (name === 'controls') {
       ControlsPage()
@@ -657,6 +692,54 @@ struct Home {
     } else if (name === 'about') {
       AboutPage()
     }
+  }
+
+  /**
+   * 栈底外壳：HDS 标题栏 + 底部悬浮页签。
+   *
+   * 走官方范式——标题栏由 HdsNavDestination 自带（avoidLayoutSafeArea 自己避让
+   * 状态栏），用 systemMaterialEffect 拿到系统「沉浸光感」材质；内容区
+   * ignoreLayoutSafeArea 铺满全屏，滚动联动靠 bindToScrollable。
+   */
+  @Builder
+  mainShell() {
+    HdsNavDestination() {
+      Stack({ alignContent: Alignment.Center }) {
+        Column() {
+          this.floatingTabs()
+        }
+        .width('100%')
+        .height('100%')
+
+        if (this.installing) {
+          this.installOverlay()
+        }
+        if (this.passwordVisible) {
+          this.passwordOverlay()
+        }
+      }
+      .width('100%')
+      .height('100%')
+    }
+    .titleBar({
+      padding: {
+        start: LengthMetrics.vp(16),
+        end: LengthMetrics.vp(16),
+      },
+      avoidLayoutSafeArea: true,
+      style: this.titleBarStyle(),
+      content: {
+        title: { mainTitle: this.currentTab === 0 ? '游戏库' : '设置' },
+      },
+    })
+    .hideBackButton(true)
+    .titleMode(HdsNavDestinationTitleMode.MINI)
+    .bindToScrollable([this.homeScroller])
+    .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM],
+      [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
+    .width('100%')
+    .height('100%')
+    .backgroundColor($r('app.color.page_bg'))
   }
 
   // 页签图标（normal / selected 两态）。系统符号来自 sys.symbol.*。
@@ -709,10 +792,6 @@ struct Home {
   gamesTab() {
     Column({ space: 8 }) {
       Row() {
-        Text('游戏库')
-          .fontSize(26)
-          .fontColor($r('app.color.text_primary'))
-          .fontWeight(FontWeight.Bold)
         Blank()
         Button({ type: ButtonType.Circle }) {
           SymbolGlyph($r('sys.symbol.plus'))
@@ -726,10 +805,11 @@ struct Home {
         .onClick(() => this.importGame())
       }
       .width('100%')
+      // 标题已交给 HDS 标题栏，这里只留右上角的「导入」按钮。
       .padding({
         left: 20,
         right: 16,
-        top: this.statusBarVp + 10,
+        top: 10,
         bottom: 10,
       })
 
@@ -746,7 +826,7 @@ struct Home {
         .layoutWeight(1)
         .justifyContent(FlexAlign.Center)
       } else {
-        List({ space: 8 }) {
+        List({ space: 8, scroller: this.homeScroller }) {
           ForEach(this.games, (item: GameMeta) => {
             GameRow({
               item: item,
@@ -782,18 +862,6 @@ struct Home {
   @Builder
   settingsTab() {
     Column() {
-      Text('设置')
-        .fontSize(26)
-        .fontColor($r('app.color.text_primary'))
-        .fontWeight(FontWeight.Bold)
-        .width('100%')
-        .padding({
-          left: 20,
-          right: 16,
-          top: this.statusBarVp + 10,
-          bottom: 14,
-        })
-
       Scroll() {
         Column({ space: 12 }) {
           Column() {
@@ -967,27 +1035,16 @@ struct Home {
 
   build() {
     Navigation(this.pathStack) {
-      Stack({ alignContent: Alignment.Center }) {
-        Column() {
-          this.floatingTabs()
-        }
+      Column()
         .width('100%')
         .height('100%')
-
-        if (this.installing) {
-          this.installOverlay()
-        }
-        if (this.passwordVisible) {
-          this.passwordOverlay()
-        }
-      }
-      .width('100%')
-      .height('100%')
-      // 不要在这里 expandSafeArea：它会把推入的 NavDestination（高级选项/
-      // 控制/目录/关于）的标题栏也一起顶到状态栏下面。首页自己的标题已按
-      // 状态栏高度留白（见 floatingTabs 里的 statusBarVp）。
     }
+    // 外壳自带标题栏（在 mainShell 里），根容器不显示标题栏
     .hideTitleBar(true)
+    .hideBackButton(true)
+    // 内容铺满全屏，各页自己避让状态栏
+    .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM],
+      [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
     .mode(NavigationMode.Stack)
     .navDestination(this.pageMap)
     .width('100%')
