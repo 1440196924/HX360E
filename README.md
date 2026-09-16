@@ -1,3 +1,6 @@
+# TOKEN告急，欢迎大家关注我的B站账号，也欢迎给我充电以作为购买TOKEN的资金，您的支持就是我更新最大的动力
+[山东的大蒜王师傅的主页](https://space.bilibili.com/297193944)
+
 # HX360E
 
 在 HarmonyOS 上运行 Xbox 360 游戏的模拟器前端，基于 [XenDroid](https://github.com/rfandango/XenDroid)（Xenia 的 Android 移植）做的鸿蒙移植。
