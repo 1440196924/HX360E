@@ -552,7 +552,8 @@ struct GamePage {
 
       Row({ space: 0 }) {
         this.roundBtn('X', XPadKey.X, 44, '#2F5DA8', '#4E86D8')
-        Column().width(24).height(44)
+        // X 与 B 之间的间距（原来是 24，太挤，手容易误触）。
+        Column().width(36).height(44)
         this.roundBtn('B', XPadKey.B, 44, '#8E2B2B', '#C24242')
       }
 
@@ -562,7 +563,8 @@ struct GamePage {
       .justifyContent(FlexAlign.Center)
       .width('100%')
     }
-    .width(112)
+    // 44 + 36 + 44 = 124，跟着间距一起放宽。
+    .width(124)
   }
 
   build() {
