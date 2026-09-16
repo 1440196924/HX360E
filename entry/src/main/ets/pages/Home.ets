@@ -8,6 +8,8 @@ import {
   HdsNavDestination,
   HdsNavDestinationTitleMode,
   TitleBarStyleOptions,
+  HdsNavigationMenuItemOptions,
+  HdsNavigationIconOptions,
   BlurStrategy,
   ScrollEffectType,
   hdsMaterial,
@@ -270,6 +272,29 @@ struct Home {
    */
   private titleBarHeightVp(): number {
     return this.statusBarVp + TITLE_BAR_CONTENT_HEIGHT;
+  }
+
+  /**
+   * 标题栏右侧的图标按钮（HDS 系统级 titleBar content.menu）。
+   *
+   * ArkTS 严格模式不允许无类型对象字面量，所以这里显式声明每一项的类型；
+   * 只在「游戏库」页签显示「导入」，设置页签返回空数组。
+   */
+  private titleBarMenu(): Array<HdsNavigationMenuItemOptions> {
+    const items: Array<HdsNavigationMenuItemOptions> = [];
+    if (this.currentTab !== 0) {
+      return items;
+    }
+    const icon: HdsNavigationIconOptions = {
+      icon: $r('sys.symbol.plus'),
+      isEnabled: true,
+      action: () => {
+        this.importGame();
+      },
+    };
+    const item: HdsNavigationMenuItemOptions = { content: icon };
+    items.push(item);
+    return items;
   }
 
   // 标题栏样式（按官方 HDS 写法）：不设任何背景色，纯靠 systemMaterialEffect
@@ -757,6 +782,10 @@ struct Home {
       style: this.titleBarStyle(),
       content: {
         title: { mainTitle: this.currentTab === 0 ? '游戏库' : '设置' },
+        // 「导入」做成标题栏的系统级图标按钮（只在游戏库页签显示）。
+        menu: {
+          value: this.titleBarMenu(),
+        },
       },
     })
     .hideBackButton(true)
@@ -818,29 +847,6 @@ struct Home {
   @Builder
   gamesTab() {
     Column({ space: 8 }) {
-      Row() {
-        Blank()
-        Button({ type: ButtonType.Circle }) {
-          SymbolGlyph($r('sys.symbol.plus'))
-            .fontSize(22)
-            .fontColor([$r('app.color.text_primary')])
-        }
-        .width(40)
-        .height(40)
-        .padding(0)
-        .backgroundColor($r('app.color.card_bg'))
-        .onClick(() => this.importGame())
-      }
-      .width('100%')
-      // 内容区铺满全屏（标题栏浮在其上），所以这里要自己让出标题栏高度，
-      // 否则右上角的「导入」按钮会被标题栏压住。
-      .padding({
-        left: 20,
-        right: 16,
-        top: this.titleBarHeightVp(),
-        bottom: 10,
-      })
-
       if (this.games.length === 0) {
         Column({ space: 8 }) {
           Text('还没有游戏')
@@ -871,7 +877,9 @@ struct Home {
         .layoutWeight(1)
         .padding({ left: 12, right: 12, bottom: 104 })
         .scrollBar(BarState.Off)
-        // 上下划到尽头时的回弹（列表内容不足一屏时也能拖出弹性）。
+        // 初始让开悬浮的 HDS 标题栏；上滑时列表从标题栏下方穿过，被沉浸材质糊掉。
+        .contentStartOffset(this.titleBarHeightVp())
+        // 上下划到尽头时的回弹（内容不足一屏时也能拖出弹性）。
         .edgeEffect(EdgeEffect.Spring, { alwaysEnabled: true })
       }
 
