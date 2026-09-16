@@ -7,6 +7,8 @@ const TAG = 'HX360E';
 /** 作者 B 站主页。 */
 const AUTHOR_URL = 'https://space.bilibili.com/297193944';
 const AUTHOR_NAME = '山东的大蒜王师傅';
+/** 开源仓库地址。 */
+const REPO_URL = 'https://github.com/1440196924/HX360E';
 
 /** 关于：应用信息（logo / 名称 / 版本）+ 免责声明。 */
 @Component
@@ -25,8 +27,8 @@ export struct AboutPage {
     }
   }
 
-  /** 用系统浏览器打开作者 B 站主页。 */
-  private openAuthorPage(): void {
+  /** 用系统浏览器打开链接。 */
+  private openUrl(url: string): void {
     try {
       // 与 GamePage.ets:103 同款：getContext 返回的是基类 Context，
       // 起 Ability 需要 UIAbilityContext。
@@ -34,13 +36,13 @@ export struct AboutPage {
       const want: Want = {
         action: 'ohos.want.action.viewData',
         entities: ['entity.system.browsable'],
-        uri: AUTHOR_URL,
+        uri: url,
       };
       ctx.startAbility(want).catch((err: Error) => {
-        hilog.error(DOMAIN, TAG, 'openAuthorPage failed: %{public}s', err.message);
+        hilog.error(DOMAIN, TAG, 'openUrl failed: %{public}s', err.message);
       });
     } catch (e) {
-      hilog.error(DOMAIN, TAG, 'openAuthorPage failed: %{public}s',
+      hilog.error(DOMAIN, TAG, 'openUrl failed: %{public}s',
         JSON.stringify(e));
     }
   }
@@ -54,6 +56,21 @@ export struct AboutPage {
     .alignItems(HorizontalAlign.Start)
     .width('100%')
     .padding({ left: 16, right: 16, top: 10, bottom: 10 })
+  }
+
+  // 可点的一行：值用强调色，点击跳系统浏览器。
+  @Builder
+  linkRow(label: string, value: string, url: string) {
+    Column({ space: 4 }) {
+      Text(label).fontSize(12).fontColor($r('app.color.text_secondary'))
+      Text(value).fontSize(13).fontColor($r('app.color.accent'))
+    }
+    .alignItems(HorizontalAlign.Start)
+    .width('100%')
+    .padding({ left: 16, right: 16, top: 10, bottom: 10 })
+    .onClick(() => {
+      this.openUrl(url);
+    })
   }
 
   build() {
@@ -80,6 +97,7 @@ export struct AboutPage {
 
           this.infoRow('包名', 'com.sddswsf.hx360e')
           this.infoRow('版本', this.version)
+          this.linkRow('开源地址', REPO_URL, REPO_URL)
 
           Divider().color($r('app.color.divider'))
 
@@ -116,7 +134,7 @@ export struct AboutPage {
           .alignItems(HorizontalAlign.Start)
           .padding({ left: 16, right: 16, top: 14, bottom: 14 })
           .onClick(() => {
-            this.openAuthorPage();
+            this.openUrl(AUTHOR_URL);
           })
 
           Divider().color($r('app.color.divider'))
