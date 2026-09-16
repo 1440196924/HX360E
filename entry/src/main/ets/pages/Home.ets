@@ -378,24 +378,13 @@ struct Home {
       // 全分辨率（原生）为唯一目标：不做半分辨率。
       '--hx360e_render_scale_den_x=1',
       '--hx360e_render_scale_den_y=1',
-      // 直读 resolve 开回 cvar 默认值 true。之前为 den 适配手动关过，但 den=1 下
-      // 不存在适配问题，而 dump 路径每帧贡献约 19ms 的 resolve（19 次/帧）。
-      '--vulkan_direct_host_resolve=true',
-      // pass 分桶仪表：一个 bool 同时打开 GPU timestamp 采集 + 4 张表
-      // （GpuFrame / VkFrameSync / VkPassId / VkPassTime，均 1/s）。
-      // 注意 log_level 默认就是 2=info，不需要传；dump_shaders 默认空，
-      // 所以不会触发 SPIR-V dump 爆栈。
-      // 实测：开着它与关着它帧时间一致（66.6 vs 67.5ms），不构成劣化，可以一直开。
-      '--log_gpu_frame_time_breakdown=true',
-      // 实测结论: 关掉中帧提交反而更慢(exec 63->133ms, GPU/提交 21->137ms),
-      // 因为 GPU 无法提前开工、呈现端要等整帧。保持默认开启。
-      '--log_resolve_details=true',
-      // 把每个 pass 的 renderArea 缩到实际画到的范围（已验证生效且画面无裁剪，
-      // GPU 侧 gpu exec -27%、每 pass -26%）。
-      '--render_area_dirty_extent=true',
-      // 注意：不要传 --log_to_logcat=true —— 实测会让 hx360e-boot 线程崩。
-      // xenia 的 XELOGI 只进 xe.log 文件（<filesDir>/logs/xe.log），
-      // 要看就用应用内「导出日志」，或 hdc 直接读（见 TODO）。
+      // 回退到内核优化前的状态（该状态实测 LIMBO 有十几帧）。
+      '--vulkan_direct_host_resolve=false',
+      // 下面三项是"安全带"：之前的实验值被 app 退出时写进了 xenia.config.toml，
+      // 而命令行优先级最高，这里显式钉住安全值，避免坏配置继续生效。
+      '--vulkan_in_pass_resolve=false',
+      '--log_gpu_frame_time_breakdown=false',
+      '--log_resolve_details=false',
       '--guest_scheduler_stats=true',
       // 系统级超分（XEngine 1.5x）改由设置项 Vulkan|hx360e_xeg_spatial_upscale
       // 控制（默认开）。这里不再传参：命令行优先级高于 --config，传了就会盖掉
