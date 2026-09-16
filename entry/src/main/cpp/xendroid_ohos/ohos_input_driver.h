@@ -96,6 +96,16 @@ class OhosInputDriver : public xe::hid::InputDriver {
   bool physical_pad_started_ = false;
 };
 
+// --- 物理手柄诊断（每秒探针用）-----------------------------------------
+// 注册成功的监视器数量与累计收到的事件数。ev 一直为 0 说明事件没来（注册/系统
+// 侧问题）；ev 在涨但游戏没反应说明映射/注入环节的问题。
+uint32_t PadRegisteredButtonMonitors();
+uint32_t PadRegisteredAxisMonitors();
+uint64_t PadEventCount();
+const char* PadLastEvent();
+// 重新武装监视器（把手柄在启动前就插好的场景也覆盖到）。
+void PadRearmPhysical();
+
 }  // namespace hx360e
 
 #endif  // HX360E_XENDROID_OHOS_OHOS_INPUT_DRIVER_H_

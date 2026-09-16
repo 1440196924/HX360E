@@ -11,6 +11,7 @@
 
 #include "xenia/ui/surface_ohos.h"
 #include "xenia/base/mutex.h"
+#include "ohos_input_driver.h"
 
 #include "ohos_emulator.h"
 #include "xeg_spatial_upscale.h"
@@ -93,13 +94,18 @@ void OhosWindowedAppContext::MainLoop() {
         HXLOG("present probe: paints/s=%{public}u guestInstantFps=%{public}.1f "
               "guestAvgFps=%{public}.1f frameMs=%{public}.1f xeg=[%{public}s] "
               "lock hold=%{public}.2fms/s max=%{public}.2fms n=%{public}u "
-              "wait=%{public}.2fms/s max=%{public}.2fms",
+              "wait=%{public}.2fms/s max=%{public}.2fms "
+              "pad=[reg=%{public}u/%{public}u ev=%{public}llu last=%{public}s]",
               paints, hx360e::InstantFps(), hx360e::AverageFps(),
               hx360e::LastFrameTimeMs(),
               hx360e::XegSpatialUpscale::GetStatusForDisplay().c_str(),
               double(lock_hold_total_ns) / 1e6, double(lock_hold_max_ns) / 1e6,
               lock_hold_count, double(lock_wait_total_ns) / 1e6,
-              double(lock_wait_max_ns) / 1e6);
+              double(lock_wait_max_ns) / 1e6,
+              hx360e::PadRegisteredButtonMonitors(),
+              hx360e::PadRegisteredAxisMonitors(),
+              static_cast<unsigned long long>(hx360e::PadEventCount()),
+              hx360e::PadLastEvent());
       }
     }
   }

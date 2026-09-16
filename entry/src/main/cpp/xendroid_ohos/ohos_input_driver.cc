@@ -1,7 +1,10 @@
 #include "ohos_input_driver.h"
 
+#include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <mutex>
 
 #include <GameControllerKit/game_pad.h>
 #include <hilog/log.h>
@@ -19,6 +22,19 @@ namespace {
 
 OhosInputDriver* g_pad_driver = nullptr;
 std::mutex g_pad_mutex;
+
+// 诊断计数：注册成功的监视器数 + 累计事件数 + 最近一次事件描述。
+std::atomic<uint32_t> g_pad_reg_buttons{0};
+std::atomic<uint32_t> g_pad_reg_axes{0};
+std::atomic<uint64_t> g_pad_events{0};
+char g_pad_last_event[64] = "none";
+std::mutex g_pad_last_event_mutex;
+
+void NotePadEvent(const char* what) {
+  g_pad_events.fetch_add(1, std::memory_order_relaxed);
+  std::lock_guard<std::mutex> lock(g_pad_last_event_mutex);
+  std::snprintf(g_pad_last_event, sizeof(g_pad_last_event), "%s", what);
+}
 
 // XInput thumb axis convention (xenia): positive Y is up, positive X is right.
 constexpr double kStickDeadzone = 0.08;
@@ -52,12 +68,19 @@ template <int KeyIndex>
 void PadButtonCb(const struct GamePad_ButtonEvent* event) {
   OhosInputDriver* driver = pad_driver();
   if (!driver) {
+    NotePadEvent("btn/nodrv");
     return;
   }
   GamePad_Button_ActionType action = DOWN;
   if (OH_GamePad_ButtonEvent_GetButtonAction(event, &action) !=
       GAME_CONTROLLER_SUCCESS) {
+    NotePadEvent("btn/noaction");
     return;
+  }
+  {
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "btn/%d/%s", KeyIndex, action == DOWN ? "dn" : "up");
+    NotePadEvent(buf);
   }
   driver->OnKey(KeyIndex, action == DOWN, 0);
 }
@@ -94,7 +117,16 @@ int16_t AxisValue(short value, bool negative) {
 void HandlePadAxis(PadAxisGroup group, const struct GamePad_AxisEvent* event) {
   OhosInputDriver* driver = pad_driver();
   if (!driver) {
+    NotePadEvent("axis/nodrv");
     return;
+  }
+  {
+    static std::atomic<uint32_t> axis_logged{0};
+    if (axis_logged.fetch_add(1, std::memory_order_relaxed) < 8) {
+      char buf[64];
+      std::snprintf(buf, sizeof(buf), "axis/%d", int(group));
+      NotePadEvent(buf);
+    }
   }
   GamePad_AxisSourceType source = DPAD;
   if (OH_GamePad_AxisEvent_GetAxisSourceType(event, &source) !=
@@ -284,6 +316,8 @@ void OhosInputDriver::StartPhysicalGamepad() {
   PADLOG("gamepad: GameControllerKit monitors registered: buttons=%{public}d/%{public}d axes=%{public}d/%{public}d",
          ok_buttons, static_cast<int>(sizeof(kButtonMonitors) / sizeof(kButtonMonitors[0])),
          ok_axes, static_cast<int>(sizeof(kAxisMonitors) / sizeof(kAxisMonitors[0])));
+  g_pad_reg_buttons.store(static_cast<uint32_t>(ok_buttons));
+  g_pad_reg_axes.store(static_cast<uint32_t>(ok_axes));
 }
 
 void OhosInputDriver::StopPhysicalGamepad() {
@@ -544,6 +578,32 @@ std::vector<xe::hid::InputDeviceInfo> OhosInputDriver::EnumerateDevices() {
   info.preferred_slot = 0;  // player 1
   out.push_back(std::move(info));
   return out;
+}
+
+uint32_t PadRegisteredButtonMonitors() {
+  return g_pad_reg_buttons.load(std::memory_order_relaxed);
+}
+
+uint32_t PadRegisteredAxisMonitors() {
+  return g_pad_reg_axes.load(std::memory_order_relaxed);
+}
+
+uint64_t PadEventCount() {
+  return g_pad_events.load(std::memory_order_relaxed);
+}
+
+const char* PadLastEvent() {
+  std::lock_guard<std::mutex> lock(g_pad_last_event_mutex);
+  return g_pad_last_event;
+}
+
+void PadRearmPhysical() {
+  OhosInputDriver* driver = pad_driver();
+  if (!driver) {
+    return;
+  }
+  driver->StopPhysicalGamepad();
+  driver->StartPhysicalGamepad();
 }
 
 }  // namespace hx360e

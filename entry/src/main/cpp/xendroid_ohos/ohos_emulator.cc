@@ -128,6 +128,11 @@ std::vector<std::unique_ptr<xe::hid::InputDriver>> CreateInputDrivers(
   std::vector<std::unique_ptr<xe::hid::InputDriver>> drivers;
   auto pad = std::make_unique<OhosInputDriver>(window, /*window_z_order=*/0);
   g_input_driver.store(pad.get());
+  // 必须自己调 Setup()：xenia 的 InputSystem::AddDriver() 只把驱动 push_back
+  // （并设置 devices_changed 回调），从不调用 InputDriver::Setup()。少了这一步
+  // 物理手柄的 GameControllerKit 监视器一个都不会注册（实测探针
+  // pad=[reg=0/0 ev=0]，接手柄完全没有输入）。
+  pad->Setup();
   drivers.emplace_back(std::move(pad));
   return drivers;
 }

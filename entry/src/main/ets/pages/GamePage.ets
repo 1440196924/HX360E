@@ -139,6 +139,7 @@ struct GamePage {
     // 之前就连好的手柄也能收到事件），并注册系统热插拔监听，插入/拔出后再次
     // 武装 —— 否则监视器只在开局注册那一刻有效，后插的手柄不会有任何输入。
     this.rearmPhysicalPad('enter');
+    this.logInputDevices('enter');
     try {
       inputDevice.on('change', this.deviceWatcher);
       hilog.info(DOMAIN, TAG, 'gamepad hot-plug watcher registered');
@@ -193,6 +194,31 @@ struct GamePage {
     }
   }
 
+  /** 列出系统输入设备（诊断手柄为什么收不到事件）。 */
+  private logInputDevices(tagText: string): void {
+    inputDevice.getDeviceList().then((ids: number[]) => {
+      hilog.info(DOMAIN, TAG, 'inputDevices(%{public}s): count=%{public}d',
+        tagText, ids.length);
+      for (const id of ids) {
+        inputDevice.getDeviceInfo(id).then((info: inputDevice.InputDeviceData) => {
+          hilog.info(DOMAIN, TAG,
+            'inputDevice id=%{public}d name=%{public}s sources=%{public}d',
+            info.id, info.name, info.sources.length);
+          for (const s of info.sources) {
+            hilog.info(DOMAIN, TAG, '  source id=%{public}d type=%{public}d',
+              info.id, s);
+          }
+        }).catch((e: BusinessError) => {
+          hilog.warn(DOMAIN, TAG, 'getDeviceInfo(%{public}d) failed: %{public}d',
+            id, e.code);
+        });
+      }
+    }).catch((e: BusinessError) => {
+      hilog.error(DOMAIN, TAG, 'getDeviceList failed: %{public}d %{public}s',
+        e.code, e.message);
+    });
+  }
+
   /**
    * 物理手柄热插拔监听：系统上报 add/remove 时重新武装 GameControllerKit 的
    * 按键/摇杆监视器。GameControllerKit 的监视器需要在手柄已连接时注册才会
@@ -202,6 +228,7 @@ struct GamePage {
     (data: inputDevice.DeviceListener) => {
       hilog.info(DOMAIN, TAG, 'input device %{public}s (id=%{public}d)',
         data.type, data.deviceId);
+      this.logInputDevices(`after-${data.type}`);
       this.rearmPhysicalPad(data.type);
     };
 
@@ -431,6 +458,46 @@ struct GamePage {
     this.padPress(XPadKey.DpadDown, down);
     this.padPress(XPadKey.DpadLeft, left);
     this.padPress(XPadKey.DpadRight, right);
+  }
+
+  /**
+   * 物理手柄按键 → 360 手柄按键。
+   * USB 有线手柄在鸿蒙上**不经过 GameControllerKit**（实测监视器注册成功
+   * reg=14/5 但事件 ev=0），而是以 HID 按键事件派发，码就是
+   * KEYCODE_BUTTON_*（2301~2315）与 KEYCODE_DPAD_*（2012~2015）。
+   */
+  private physicalPadKey(keyCode: number): number {
+    switch (keyCode) {
+      case 2301: return XPadKey.A;
+      case 2302: return XPadKey.B;
+      case 2304: return XPadKey.X;
+      case 2305: return XPadKey.Y;
+      case 2307: return XPadKey.LShoulder;
+      case 2308: return XPadKey.RShoulder;
+      case 2309: return XPadKey.LTrigger;
+      case 2310: return XPadKey.RTrigger;
+      case 2311: return XPadKey.Back;     // SELECT
+      case 2312: return XPadKey.Start;    // START
+      case 2313: return XPadKey.Back;     // MODE
+      case 2314: return XPadKey.LThumbPress;
+      case 2315: return XPadKey.RThumbPress;
+      case 2012: return XPadKey.DpadUp;
+      case 2013: return XPadKey.DpadDown;
+      case 2014: return XPadKey.DpadLeft;
+      case 2015: return XPadKey.DpadRight;
+      default: return -1;
+    }
+  }
+
+  private handlePhysicalKey(event: KeyEvent): void {
+    const key: number = this.physicalPadKey(event.keyCode);
+    if (key < 0) {
+      return;
+    }
+    const pressed: boolean = event.type === KeyType.Down;
+    this.padPress(key, pressed);
+    hilog.info(DOMAIN, TAG, 'physical pad keyCode=%{public}d -> %{public}d %{public}s',
+      event.keyCode, key, pressed ? 'down' : 'up');
   }
 
   // 圆形按键（ABXY / L3 / R3 / Back / Start）：按住生效，自带按下反馈。
@@ -703,6 +770,10 @@ struct GamePage {
     .height('100%')
     // 游戏页背景纯黑（黑边/拉伸时露出的区域也是黑的）。
     .backgroundColor('#000000')
+    // 物理手柄：USB 有线手柄以 HID 按键事件进来，在这里映射成 360 手柄按键。
+    .onKeyEvent((event: KeyEvent) => {
+      this.handlePhysicalKey(event);
+    })
     .onAreaChange((oldArea: Area, newArea: Area) => {
       // Area 宽高是 vp；densityPixels = px/vp，换算成 px。
       let density: number = 1;
