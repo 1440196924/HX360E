@@ -8,6 +8,8 @@ import {
   HdsNavDestination,
   HdsNavDestinationTitleMode,
   TitleBarStyleOptions,
+  BlurStrategy,
+  ScrollEffectType,
   hdsMaterial,
 } from '@kit.UIDesignKit';
 import testNapi from 'libentry.so';
@@ -23,6 +25,8 @@ import { Orientation } from '../common/Orientation';
 
 const DOMAIN = 0x0000;
 const TAG = 'HX360E';
+/** 系统单行标题栏的内容高度（不含状态栏避让区）。 */
+const TITLE_BAR_CONTENT_HEIGHT: number = 56;
 
 /**
  * 游戏卡片：封面 + 名称，长按弹系统上下文菜单（背景模糊、卡片预览浮起、菜单贴下方）。
@@ -258,17 +262,40 @@ struct Home {
     }
   }
 
-  // 标题栏样式：沉浸光感材质 + 滚动时渐变模糊（对齐 ohbili 推荐视频页）。
+  /**
+   * 标题栏总占位高度（状态栏避让区 + 标题栏内容 56vp）。
+   *
+   * 内容区是 ignoreLayoutSafeArea 铺满全屏的，标题栏浮在内容之上，
+   * 所以每个页签的内容都要自己让出这一段。
+   */
+  private titleBarHeightVp(): number {
+    return this.statusBarVp + TITLE_BAR_CONTENT_HEIGHT;
+  }
+
+  // 标题栏样式（按官方 HDS 写法）：不设任何背景色，纯靠 systemMaterialEffect
+  // 拿系统「沉浸光感」材质；滚动时切到 IMMERSIVE_GRADIENT_BLUR 做渐次磨砂。
   private titleBarStyle(): TitleBarStyleOptions {
     const style: TitleBarStyleOptions = {
       originalStyle: {
-        backgroundStyle: {
-          backgroundColor: $r('app.color.page_bg'),
+        contentStyle: {
+          titleStyle: { mainTitleColor: $r('app.color.text_primary') },
+        },
+      },
+      scrollEffectStyle: {
+        contentStyle: {
+          titleStyle: { mainTitleColor: $r('app.color.text_primary') },
         },
       },
       systemMaterialEffect: {
         materialType: hdsMaterial.MaterialType.IMMERSIVE,
         materialLevel: this.materialLevel,
+      },
+      blurStrategy: BlurStrategy.ADAPTIVE,
+      scrollEffectOpts: {
+        enableScrollEffect: true,
+        scrollEffectType: ScrollEffectType.IMMERSIVE_GRADIENT_BLUR,
+        blurEffectiveStartOffset: LengthMetrics.vp(0),
+        blurEffectiveEndOffset: LengthMetrics.vp(TITLE_BAR_CONTENT_HEIGHT),
       },
     };
     return style;
@@ -805,11 +832,12 @@ struct Home {
         .onClick(() => this.importGame())
       }
       .width('100%')
-      // 标题已交给 HDS 标题栏，这里只留右上角的「导入」按钮。
+      // 内容区铺满全屏（标题栏浮在其上），所以这里要自己让出标题栏高度，
+      // 否则右上角的「导入」按钮会被标题栏压住。
       .padding({
         left: 20,
         right: 16,
-        top: 10,
+        top: this.titleBarHeightVp(),
         bottom: 10,
       })
 
@@ -862,8 +890,7 @@ struct Home {
   @Builder
   settingsTab() {
     Column() {
-      Scroll() {
-        Column({ space: 12 }) {
+      Scroll() {        Column({ space: 12 }) {
           Column() {
             this.settingRow('高级选项', '渲染分辨率 / 后端 / 诊断',
               $r('sys.symbol.gearshape'), () => {
@@ -918,6 +945,8 @@ struct Home {
       .scrollBar(BarState.Off)
       // Scroll 设了 layoutWeight 后，内容不足一屏会垂直居中，这里强制顶部对齐。
       .align(Alignment.Top)
+      // 让出浮在上面的 HDS 标题栏高度。
+      .padding({ top: this.titleBarHeightVp() })
     }
     .width('100%')
     .height('100%')
