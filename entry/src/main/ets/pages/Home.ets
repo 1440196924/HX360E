@@ -1,7 +1,7 @@
 import { hilog } from '@kit.PerformanceAnalysisKit';
-import { common, Want } from '@kit.AbilityKit';
+import { common } from '@kit.AbilityKit';
 import { window, display, LengthMetrics, SymbolGlyphModifier } from '@kit.ArkUI';
-import { fileIo, fileUri } from '@kit.CoreFileKit';
+import { fileIo } from '@kit.CoreFileKit';
 import {
   HdsTabs,
   HdsTabsController,
@@ -19,7 +19,6 @@ import { GameInstall, InstallControl, InstallProgress } from '../common/GameInst
 import { SettingsStore } from '../common/SettingsStore';
 import { AdvancedPage } from './AdvancedPage';
 import { ControlsPage } from './ControlsPage';
-import { DirectoryPage } from './DirectoryPage';
 import { AboutPage } from './AboutPage';
 import { LogExport } from '../common/LogExport';
 import { Orientation } from '../common/Orientation';
@@ -701,42 +700,6 @@ struct Home {
     this.statusText = await LogExport.exportLogs(ctx, ctx.filesDir);
   }
 
-  /**
-   * 在系统文件管理器中打开模拟器目录。
-   *
-   * 注意：应用沙箱（filesDir）对其他 App 不可读，系统文件管理器不保证能进去。
-   * 所以这里先按 viewData + resource/folder 拉起文件管理器，失败/不支持就回落到
-   * 内置目录浏览页（那里可以复制路径、查看文件），保证用户总能看到东西。
-   */
-  private openSandboxInFiles(): void {
-    const dir: string = this.filesDir();
-    if (dir === '') {
-      this.statusText = '打开失败：无 context';
-      return;
-    }
-    try {
-      const uri: string = fileUri.getUriFromPath(dir);
-      hilog.info(DOMAIN, TAG, 'open dir in files app: %{public}s', uri);
-      const ctx = getContext(this) as common.UIAbilityContext;
-      const want: Want = {
-        action: 'ohos.want.action.viewData',
-        entities: ['entity.system.browsable'],
-        uri: uri,
-        type: 'resource/folder',
-      };
-      ctx.startAbility(want).catch((err: Error) => {
-        hilog.warn(DOMAIN, TAG, 'no file manager for folder: %{public}s',
-          err.message);
-        this.statusText = '系统文件管理器无法打开沙箱目录，已切换到内置浏览';
-        this.go('directory');
-      });
-    } catch (e) {
-      hilog.error(DOMAIN, TAG, 'openSandboxInFiles failed: %{public}s',
-        JSON.stringify(e));
-      this.go('directory');
-    }
-  }
-
   private go(name: string): void {
     try {
       const info: NavPathInfo = { name: name };
@@ -756,8 +719,6 @@ struct Home {
       AdvancedPage()
     } else if (name === 'controls') {
       ControlsPage()
-    } else if (name === 'directory') {
-      DirectoryPage()
     } else if (name === 'about') {
       AboutPage()
     }
@@ -925,11 +886,6 @@ struct Home {
             this.settingRow('导出日志', '运行时日志 / 上次崩溃现场',
               $r('sys.symbol.doc_text'), () => {
                 this.doExportLogs();
-              })
-            this.rowDivider()
-            this.settingRow('打开模拟器目录', '在系统文件管理器中打开',
-              $r('sys.symbol.folder'), () => {
-                this.openSandboxInFiles();
               })
           }
           .width('100%')
