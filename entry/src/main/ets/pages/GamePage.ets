@@ -1,5 +1,5 @@
 import { hilog } from '@kit.PerformanceAnalysisKit';
-import { display, window } from '@kit.ArkUI';
+import { display, window, router } from '@kit.ArkUI';
 import { BusinessError } from '@kit.BasicServicesKit';
 import gamePerformance from '@hms.core.gameservice.gameperformance';
 import { gamePlayer } from '@kit.GameServiceKit';
@@ -179,6 +179,25 @@ struct GamePage {
     } catch (e) {
       this.dbgFps = '统计不可用';
     }
+  }
+
+  /**
+   * 从游戏界面返回 = 退出游戏：先让原生侧停掉模拟器（guest 线程 / Vulkan / 音频
+   * 全部收尾），再回到游戏库。返回 true 表示按键已被消费，不再走系统默认返回。
+   */
+  onBackPressed(): boolean {
+    try {
+      testNapi.emulator.quit();
+      hilog.info(DOMAIN, TAG, 'game quit requested by back');
+    } catch (e) {
+      hilog.warn(DOMAIN, TAG, 'game quit failed: %{public}s', JSON.stringify(e));
+    }
+    try {
+      router.back();
+    } catch (e) {
+      // 忽略：路由栈异常时不影响退出
+    }
+    return true;
   }
 
   aboutToDisappear(): void {
