@@ -15,7 +15,7 @@ const TAG = 'HX360E';
  *   3. 版本相同 → 直接返回，不碰文件。
  * 这样默认值的改动能真正生效，又不会覆盖用户自己改过的值。
  */
-const CONFIG_SCHEMA_VERSION: number = 6;
+const CONFIG_SCHEMA_VERSION: number = 7;
 const CONFIG_VERSION_TAG: string = 'HX360E|schema_version';
 /** [标签, 旧默认值, 新默认值] */
 const CONFIG_MIGRATIONS: string[][] = [
@@ -25,9 +25,9 @@ const CONFIG_MIGRATIONS: string[][] = [
   ['GPU|occlusion_query', 'fast', 'fake'],
   ['GPU|readback_resolve', 'uma', 'none'],
   // v3：新增 Vulkan|hx360e_xeg_spatial_upscale(_sharpness) 两个键（系统级超分）。
-  //   hx360e_xeg_spatial_upscale 默认 true：XEG 1.5x 超分接到上屏链路后画质更好，
-  //   且创建失败会自动退回 FSR 链，非 Maleoon 设备无副作用。
-  ['Vulkan|hx360e_xeg_spatial_upscale', 'false', 'true'],
+  // v7：系统级超分默认改为**关闭**（超分不是原生渲染）。上一版默认是 true，
+  //   这里把「仍等于旧默认 true = 用户没改过」的配置改回 false。
+  ['Vulkan|hx360e_xeg_spatial_upscale', 'true', 'false'],
   // v4：修正上一版实验留下的 Console|internal_display_resolution=5（848x480）。
   // 该设置会**改变告知 guest 的视频模式**，实测会让游戏在切换视频模式时
   // 崩在 guest CPU 线程（SIGSEGV_ACCERR）。渲染分辨率改用独立的
