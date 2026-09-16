@@ -1,7 +1,7 @@
 import { hilog } from '@kit.PerformanceAnalysisKit';
-import { common } from '@kit.AbilityKit';
+import { common, Want } from '@kit.AbilityKit';
 import { window, display, LengthMetrics, SymbolGlyphModifier } from '@kit.ArkUI';
-import { fileIo } from '@kit.CoreFileKit';
+import { fileIo, fileUri } from '@kit.CoreFileKit';
 import {
   HdsTabs,
   HdsTabsController,
@@ -701,6 +701,42 @@ struct Home {
     this.statusText = await LogExport.exportLogs(ctx, ctx.filesDir);
   }
 
+  /**
+   * 在系统文件管理器中打开模拟器目录。
+   *
+   * 注意：应用沙箱（filesDir）对其他 App 不可读，系统文件管理器不保证能进去。
+   * 所以这里先按 viewData + resource/folder 拉起文件管理器，失败/不支持就回落到
+   * 内置目录浏览页（那里可以复制路径、查看文件），保证用户总能看到东西。
+   */
+  private openSandboxInFiles(): void {
+    const dir: string = this.filesDir();
+    if (dir === '') {
+      this.statusText = '打开失败：无 context';
+      return;
+    }
+    try {
+      const uri: string = fileUri.getUriFromPath(dir);
+      hilog.info(DOMAIN, TAG, 'open dir in files app: %{public}s', uri);
+      const ctx = getContext(this) as common.UIAbilityContext;
+      const want: Want = {
+        action: 'ohos.want.action.viewData',
+        entities: ['entity.system.browsable'],
+        uri: uri,
+        type: 'resource/folder',
+      };
+      ctx.startAbility(want).catch((err: Error) => {
+        hilog.warn(DOMAIN, TAG, 'no file manager for folder: %{public}s',
+          err.message);
+        this.statusText = '系统文件管理器无法打开沙箱目录，已切换到内置浏览';
+        this.go('directory');
+      });
+    } catch (e) {
+      hilog.error(DOMAIN, TAG, 'openSandboxInFiles failed: %{public}s',
+        JSON.stringify(e));
+      this.go('directory');
+    }
+  }
+
   private go(name: string): void {
     try {
       const info: NavPathInfo = { name: name };
@@ -880,11 +916,6 @@ struct Home {
               $r('sys.symbol.gearshape'), () => {
                 this.go('advanced');
               })
-            this.rowDivider()
-            this.settingRow('控制', '虚拟手柄与按键对照',
-              $r('sys.symbol.gamecontroller'), () => {
-                this.go('controls');
-              })
           }
           .width('100%')
           .backgroundColor($r('app.color.card_bg'))
@@ -896,9 +927,9 @@ struct Home {
                 this.doExportLogs();
               })
             this.rowDivider()
-            this.settingRow('打开模拟器目录', '浏览沙箱内文件',
+            this.settingRow('打开模拟器目录', '在系统文件管理器中打开',
               $r('sys.symbol.folder'), () => {
-                this.go('directory');
+                this.openSandboxInFiles();
               })
           }
           .width('100%')
