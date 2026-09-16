@@ -16,3 +16,5 @@
 /screenshots
 # Graphics Profiler 抓帧文件（单个可达数十 MB）
 *.rdc
+# 打包产物（release hap/app），不入库；发布走 GitHub Releases
+/dist
