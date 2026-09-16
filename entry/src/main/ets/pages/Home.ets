@@ -285,8 +285,12 @@ struct Home {
     if (this.currentTab !== 0) {
       return items;
     }
+    // 图标颜色跟主题走：浅色模式用深色 text_primary，深色模式自动变浅。
+    const glyph: SymbolGlyphModifier =
+      new SymbolGlyphModifier($r('sys.symbol.plus'))
+        .fontColor([$r('app.color.text_primary')]);
     const icon: HdsNavigationIconOptions = {
-      icon: $r('sys.symbol.plus'),
+      icon: glyph,
       isEnabled: true,
       action: () => {
         this.importGame();
