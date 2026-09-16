@@ -489,6 +489,17 @@ struct GamePage {
     }
   }
 
+  /** 指针类事件诊断（上限 60 条，避免刷屏）。 */
+  private pointerEventLogged: number = 0;
+  private notePointerEvent(text: string): void {
+    if (this.pointerEventLogged >= 60) {
+      return;
+    }
+    this.pointerEventLogged++;
+    hilog.info(DOMAIN, TAG, 'pointer#%{public}d %{public}s',
+      this.pointerEventLogged, text);
+  }
+
   private handlePhysicalKey(event: KeyEvent): void {
     const key: number = this.physicalPadKey(event.keyCode);
     if (key < 0) {
@@ -773,6 +784,25 @@ struct GamePage {
     // 物理手柄：USB 有线手柄以 HID 按键事件进来，在这里映射成 360 手柄按键。
     .onKeyEvent((event: KeyEvent) => {
       this.handlePhysicalKey(event);
+    })
+    // 摇杆是模拟轴，走轴事件（先原样打日志，确认字段后再映射）。
+    .onAxisEvent((event: AxisEvent) => {
+      try {
+        hilog.info(DOMAIN, TAG, 'axis event: %{public}s', JSON.stringify(event));
+      } catch (e) {
+        hilog.info(DOMAIN, TAG, 'axis event (unstringifiable)');
+      }
+    })
+    // 还有一条可能的通道：有些系统把 HID 的 ABS_X/ABS_Y 映射成指针移动，
+    // 所以把触摸/鼠标/悬停也记下来（有次数上限，避免刷屏）。
+    .onTouch((event: TouchEvent) => {
+      this.notePointerEvent(`touch type=${event.type} n=${event.touches.length}`);
+    })
+    .onMouse((event: MouseEvent) => {
+      this.notePointerEvent(`mouse action=${event.action} x=${event.x} y=${event.y}`);
+    })
+    .onHover((isHover: boolean, event: HoverEvent) => {
+      this.notePointerEvent(`hover on=${isHover} x=${event.x} y=${event.y}`);
     })
     .onAreaChange((oldArea: Area, newArea: Area) => {
       // Area 宽高是 vp；densityPixels = px/vp，换算成 px。
