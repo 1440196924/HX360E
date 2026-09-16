@@ -32,8 +32,33 @@ add_compile_options(-funwind-tables)
 
 # 上游 XenDroid 的 xenia 源码树（本地 fork，含 harmony 补丁）。
 # 通过缓存变量指定，便于换用其它 fork / 子模块路径。
-set(XE_XENDROID_ROOT "D:/Code/OpenSource/XenDroid/emulator-core/src/main/cpp"
-    CACHE PATH "XenDroid xenia source root")
+# 上游 XenDroid 的 xenia 源码树位置，三级来源（优先级从高到低）：
+#   1) -DXE_XENDROID_ROOT=... 显式传入
+#   2) 环境变量 XE_XENDROID_ROOT（指向 emulator-core/src/main/cpp）
+#   3) 仓库内 default：<repo>/third_party/XenDroid/emulator-core/src/main/cpp
+#      —— scripts/setup-upstream.{ps1,sh} 默认就克隆到这里。
+if(DEFINED ENV{XE_XENDROID_ROOT} AND NOT "$ENV{XE_XENDROID_ROOT}" STREQUAL "")
+    set(_hx360e_xendroid_root "$ENV{XE_XENDROID_ROOT}")
+else()
+    # CMAKE_CURRENT_SOURCE_DIR = <repo>/entry/src/main/cpp，
+    # 往上四级才是仓库根（cpp -> main -> src -> entry -> <repo>）。
+    get_filename_component(_hx360e_repo_root
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../../.." ABSOLUTE)
+    set(_hx360e_xendroid_root
+        "${_hx360e_repo_root}/third_party/XenDroid/emulator-core/src/main/cpp")
+endif()
+
+if(NOT EXISTS "${_hx360e_xendroid_root}/xenia/CMakeLists.txt")
+    message(FATAL_ERROR
+        "找不到上游 XenDroid 源码树：${_hx360e_xendroid_root}\n"
+        "先跑 scripts/setup-upstream.ps1（Windows）或 scripts/setup-upstream.sh"
+        "（Linux/macOS）拉取上游并打补丁；\n"
+        "或用 -DXE_XENDROID_ROOT=<clone>/emulator-core/src/main/cpp 指定位置。")
+endif()
+
+set(XE_XENDROID_ROOT "${_hx360e_xendroid_root}"
+    CACHE PATH "XenDroid xenia source root（缺省 = <repo>/third_party/XenDroid/emulator-core/src/main/cpp）")
+message(STATUS "XenDroid source root: ${XE_XENDROID_ROOT}")
 
 # 关闭 ThinLTO：OHOS 工具链默认不带 lld，Release 下 -flto=thin -fuse-ld=lld 会失败。
 set(XENIA_ENABLE_LTO OFF CACHE BOOL "" FORCE)

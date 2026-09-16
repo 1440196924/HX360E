@@ -1,5 +1,7 @@
 /node_modules
 /oh_modules
+# 上游 XenDroid 克隆（由 scripts/setup-upstream.* 生成，不入库）
+/third_party
 /local.properties
 /.idea
 **/build

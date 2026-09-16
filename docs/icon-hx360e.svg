@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="HX360E">
+  <title>HX360E</title>
+  <defs>
+    <!-- 背景：深蓝 → 亮蓝的斜向渐变 -->
+    <linearGradient id="bg" x1="0.05" y1="0" x2="0.85" y2="1">
+      <stop offset="0" stop-color="#4E9BFF"/>
+      <stop offset="0.42" stop-color="#1B62E8"/>
+      <stop offset="1" stop-color="#082057"/>
+    </linearGradient>
+    <!-- 顶部高光，让蓝色有球体感 -->
+    <radialGradient id="glow" cx="0.5" cy="0.34" r="0.68">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.26"/>
+      <stop offset="0.55" stop-color="#FFFFFF" stop-opacity="0.06"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <!-- 前景（X 与 360）自身的冷调白，避免死白 -->
+    <linearGradient id="xfill" x1="0.1" y1="0" x2="0.75" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="0.6" stop-color="#F4F8FF"/>
+      <stop offset="1" stop-color="#D6E5FF"/>
+    </linearGradient>
+    <filter id="fgshadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="10" stdDeviation="12"
+                    flood-color="#03102E" flood-opacity="0.5"/>
+    </filter>
+  </defs>
+
+  <rect width="512" height="512" fill="url(#bg)"/>
+  <rect width="512" height="512" fill="url(#glow)"/>
+
+  <g filter="url(#fgshadow)">
+    <!-- 主体：白色 X，居中放大（两端收细、中心最粗的棱形臂） -->
+    <g>
+      <!-- 左上 → 右下 -->
+      <path d="M110 98 L269 243 L414 402 L402 414 L243 269 L98 110 Z"
+            fill="url(#xfill)"/>
+      <!-- 右上 → 左下 -->
+      <path d="M414 110 L269 269 L110 414 L98 402 L243 243 L402 98 Z"
+            fill="url(#xfill)"/>
+    </g>
+
+    <!-- 底部小字 360 -->
+    <text x="256" y="454" fill="url(#xfill)"
+          font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif"
+          font-size="56" font-weight="800" letter-spacing="2"
+          text-anchor="middle" dominant-baseline="central">360</text>
+  </g>
+</svg>

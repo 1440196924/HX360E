@@ -1,0 +1,26 @@
+{
+  "_comment": "HX360E 依赖的上游 XenDroid 版本与补丁清单。改这里就能换上游版本；scripts/setup-upstream.* 会照此拉取并打补丁。",
+  "repo": "https://github.com/rfandango/XenDroid.git",
+  "branch": "main",
+  "commit": "779680ade075d2d2a4c589c6a8d57a8e26c116c0",
+  "commitSubject": "Update README.md",
+  "submodules": true,
+  "patches": [
+    {
+      "file": "patches/harmony/glslang.diff",
+      "subdir": "emulator-core/src/main/cpp/xenia/third_party/glslang",
+      "note": "glslang：为 OHOS/BiSheng 工具链补的编译修补"
+    },
+    {
+      "file": "patches/harmony/xbyak_aarch64.diff",
+      "subdir": "emulator-core/src/main/cpp/xenia/third_party/xbyak_aarch64",
+      "note": "xbyak_aarch64：OHOS 平台修补"
+    },
+    {
+      "file": "patches/harmony/xendroid-ohos-fork.diff",
+      "subdir": ".",
+      "note": "主补丁：OHOS 平台移植 + 内核性能优化 + 诊断仪表（相对 XenDroid 仓库根）"
+    }
+  ],
+  "sourceRoot": "emulator-core/src/main/cpp"
+}

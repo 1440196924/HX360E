@@ -1,0 +1,6 @@
+# 补丁必须逐字节原样保存：任何 CRLF 转换都会让 git apply 失败。
+*.diff -text
+
+# 脚本换行：shell 必须 LF；PowerShell 脚本带 UTF-8 BOM 且不要被转换。
+*.sh text eol=lf
+*.ps1 -text

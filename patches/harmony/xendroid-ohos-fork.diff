@@ -1844,7 +1844,7 @@ index 000000000..9cd0052ff
 +
 +#endif  // XENIA_GPU_VULKAN_HX_DIAG_LOG_H_
 diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_command_processor.cc b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_command_processor.cc
-index 7e92705ad..5e035af48 100644
+index 7e92705ad..cf4bbcad5 100644
 --- a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_command_processor.cc
 +++ b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_command_processor.cc
 @@ -46,6 +46,34 @@ DECLARE_bool(clear_memory_page_state);
@@ -2063,16 +2063,15 @@ index 7e92705ad..5e035af48 100644
        s = VkFrameSyncStats();
        s.last_report_ns = now;
      }
-@@ -2322,6 +2483,8 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
+@@ -2322,6 +2483,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
        [this, frontbuffer_width_scaled, frontbuffer_height_scaled,
         frontbuffer_format, swap_texture_view](
            ui::Presenter::GuestOutputRefreshContext& context) -> bool {
 +        HxTimeScope hx_cpu_scope(&hx_cpu_refresh_ns);
-+        ++hx_cpu_refreshes;
          // In case the swap command is the only one in the frame.
          if (!BeginSubmission(true)) {
            return false;
-@@ -2868,13 +3031,19 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
+@@ -2868,13 +3030,19 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
          // Need to submit all the commands before giving the image back to the
          // presenter so it can submit its own commands for displaying it to the
          // queue, and also need to submit the release barrier.
@@ -2093,34 +2092,16 @@ index 7e92705ad..5e035af48 100644
  }
  
  void VulkanCommandProcessor::OnPrimaryBufferEnd() {
-@@ -2957,8 +3126,13 @@ bool VulkanCommandProcessor::PushImageMemoryBarrier(
-   if (skip_if_equal && src_stage_mask == dst_stage_mask &&
-       src_access_mask == dst_access_mask && old_layout == new_layout &&
+@@ -2959,6 +3127,8 @@ bool VulkanCommandProcessor::PushImageMemoryBarrier(
        src_queue_family_index == dst_queue_family_index) {
-+    ++hx_bar_skip_equal;
      return false;
    }
-+  ++hx_bar_pushed;
 +  if (old_layout != new_layout) {
-+    ++hx_bar_layout_change;
 +  }
  
    // Separate different barriers for overlapping image subresource ranges into
    // different pipeline barrier commands.
-@@ -3034,10 +3208,12 @@ bool VulkanCommandProcessor::SubmitBarriers(bool force_end_render_pass) {
-   SplitPendingBarrier();
-   if (pending_barriers_.empty()) {
-     if (force_end_render_pass) {
-+      ++hx_erp_barrier;
-       EndRenderPass();
-     }
-     return false;
-   }
-+  ++hx_erp_barrier;
-   EndRenderPass();
-   for (auto it = pending_barriers_.cbegin(); it != pending_barriers_.cend();
-        ++it) {
-@@ -3157,7 +3333,10 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
+@@ -3157,7 +3327,10 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
    current_render_pass_ = use_dynamic_rendering ? VK_NULL_HANDLE : render_pass;
    current_framebuffer_ = framebuffer;
    ++vk_frame_sync_stats_.render_pass_begins;
@@ -2132,7 +2113,7 @@ index 7e92705ad..5e035af48 100644
    if (cvars::log_gpu_frame_time_breakdown) {
      const uint32_t bucket = (uint32_t(framebuffer->host_extent.width) << 16) |
                              uint32_t(framebuffer->host_extent.height);
-@@ -3167,6 +3346,22 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
+@@ -3167,6 +3340,21 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
               framebuffer->host_extent.height,
               render_target_cache_->GetLastUpdateRenderTargetsDebugName());
      }
@@ -2151,20 +2132,18 @@ index 7e92705ad..5e035af48 100644
 +          vk_frame_sync_stats_.draws, 
 +          render_target_cache_->GetLastUpdateRenderTargetsDebugName());
 +    }
-+    ++hx_pass_seq_index;
    }
    OpenPassTimestamp((uint32_t(framebuffer->host_extent.width) << 16) |
                      framebuffer->host_extent.height);
-@@ -3341,6 +3536,8 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
+@@ -3341,6 +3529,7 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
  
  void VulkanCommandProcessor::EndRenderPass() {
    assert_true(submission_open_);
 +  HxTimeScope hx_cpu_scope(&hx_cpu_pass_ns);
-+  ++hx_cpu_passes;
    if (!in_render_pass_) {
      return;
    }
-@@ -3763,10 +3960,13 @@ Shader* VulkanCommandProcessor::LoadShader(xenos::ShaderType shader_type,
+@@ -3763,10 +3952,12 @@ Shader* VulkanCommandProcessor::LoadShader(xenos::ShaderType shader_type,
  bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                         uint32_t index_count,
                                         IndexBufferInfo* index_buffer_info,
@@ -2174,38 +2153,35 @@ index 7e92705ad..5e035af48 100644
    SCOPE_profile_cpu_f("gpu");
  #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
 +  HxTimeScope hx_cpu_scope(&hx_cpu_draw_ns);
-+  ++hx_cpu_draws;
 +
  
    const RegisterFile& regs = *register_file_;
  
-@@ -4255,7 +4455,10 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
+@@ -4255,7 +4446,9 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
        (pixel_shader != nullptr && stage_bindings_ready[1]
             ? pixel_shader->GetUsedTextureMaskAfterTranslation()
             : 0);
 -  texture_cache_->RequestTextures(used_texture_mask);
 +  {
-+    HxDiagTimeScope hx_scope(&hx_draw_tex_ns);
 +    texture_cache_->RequestTextures(used_texture_mask);
 +  }
  
    // Update the graphics pipeline, and if the new graphics pipeline has a
    // different layout, invalidate incompatible descriptor sets before updating
-@@ -4278,8 +4481,11 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
+@@ -4278,8 +4471,10 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
    // draw after the slot fills (or swaps placeholder to real) re-records.
    if (current_guest_graphics_pipeline_ != &pipeline->pipeline ||
        current_guest_graphics_pipeline_handle_ != current_pipeline) {
 -    deferred_command_buffer_.CmdVkBindPipelineDeferred(
 -        VK_PIPELINE_BIND_POINT_GRAPHICS, current_pipeline);
 +    {
-+      HxDiagTimeScope hx_scope(&hx_draw_pipe_ns);
 +      deferred_command_buffer_.CmdVkBindPipelineDeferred(
 +          VK_PIPELINE_BIND_POINT_GRAPHICS, current_pipeline);
 +    }
      current_guest_graphics_pipeline_ = &pipeline->pipeline;
      current_guest_graphics_pipeline_handle_ = current_pipeline;
      current_external_graphics_pipeline_ = VK_NULL_HANDLE;
-@@ -4405,10 +4611,13 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
+@@ -4405,10 +4600,12 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
  
    draw_util::GetHostViewportInfo(&gviargs, viewport_info);
    // Update dynamic graphics pipeline state.
@@ -2214,7 +2190,6 @@ index 7e92705ad..5e035af48 100644
 -                     draw_resolution_scale_y, apply_host_depth_polygon_offset,
 -                     pipeline->dynamic_state);
 +  {
-+    HxDiagTimeScope hx_scope(&hx_draw_dyn_ns);
 +    UpdateDynamicState(viewport_info, primitive_polygonal,
 +                       normalized_depth_control, draw_resolution_scale_x,
 +                       draw_resolution_scale_y, apply_host_depth_polygon_offset,
@@ -2223,7 +2198,7 @@ index 7e92705ad..5e035af48 100644
  
    auto vgt_draw_initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
  
-@@ -4629,10 +4838,13 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
+@@ -4629,10 +4826,12 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
    // when memexports should be awaited instead of inserting the barrier in Use
    // every time if memory export was done in the previous draw?
    if (memexport_extent_start < memexport_extent_end) {
@@ -2232,7 +2207,6 @@ index 7e92705ad..5e035af48 100644
 -        std::make_pair(memexport_extent_start,
 -                       memexport_extent_end - memexport_extent_start));
 +    {
-+      HxDiagTimeScope hx_scope(&hx_draw_use_ns);
 +      shared_memory_->Use(
 +          VulkanSharedMemory::Usage::kGuestDrawReadWrite,
 +          std::make_pair(memexport_extent_start,
@@ -2241,52 +2215,47 @@ index 7e92705ad..5e035af48 100644
    } else {
      // With in-pass resolves, fragment shaders may write shared memory inside
      // any guest pass - declare the write usage up front so no barrier is
-@@ -4858,6 +5070,8 @@ bool VulkanCommandProcessor::IssueCopy() {
+@@ -4858,6 +5057,7 @@ bool VulkanCommandProcessor::IssueCopy() {
  #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
    SCOPE_profile_cpu_f("gpu");
  #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
 +  HxTimeScope hx_cpu_scope(&hx_cpu_copy_ns);
-+  ++hx_cpu_copies;
  
    if (!BeginSubmission(true)) {
      return false;
-@@ -6365,6 +6579,11 @@ bool VulkanCommandProcessor::CanEndSubmissionImmediately() const {
+@@ -6365,6 +6565,9 @@ bool VulkanCommandProcessor::CanEndSubmissionImmediately() const {
  }
  
  bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
 +  if (is_swap) {
-+    ++hx_es_count_swap;
 +  } else {
-+    ++hx_es_count_frame;
 +  }
    ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
    const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
    const VkDevice device = vulkan_device->device();
-@@ -6426,7 +6645,10 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -6426,7 +6629,9 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
  
      EndRenderPass();
  
 -    render_target_cache_->EndSubmission();
 +    {
-+      HxDiagTimeScope hx_scope(&hx_es_rtcache_ns);
 +      render_target_cache_->EndSubmission();
 +    }
  
      primitive_processor_->EndSubmission();
  
-@@ -6556,7 +6778,10 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -6556,7 +6761,9 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &setup_barrier, 0, nullptr,
            0, nullptr);
      }
 -    deferred_command_buffer_.Execute(command_buffer.buffer);
 +    {
-+      HxDiagTimeScope hx_scope(&hx_es_replay_ns);
 +      deferred_command_buffer_.Execute(command_buffer.buffer);
 +    }
  
      // Record ZPD resolves before submitting.
      if (zpd_host_query_pool_) {
-@@ -6625,8 +6850,12 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -6625,8 +6832,11 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
      }
      submit_info.commandBufferCount = 1;
      submit_info.pCommandBuffers = &command_buffer.buffer;
@@ -2294,14 +2263,13 @@ index 7e92705ad..5e035af48 100644
 -        vulkan_device->queue_family_graphics_compute(), 0, 1, &submit_info);
 +    VkResult submit_result;
 +    {
-+      HxDiagTimeScope hx_scope(&hx_es_submit_ns);
 +      submit_result = completion_timeline_.AcquireFenceAndSubmit(
 +          vulkan_device->queue_family_graphics_compute(), 0, 1, &submit_info);
 +    }
      if (submit_result != VK_SUCCESS) {
        XELOGE(
            "VulkanCommandProcessor: Failed to submit a Vulkan command buffer - "
-@@ -6833,10 +7062,18 @@ void VulkanCommandProcessor::UpdateDynamicState(
+@@ -6833,10 +7043,18 @@ void VulkanCommandProcessor::UpdateDynamicState(
    // Viewport.
    VkViewport viewport;
    if (viewport_info.xy_extent[0] && viewport_info.xy_extent[1]) {
@@ -2324,7 +2292,7 @@ index 7e92705ad..5e035af48 100644
    } else {
      // Vulkan viewport width must be greater than 0.0f, but the Xenia  viewport
      // may be empty for various reasons - set the viewport to outside the
-@@ -6853,11 +7090,20 @@ void VulkanCommandProcessor::UpdateDynamicState(
+@@ -6853,11 +7071,20 @@ void VulkanCommandProcessor::UpdateDynamicState(
    // Scissor.
    draw_util::Scissor scissor;
    draw_util::GetScissor(regs, scissor);
@@ -2351,7 +2319,7 @@ index 7e92705ad..5e035af48 100644
    scissor_rect.offset.x = int32_t(scissor.offset[0]);
    scissor_rect.offset.y = int32_t(scissor.offset[1]);
 diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_pipeline_cache.cc b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_pipeline_cache.cc
-index 254549498..b6f2d7c65 100644
+index 254549498..0a280ca32 100644
 --- a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_pipeline_cache.cc
 +++ b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_pipeline_cache.cc
 @@ -8,6 +8,7 @@
@@ -2381,16 +2349,7 @@ index 254549498..b6f2d7c65 100644
      "Asynchronous shader compilation async model (A/B). Default false: the "
      "fork's deferred-bind model - no placeholder is created, the pipeline slot "
      "stays VK_NULL_HANDLE, the command processor records a deferred bind of the "
-@@ -996,6 +1005,8 @@ void VulkanPipelineCache::EndSubmission() {
-       }
-     }
-     if (await_creation_completion_event) {
-+      HxDiagTimeScope hx_scope(&hx_pipe_wait_ns);
-+      ++hx_pipe_waits;
-       creation_request_cond_.notify_one();
-       xe::threading::Wait(creation_completion_event_.get(), false);
-     }
-@@ -1061,11 +1072,14 @@ void VulkanPipelineCache::CreationThread() {
+@@ -1061,11 +1070,12 @@ void VulkanPipelineCache::CreationThread() {
      // On failure the slot stays VK_NULL_HANDLE permanently - the deferred
      // pipeline bind resolves to null at every replay and the draws using this
      // pipeline are dropped (crash-free degradation).
@@ -2400,8 +2359,6 @@ index 254549498..b6f2d7c65 100644
 -      XELOGE("Failed to translate shaders for pipeline creation");
 -    } else {
 +    {
-+      HxDiagTimeScope hx_scope(&hx_pipe_create_ns);
-+      ++hx_pipe_creates;
 +      if (!EnsureShadersTranslated(creation_arguments.vertex_shader,
 +                                   creation_arguments.pixel_shader,
 +                                   worker_translator.get())) {
@@ -2410,7 +2367,7 @@ index 254549498..b6f2d7c65 100644
        // Async pipelines are created with a minimal (no-texture) layout on the
        // draw thread since their shaders weren't translated there (interpreter
        // placeholder, or drop-until-ready with no placeholder). Now that they're
-@@ -1087,6 +1101,7 @@ void VulkanPipelineCache::CreationThread() {
+@@ -1087,6 +1097,7 @@ void VulkanPipelineCache::CreationThread() {
          XELOGE("Failed to create Vulkan pipeline");
        }
      }
@@ -2418,7 +2375,7 @@ index 254549498..b6f2d7c65 100644
  
      {
        std::unique_lock<std::mutex> lock(creation_request_lock_);
-@@ -1309,7 +1324,15 @@ void VulkanPipelineCache::TranslateShadersForStorage(
+@@ -1309,7 +1320,15 @@ void VulkanPipelineCache::TranslateShadersForStorage(
  
    std::vector<std::unique_ptr<xe::threading::Thread>> translation_threads;
    for (size_t i = 0; i < thread_count; ++i) {
@@ -2435,7 +2392,7 @@ index 254549498..b6f2d7c65 100644
      if (thread) {
        thread->set_name("Shader Translation");
        translation_threads.push_back(std::move(thread));
-@@ -2721,6 +2744,37 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
+@@ -2721,6 +2740,37 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
    pipeline_create_info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
    pipeline_create_info.pNext =
        use_dynamic_rendering ? &pipeline_rendering_create_info : nullptr;
@@ -2474,7 +2431,7 @@ index 254549498..b6f2d7c65 100644
    pipeline_create_info.stageCount = shader_stage_count;
    pipeline_create_info.pStages = shader_stages.data();
 diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_render_target_cache.cc b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_render_target_cache.cc
-index 88f2eb068..af4f28612 100644
+index 88f2eb068..62d6c16dd 100644
 --- a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_render_target_cache.cc
 +++ b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_render_target_cache.cc
 @@ -8,6 +8,7 @@
@@ -2485,7 +2442,18 @@ index 88f2eb068..af4f28612 100644
  
  #include <algorithm>
  #include <set>
-@@ -698,6 +699,27 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
+@@ -86,6 +87,10 @@ DEFINE_bool(
+     "under dynamic rendering, so toggling them cannot force a render pass "
+     "break. Disable for A/B measurement of the break count.",
+     "Vulkan");
++// NOTE (HX360E, measured 2026-09-13): leaving this enabled made the app crash
++// on this device - the driver does not support
++// VK_KHR_dynamic_rendering_local_read (enabling it produced no "local-read ...
++// on" log and the game page died immediately). Keep upstream's default of false.
+ DEFINE_bool(
+     vulkan_in_pass_resolve, false,
+     "Prepare color attachments for in-pass EDRAM resolves with "
+@@ -698,6 +703,27 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
      msaa_2x_no_attachments_supported_ = false;
    }
  
@@ -2513,7 +2481,7 @@ index 88f2eb068..af4f28612 100644
    // Descriptor set layouts.
    VkDescriptorSetLayoutBinding descriptor_set_layout_bindings[2];
    descriptor_set_layout_bindings[0].binding = 0;
-@@ -1950,7 +1972,7 @@ bool VulkanRenderTargetCache::TryInPassResolveCopy(
+@@ -1950,7 +1976,7 @@ bool VulkanRenderTargetCache::TryInPassResolveCopy(
      }
      if (!seen && inpass_combo_count_ < 16) {
        inpass_combos_[inpass_combo_count_++] = combo;
@@ -2522,46 +2490,7 @@ index 88f2eb068..af4f28612 100644
            "VkInPassCombo: src_fmt={} dest_fmt={} exp_bias={} swap={} "
            "src64={} rect={}x{} msaa={} sel={}",
            uint32_t(resolve_color_format),
-@@ -2333,8 +2355,10 @@ bool VulkanRenderTargetCache::TryDirectHostResolveCopy(
-     uint32_t dump_row_length_used, uint32_t dump_rows, uint32_t dump_pitch,
-     VulkanSharedMemory& shared_memory, VulkanTextureCache& texture_cache,
-     uint32_t& written_address_out, uint32_t& written_length_out) {
-+  ++hx_rr_enter;
-   if (GetPath() != Path::kHostRenderTargets ||
-       !direct_host_resolve_constants_pool_) {
-+    ++hx_rr_path;
-     return false;
-   }
- 
-@@ -2351,6 +2375,7 @@ bool VulkanRenderTargetCache::TryDirectHostResolveCopy(
-     if (!xenos::IsSingleCopySampleSelected(
-             resolve_info.copy_dest_coordinate_info.copy_sample_select) ||
-         !copy_shader_is_fast) {
-+      ++hx_rr_depth;
-       return false;
-     }
-     resolve_depth_format =
-@@ -2361,6 +2386,7 @@ bool VulkanRenderTargetCache::TryDirectHostResolveCopy(
-     if (resolve_color_format ==
-         xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA) {
-       // TODO (xenios-jp): Add the missing gamma render target format.
-+      ++hx_rr_gamma;
-       return false;
-     }
-     if (copy_shader_is_fast) {
-@@ -2371,9 +2397,11 @@ bool VulkanRenderTargetCache::TryDirectHostResolveCopy(
-               resolve_color_format,
-               xenos::ColorFormat(
-                   resolve_info.copy_dest_info.copy_dest_format))) {
-+        ++hx_rr_fast_cond;
-         return false;
-       }
-     } else if (!copy_shader_is_full_color) {
-+      ++hx_rr_nofull;
-       return false;
-     }
-   }
-@@ -2491,7 +2519,8 @@ bool VulkanRenderTargetCache::TryDirectHostResolveCopy(
+@@ -2491,7 +2517,8 @@ bool VulkanRenderTargetCache::TryDirectHostResolveCopy(
        return false;
      }
      const uint32_t tile_size_x =
@@ -2571,7 +2500,7 @@ index 88f2eb068..af4f28612 100644
      const uint32_t tile_pixel_size_x =
          tile_size_x >>
          uint32_t(source.key.msaa_samples >= xenos::MsaaSamples::k4X);
-@@ -2645,9 +2674,16 @@ bool VulkanRenderTargetCache::TryDirectHostResolveCopy(
+@@ -2645,9 +2672,16 @@ bool VulkanRenderTargetCache::TryDirectHostResolveCopy(
        1, size_t(vulkan_device->properties().minUniformBufferOffsetAlignment));
    const uint32_t scale_x = draw_resolution_scale_x();
    const uint32_t scale_y = draw_resolution_scale_y();
@@ -2589,7 +2518,7 @@ index 88f2eb068..af4f28612 100644
    const uint32_t msaa_2x_sample_0 =
        draw_util::GetD3D10SampleIndexForGuest2xMSAA(
            0, msaa_2x_attachments_supported_);
-@@ -2667,8 +2703,9 @@ bool VulkanRenderTargetCache::TryDirectHostResolveCopy(
+@@ -2667,8 +2701,9 @@ bool VulkanRenderTargetCache::TryDirectHostResolveCopy(
        constants.dump_pitch_tiles = dump_pitch;
        constants.source_base_tiles = source.key.base_tiles;
        constants.source_pitch_tiles = source.key.GetPitchTiles();
@@ -2601,7 +2530,7 @@ index 88f2eb068..af4f28612 100644
        const uint32_t tile_pixel_size_x =
            tile_size_x >>
            uint32_t(source.key.msaa_samples >= xenos::MsaaSamples::k4X);
-@@ -2834,7 +2871,7 @@ bool VulkanRenderTargetCache::Resolve(
+@@ -2834,7 +2869,7 @@ bool VulkanRenderTargetCache::Resolve(
          ++inpass_attempts_;
          inpass_taken_ += uint32_t(copied);
          if ((inpass_attempts_ % 512) == 0) {
@@ -2610,7 +2539,7 @@ index 88f2eb068..af4f28612 100644
                "VkInPass: {}/{} in-pass | stores {} refused {} "
                "(pitch {} format {} bounds {})",
                inpass_taken_, inpass_attempts_, inpass_stores_,
-@@ -3319,7 +3356,7 @@ void VulkanRenderTargetCache::LogResolveDetailsOnFrameEnd() {
+@@ -3319,7 +3354,7 @@ void VulkanRenderTargetCache::LogResolveDetailsOnFrameEnd() {
      return;
    }
    const double f = double(std::max(s.frames, 1u));
@@ -2619,7 +2548,7 @@ index 88f2eb068..af4f28612 100644
        "ResolveDetails: {} frames | per frame: copies={:.1f} "
        "clears-only={:.1f} MB={:.2f} | dests per frame: distinct={:.1f} "
        "in-frame-repeats={:.1f} recurring-vs-prev-frame={:.1f}",
-@@ -3339,7 +3376,7 @@ void VulkanRenderTargetCache::LogResolveDetailsOnFrameEnd() {
+@@ -3339,7 +3374,7 @@ void VulkanRenderTargetCache::LogResolveDetailsOnFrameEnd() {
      const uint32_t dest_format = uint32_t((b.key >> 10) & 0b111111);
      const uint32_t width = uint32_t((b.key >> 16) & 0b11111111111) * 8;
      const uint32_t height = uint32_t((b.key >> 27) & 0b11111111111) * 8;
@@ -2628,7 +2557,7 @@ index 88f2eb068..af4f28612 100644
          "ResolveDetails:   {:>5.2f}/fr {:>4}x{:<4} {} {}xAA src={} dst={} {} "
          "{:.2f} MB/fr",
          b.count / f, width, height, is_depth ? "depth" : "color",
-@@ -4242,10 +4279,11 @@ RenderTargetCache::RenderTarget* VulkanRenderTargetCache::CreateRenderTarget(
+@@ -4242,10 +4277,11 @@ RenderTargetCache::RenderTarget* VulkanRenderTargetCache::CreateRenderTarget(
    image_create_info.pNext = nullptr;
    image_create_info.flags = 0;
    image_create_info.imageType = VK_IMAGE_TYPE_2D;
@@ -2644,7 +2573,7 @@ index 88f2eb068..af4f28612 100644
    image_create_info.extent.depth = 1;
    image_create_info.mipLevels = 1;
    image_create_info.arrayLayers = 1;
-@@ -4692,15 +4730,22 @@ VulkanRenderTargetCache::GetHostRenderTargetsFramebuffer(
+@@ -4692,15 +4728,22 @@ VulkanRenderTargetCache::GetHostRenderTargetsFramebuffer(
    uint32_t framebuffer_scale_x = draw_resolution_scale_x();
    uint32_t framebuffer_scale_y = draw_resolution_scale_y();
    if (pitch_tiles_at_32bpp) {
@@ -2676,7 +2605,7 @@ index 88f2eb068..af4f28612 100644
    } else {
      assert_zero(render_pass_key.depth_and_color_used);
      // Still needed for occlusion queries.
-@@ -8803,6 +8848,27 @@ VkPipeline VulkanRenderTargetCache::GetDumpPipeline(DumpPipelineKey key) {
+@@ -8803,6 +8846,27 @@ VkPipeline VulkanRenderTargetCache::GetDumpPipeline(DumpPipelineKey key) {
          spv::OpUDiv, type_uint, source_pixel_y,
          builder.makeUintConstant(draw_resolution_scale_y()));
    }
@@ -2705,7 +2634,7 @@ index 88f2eb068..af4f28612 100644
    // Load the source, and pack the value into one or two 32-bit integers.
    spv::Id packed[2] = {};
 diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_texture_cache.cc b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_texture_cache.cc
-index 370f47acd..76698fef2 100644
+index 370f47acd..e1839e68c 100644
 --- a/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_texture_cache.cc
 +++ b/emulator-core/src/main/cpp/xenia/src/xenia/gpu/vulkan/vulkan_texture_cache.cc
 @@ -8,6 +8,7 @@
@@ -2716,17 +2645,16 @@ index 370f47acd..76698fef2 100644
  
  #include <algorithm>
  #include <array>
-@@ -3946,7 +3947,9 @@ std::array<size_t, 2> VulkanTextureCache::GetPossibleScaledResolveBufferIndices(
+@@ -662,7 +663,7 @@ VkImageLayout VulkanTextureCache::GetActiveBindingImageLayout(
+           ? binding->texture_signed
+           : binding->texture;
+   return texture && static_cast<const VulkanTexture*>(texture)->usage() ==
+-                        VulkanTexture::Usage::kResolveDestStorage
++                 VulkanTexture::Usage::kResolveDestStorage
+              ? VK_IMAGE_LAYOUT_GENERAL
+              : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
  }
- 
- bool VulkanTextureCache::InitializeSparseScaledResolve() {
-+  ++hx_sparse_init_calls;
-   if (!IsDrawResolutionScaled()) {
-+    ++hx_sparse_skipped;
-     return true;
-   }
- 
-@@ -3972,6 +3975,8 @@ bool VulkanTextureCache::InitializeSparseScaledResolve() {
+@@ -3972,6 +3973,8 @@ bool VulkanTextureCache::InitializeSparseScaledResolve() {
    VkDevice device = vulkan_device->device();
  
    size_t buffer_count = GetScaledResolveSparseBufferCount();
@@ -2735,14 +2663,6 @@ index 370f47acd..76698fef2 100644
    XELOGI(
        "VulkanTextureCache: Creating {} sparse scaled resolve buffers (2GB "
        "each)",
-@@ -4038,6 +4043,7 @@ bool VulkanTextureCache::InitializeSparseScaledResolve() {
- }
- 
- void VulkanTextureCache::ShutdownSparseScaledResolve() {
-+  ++hx_sparse_shutdown_calls;
-   const ui::vulkan::VulkanDevice* vulkan_device =
-       command_processor_.GetVulkanDevice();
-   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
 diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/kernel/kernel_state.cc b/emulator-core/src/main/cpp/xenia/src/xenia/kernel/kernel_state.cc
 index 032d6559d..519a6bd5b 100644
 --- a/emulator-core/src/main/cpp/xenia/src/xenia/kernel/kernel_state.cc
@@ -3707,7 +3627,7 @@ index fb6d09930..50e8bfe3c 100644
      bool ext_EXT_shader_stencil_export = false;         // #141
      bool ext_1_1_KHR_get_memory_requirements2 = false;  // #147
 diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_gpu_completion_timeline.cc b/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_gpu_completion_timeline.cc
-index f488d0a11..d89de4aca 100644
+index f488d0a11..1f1076ccd 100644
 --- a/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_gpu_completion_timeline.cc
 +++ b/emulator-core/src/main/cpp/xenia/src/xenia/ui/vulkan/vulkan_gpu_completion_timeline.cc
 @@ -14,11 +14,20 @@
@@ -3731,16 +3651,7 @@ index f488d0a11..d89de4aca 100644
  VulkanGPUCompletionTimeline::~VulkanGPUCompletionTimeline() {
  #ifndef NDEBUG
    assert_zero(fences_acquired_);
-@@ -68,6 +77,8 @@ VulkanGPUCompletionTimeline::AcquireFenceForSubmission(
-   constexpr size_t kMaxPendingBeforeReclaimPoll = 8;
-   if (free_fences_.empty() &&
-       pending_submission_fences_.size() >= kMaxPendingBeforeReclaimPoll) {
-+    HxDiagTimeScope hx_scope(&hx_sub_poll_ns);
-+    ++hx_sub_polls;
-     UpdateCompletedSubmission();
-   }
- 
-@@ -116,19 +127,33 @@ VkResult VulkanGPUCompletionTimeline::AcquireFenceAndSubmit(
+@@ -116,19 +125,33 @@ VkResult VulkanGPUCompletionTimeline::AcquireFenceAndSubmit(
      const uint32_t queue_family_index, const uint32_t queue_index,
      const uint32_t submit_count, const VkSubmitInfo* const submits) {
    VkResult fence_acquire_result;
