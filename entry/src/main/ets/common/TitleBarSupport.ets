@@ -1,6 +1,9 @@
 import { LengthMetrics } from '@kit.ArkUI';
 import {
   TitleBarStyleOptions,
+  HdsNavigationIconItemStyle,
+  HdsNavigationTitleBarStyle,
+  HdsTitleBarContentStyle,
   hdsMaterial,
   BlurStrategy,
   ScrollEffectType,
@@ -40,19 +43,30 @@ export class TitleBarSupport {
     return TitleBarSupport.level;
   }
 
-  /** 标题栏样式：材质 + 滚动时的渐次磨砂（IMMERSIVE_GRADIENT_BLUR）。 */
+  /**
+   * 标题栏样式：材质 + 滚动时的渐次磨砂（IMMERSIVE_GRADIENT_BLUR）。
+   *
+   * 注意：`contentStyle.titleStyle` 只管**标题文字**，返回箭头是
+   * `backIconStyle`、右侧图标菜单是 `menuStyle`——只设标题色的话，返回箭头
+   * 会一直用系统默认色（浅色模式下偏白，在浅底上看不清）。
+   */
   static style(titleColor: ResourceColor): TitleBarStyleOptions {
+    // 返回箭头 / 菜单图标 / 标题统一同一套色，浅色深色都跟随主题。
+    const iconStyle: HdsNavigationIconItemStyle = {
+      iconColor: titleColor,
+      textColor: titleColor,
+    };
+    const contentStyle: HdsTitleBarContentStyle = {
+      titleStyle: { mainTitleColor: titleColor },
+      backIconStyle: iconStyle,
+      menuStyle: iconStyle,
+    };
+    // originalStyle / scrollEffectStyle 的类型是 HdsNavigationTitleBarStyle
+    // （里面才装 HdsTitleBarContentStyle），别把两者搞混。
+    const barStyle: HdsNavigationTitleBarStyle = { contentStyle: contentStyle };
     const style: TitleBarStyleOptions = {
-      originalStyle: {
-        contentStyle: {
-          titleStyle: { mainTitleColor: titleColor },
-        },
-      },
-      scrollEffectStyle: {
-        contentStyle: {
-          titleStyle: { mainTitleColor: titleColor },
-        },
-      },
+      originalStyle: barStyle,
+      scrollEffectStyle: barStyle,
       systemMaterialEffect: {
         materialType: hdsMaterial.MaterialType.IMMERSIVE,
         materialLevel: TitleBarSupport.materialLevel(),
