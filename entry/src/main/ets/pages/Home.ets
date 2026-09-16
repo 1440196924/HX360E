@@ -695,20 +695,7 @@ struct Home {
         .height(40)
         .padding(0)
         .backgroundColor($r('app.color.card_bg'))
-        .bindMenu([
-          {
-            value: '从文件夹安装',
-            action: () => {
-              this.importGame();
-            },
-          },
-          {
-            value: '从压缩包安装（zip）',
-            action: () => {
-              this.importArchive();
-            },
-          },
-        ])
+        .onClick(() => this.importGame())
       }
       .width('100%')
       .padding({
