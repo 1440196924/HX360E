@@ -130,7 +130,7 @@ struct GamePage {
   aboutToAppear(): void {
     // 游戏是 16:9 横屏：进入本页请求横屏，离开时由 aboutToDisappear 切回竖屏。
     try {
-      const ctx = getContext(this) as common.Context;
+      const ctx = getContext(this) as common.UIAbilityContext;
       Orientation.landscape(ctx);
     } catch (e) {
       hilog.error(DOMAIN, TAG, 'landscape failed: %{public}s', JSON.stringify(e));
@@ -253,7 +253,7 @@ struct GamePage {
       }, 400);
     }
     try {
-      const ctx = getContext(this) as common.Context;
+      const ctx = getContext(this) as common.UIAbilityContext;
       Orientation.portrait(ctx);
     } catch (e) {
       // 忽略
