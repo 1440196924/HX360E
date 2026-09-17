@@ -15,12 +15,25 @@ const TAG = 'HX360E';
  * 拿不到再退回 getLastWindow。
  */
 export class Orientation {
+  private static nameOf(o: window.Orientation): string {
+    if (o === window.Orientation.PORTRAIT) {
+      return 'portrait';
+    }
+    if (o === window.Orientation.LANDSCAPE) {
+      return 'landscape';
+    }
+    if (o === window.Orientation.AUTO_ROTATION_LANDSCAPE) {
+      return 'auto_rotation_landscape';
+    }
+    return `orientation(${o})`;
+  }
+
   static apply(ctx: common.UIAbilityContext, orientation: window.Orientation): void {
     try {
       const win: window.Window = ctx.windowStage.getMainWindowSync();
       win.setPreferredOrientation(orientation);
       hilog.info(DOMAIN, TAG, 'orientation set to %{public}s',
-        orientation === window.Orientation.PORTRAIT ? 'portrait' : 'landscape');
+        Orientation.nameOf(orientation));
     } catch (e) {
       hilog.error(DOMAIN, TAG, 'getMainWindowSync failed, fallback: %{public}s',
         JSON.stringify(e));
@@ -43,5 +56,13 @@ export class Orientation {
 
   static landscape(ctx: common.UIAbilityContext): void {
     Orientation.apply(ctx, window.Orientation.LANDSCAPE);
+  }
+
+  /**
+   * 横屏自动翻转：只在 LANDSCAPE(90°) 与 LANDSCAPE_INVERTED(270°) 之间跟随
+   * 重力切换，不会转成竖屏。游戏页用这个——把手机转 180° 画面跟着正过来。
+   */
+  static autoLandscape(ctx: common.UIAbilityContext): void {
+    Orientation.apply(ctx, window.Orientation.AUTO_ROTATION_LANDSCAPE);
   }
 }

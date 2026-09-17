@@ -71,18 +71,6 @@
           ],
           "when": "inuse"
         }
-      },
-      {
-        // 重力感应控制（把设备倾斜映射到左摇杆）。normal 级 + system_grant，
-        // 安装时自动授予。
-        "name": "ohos.permission.ACCELEROMETER",
-        "reason": "$string:reason_accelerometer",
-        "usedScene": {
-          "abilities": [
-            "EntryAbility"
-          ],
-          "when": "inuse"
-        }
       }
       // ----------------------------------------------------------------------
       // 以下 3 个是候选权限，实测 AGC 签名工具报"权限名不对"（这些权限只出现在
@@ -105,7 +93,7 @@
         "startWindowBackground": "$color:start_window_background",
         "exported": true,
         // 主页/设置页竖屏；游戏页由 GamePage 在运行时请求横屏。
-        "orientation": "portrait",
+        "orientation": "auto_rotation",
         "skills": [
           {
             "entities": [

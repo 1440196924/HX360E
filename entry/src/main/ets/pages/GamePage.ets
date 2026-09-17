@@ -7,7 +7,6 @@ import { common } from '@kit.AbilityKit';
 import testNapi from 'libentry.so';
 import { XPadKey } from '../common/PadKey';
 import { inputDevice } from '@kit.InputKit';
-import { sensor } from '@kit.SensorServiceKit';
 import { Orientation } from '../common/Orientation';
 import { VirtualStick, VirtualDpad, PadButton } from '../common/VirtualStick';
 import { SettingsStore } from '../common/SettingsStore';
@@ -48,8 +47,6 @@ struct GamePage {
   @State showPad: boolean = true;
   // 调试浮层（设置 → 高级选项 → 显示调试浮层）：FPS / 帧时间，可拖动。
   @State showDebug: boolean = false;
-  /** 重力感应控制：把设备倾斜映射到左摇杆（默认关，用虚拟手柄上的按钮切换）。 */
-  @State gravityOn: boolean = false;
   @State dbgFps: string = 'FPS --';
   @State dbgX: number = 12;
   @State dbgY: number = 12;
@@ -134,7 +131,8 @@ struct GamePage {
     // 游戏是 16:9 横屏：进入本页请求横屏，离开时由 aboutToDisappear 切回竖屏。
     try {
       const ctx = getContext(this) as common.UIAbilityContext;
-      Orientation.landscape(ctx);
+      // 横屏自动翻转：手机转 180° 画面跟着正过来（不会变竖屏）。
+      Orientation.autoLandscape(ctx);
     } catch (e) {
       hilog.error(DOMAIN, TAG, 'landscape failed: %{public}s', JSON.stringify(e));
     }
@@ -240,10 +238,6 @@ struct GamePage {
       inputDevice.off('change', this.deviceWatcher);
     } catch (e) {
       // 忽略
-    }
-    // 离开游戏页必须退订重力传感器，否则后台还在跑回调。
-    if (this.gravityOn) {
-      this.setGravity(false);
     }
     // 返回退出：等页面（含 XComponent surface）真正销毁后再停模拟器，
     // 避免在 surface 仍被使用时拆 Vulkan/window（实测会闪退）。
@@ -449,74 +443,6 @@ struct GamePage {
     this.padPress(XPadKey.DpadRight, right);
   }
 
-  // ---- 重力感应 ----
-
-  /** 重力传感器回调：设备姿态 → 左摇杆。 */
-  private gravityCallback = (data: sensor.GravityResponse): void => {
-    this.applyTilt(data.x, data.y);
-  };
-
-  /** 开关重力感应（开=订阅传感器，关=退订并把摇杆归中）。 */
-  private setGravity(on: boolean): void {
-    if (on === this.gravityOn) {
-      return;
-    }
-    this.gravityOn = on;
-    try {
-      if (on) {
-        // 20ms 上报（50Hz）：足够跟手，又比默认 200ms 省电。
-        sensor.on(sensor.SensorId.GRAVITY, this.gravityCallback,
-          { interval: 20000000 });
-        hilog.info(DOMAIN, TAG, 'gravity control on');
-      } else {
-        sensor.off(sensor.SensorId.GRAVITY, this.gravityCallback);
-        // 归中，避免关掉后摇杆还卡在某个方向。
-        this.stickToKeys(true, 0, 0);
-        hilog.info(DOMAIN, TAG, 'gravity control off');
-      }
-    } catch (e) {
-      this.gravityOn = false;
-      hilog.error(DOMAIN, TAG, 'setGravity failed: %{public}s',
-        JSON.stringify(e));
-    }
-  }
-
-  /**
-   * 设备倾斜 → 左摇杆归一化值。
-   *
-   * 重力传感器是**设备自然方向（竖屏）坐标**：+x 右、+y 上、+z 朝屏幕外。
-   * 游戏页是横屏，屏幕坐标轴相对设备转了 90°/270°，所以要按 display.rotation
-   * 把轴换过来。死区 6°、打满 30°，避免持机手抖就动。
-   */
-  private applyTilt(gx: number, gy: number): void {
-    let rot: number = 0;
-    try {
-      rot = display.getDefaultDisplaySync().rotation;
-    } catch (e) {
-      rot = 0;
-    }
-    let sx: number = gx;
-    let sy: number = gy;
-    if (rot === 1 || rot === 3) {
-      // 横屏：屏幕右 ← 设备 ±y，屏幕上 ← 设备 ∓x
-      sx = gy;
-      sy = -gx;
-    }
-    this.stickToKeys(true, GamePage.tiltToAxis(sx), GamePage.tiltToAxis(sy));
-  }
-
-  private static tiltToAxis(v: number): number {
-    const g: number = 9.80665;
-    const dead: number = g * 0.1045;   // sin 6°
-    const full: number = g * 0.5;      // sin 30°
-    const a: number = Math.abs(v);
-    if (a <= dead) {
-      return 0;
-    }
-    const t: number = Math.min(1, (a - dead) / (full - dead));
-    return v < 0 ? -t : t;
-  }
-
   /**
    * 物理手柄按键 → 360 手柄按键。
    * USB 有线手柄在鸿蒙上**不经过 GameControllerKit**（实测监视器注册成功
@@ -681,21 +607,6 @@ struct GamePage {
             this.rectBtn('LB', XPadKey.LShoulder, 92, 38)
           }
           .alignItems(HorizontalAlign.Start)
-
-          Blank()
-
-          // 重力感应开关：倾斜手机 = 左摇杆（赛车/飞行游戏用）。
-          Button(this.gravityOn ? '重力 开' : '重力 关')
-            .fontSize(11)
-            .height(30)
-            .padding({ left: 14, right: 14 })
-            .fontColor('#FFFFFF')
-            .backgroundColor(this.gravityOn ? '#2E7D32' : '#59000000')
-            .border({ width: 1, color: '#40FFFFFF' })
-            .borderRadius(15)
-            .onClick(() => {
-              this.setGravity(!this.gravityOn);
-            })
 
           Blank()
 
