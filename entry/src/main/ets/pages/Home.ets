@@ -702,6 +702,20 @@ struct Home {
     this.statusText = await LogExport.exportLogs(ctx, ctx.filesDir);
   }
 
+  /** 首页按返回 = 退到后台（不退出进程，也不 pop 出栈底的空白根内容）。 */
+  private moveToBackground(): void {
+    try {
+      const ctx = getContext(this) as common.UIAbilityContext;
+      ctx.moveAbilityToBackground().catch((err: Error) => {
+        hilog.error(DOMAIN, TAG, 'moveAbilityToBackground failed: %{public}s',
+          err.message);
+      });
+    } catch (e) {
+      hilog.error(DOMAIN, TAG, 'moveToBackground failed: %{public}s',
+        JSON.stringify(e));
+    }
+  }
+
   private go(name: string): void {
     try {
       const info: NavPathInfo = { name: name };
@@ -771,6 +785,12 @@ struct Home {
     .hideBackButton(true)
     .titleMode(HdsNavDestinationTitleMode.MINI)
     .bindToScrollable([this.homeScroller])
+    // 栈底页面：消费返回键，否则会 pop 掉外壳、露出 Navigation 的空根内容
+    // （表现就是"按返回进了一个空白页"）。这里改为退到后台，符合首页的预期。
+    .onBackPressed((): boolean => {
+      this.moveToBackground();
+      return true;
+    })
     .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM],
       [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
     .width('100%')
