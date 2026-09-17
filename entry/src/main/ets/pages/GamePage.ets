@@ -47,6 +47,10 @@ struct GamePage {
   @State showPad: boolean = true;
   // 调试浮层（设置 → 高级选项 → 显示调试浮层）：FPS / 帧时间，可拖动。
   @State showDebug: boolean = false;
+  /** 返回键弹出的游戏菜单（屏幕手柄开关 + 退出游戏）。 */
+  @State exitDialogVisible: boolean = false;
+  /** 菜单里屏幕手柄开关的即时状态（点开时从 showPad 同步）。 */
+  @State padSwitchOn: boolean = true;
   @State dbgFps: string = 'FPS --';
   @State dbgX: number = 12;
   @State dbgY: number = 12;
@@ -222,15 +226,29 @@ struct GamePage {
   }
 
   /**
-   * 从游戏界面返回 = 退出游戏。
+   * 返回键 → 先弹游戏菜单（屏幕手柄开关 + 退出游戏），不直接离开。
    *
-   * 注意顺序：不能在 onBackPress 里直接 quit —— 那时页面与 XComponent(surface)
-   * 都还活着，原生侧拆 Vulkan/window 会用到正在被销毁的 surface，实测直接闪退。
-   * 正确做法是先让系统完成返回（页面销毁、surface detach），再延迟停模拟器。
+   * 退出流程的顺序仍是「先离开页面，再停模拟器」：不能在 onBackPress 里直接
+   * quit —— 那时页面与 XComponent(surface) 都还活着，原生侧拆 Vulkan/window
+   * 会用到正在被销毁的 surface，实测直接闪退。所以这里只置 quitAfterLeave，
+   * 真正 quit 放在 aboutToDisappear（页面销毁后延迟一点）。
    */
   onBackPress(): boolean {
+    this.padSwitchOn = this.showPad;
+    this.exitDialogVisible = true;
+    return true;   // 消费返回键：先把菜单弹出来
+  }
+
+  /** 退出游戏：标记离开后再回上一页，停模拟器交给 aboutToDisappear。 */
+  private exitGame(): void {
+    this.exitDialogVisible = false;
     this.quitAfterLeave = true;
-    return false;  // 交给系统返回
+    try {
+      router.back();
+    } catch (e) {
+      hilog.error(DOMAIN, TAG, 'exitGame back failed: %{public}s',
+        JSON.stringify(e));
+    }
   }
 
   aboutToDisappear(): void {
@@ -568,6 +586,77 @@ struct GamePage {
     .width(124)
   }
 
+  /**
+   * 返回键弹出的游戏菜单：屏幕手柄开关 + 退出游戏。
+   *
+   * 面板用固定的深色（游戏画面之上，不跟随系统深浅色）。
+   */
+  @Builder
+  exitDialog() {
+    Column() {
+      Column({ space: 18 }) {
+        Text('游戏菜单')
+          .fontSize(17)
+          .fontWeight(FontWeight.Medium)
+          .fontColor('#FFFFFF')
+          .width('100%')
+
+        Row() {
+          Text('屏幕手柄')
+            .fontSize(15)
+            .fontColor('#FFFFFF')
+          Blank()
+          Toggle({ type: ToggleType.Switch, isOn: this.padSwitchOn })
+            .selectedColor('#2E7D32')
+            .onChange((on: boolean) => {
+              this.padSwitchOn = on;
+              this.showPad = on;
+              try {
+                testNapi.emulator.setShowTouchOverlay(on);
+              } catch (e) {
+                hilog.error(DOMAIN, TAG, 'setShowTouchOverlay failed: %{public}s',
+                  JSON.stringify(e));
+              }
+            })
+        }
+        .width('100%')
+
+        Row({ space: 12 }) {
+          Button('继续游戏')
+            .fontSize(15)
+            .height(40)
+            .layoutWeight(1)
+            .fontColor('#FFFFFF')
+            .backgroundColor('#33FFFFFF')
+            .onClick(() => {
+              this.exitDialogVisible = false;
+            })
+          Button('退出游戏')
+            .fontSize(15)
+            .height(40)
+            .layoutWeight(1)
+            .fontColor('#FFFFFF')
+            .backgroundColor('#C24242')
+            .onClick(() => {
+              this.exitGame();
+            })
+        }
+        .width('100%')
+      }
+      .width('80%')
+      .padding(18)
+      .backgroundColor('#ee202020')
+      .borderRadius(14)
+    }
+    .width('100%')
+    .height('100%')
+    .justifyContent(FlexAlign.Center)
+    .backgroundColor('#66000000')
+    // 吃掉点击，避免穿透到下面的游戏画面/虚拟手柄。
+    .onClick(() => {
+    })
+  }
+
   build() {
     Stack({ alignContent: Alignment.Center }) {
       XComponent({
@@ -785,6 +874,11 @@ struct GamePage {
         .height('100%')
         .justifyContent(FlexAlign.Center)
         .backgroundColor('#66000000')
+      }
+
+      // 返回键弹出的游戏菜单。
+      if (this.exitDialogVisible) {
+        this.exitDialog()
       }
     }
     .width('100%')
