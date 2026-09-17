@@ -239,6 +239,16 @@ struct GamePage {
     return true;   // 消费返回键：先把菜单弹出来
   }
 
+  /** 游戏菜单里「调试信息」开关：控制 FPS/帧耗时浮层。 */
+  private toggleDebugOverlay(on: boolean): void {
+    this.showDebug = on;
+    if (on) {
+      // 立刻刷一次，避免开关打开后要等一个上报周期才有数字。
+      this.refreshDebugText();
+    }
+    hilog.info(DOMAIN, TAG, 'debug overlay %{public}s', on ? 'on' : 'off');
+  }
+
   /** 退出游戏：标记离开后再回上一页，停模拟器交给 aboutToDisappear。 */
   private exitGame(): void {
     this.exitDialogVisible = false;
@@ -617,6 +627,21 @@ struct GamePage {
                 hilog.error(DOMAIN, TAG, 'setShowTouchOverlay failed: %{public}s',
                   JSON.stringify(e));
               }
+            })
+        }
+        .width('100%')
+
+        Divider().color('#33FFFFFF')
+
+        Row() {
+          Text('调试信息')
+            .fontSize(15)
+            .fontColor('#FFFFFF')
+          Blank()
+          Toggle({ type: ToggleType.Switch, isOn: this.showDebug })
+            .selectedColor('#2E7D32')
+            .onChange((on: boolean) => {
+              this.toggleDebugOverlay(on);
             })
         }
         .width('100%')
