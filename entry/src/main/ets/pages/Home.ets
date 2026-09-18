@@ -294,6 +294,10 @@ struct Home {
   @State installStats: string = '';
   // 压缩包加密时的密码浮层。
   @State passwordVisible: boolean = false;
+  /** 本机是否拿不到可执行内存（JIT 不可用）；为 true 时弹提示，游戏必然跑不起来。 */
+  @State jitBroken: boolean = false;
+  /** 提示里显示的本机信息（便于用户反馈时一眼看清机型/系统）。 */
+  @State jitDetail: string = '';
   /** 系统 API 等级；「选文件夹」需要 26+，低版本只能走压缩包。 */
   private apiLevel: number = 0;
   /** 当前打开的导入菜单（closeMenu 需要同一个 ComponentContent 句柄）。 */
@@ -329,6 +333,7 @@ struct Home {
     this.reloadGames();
     this.probeXEngine();
     this.pickMaterialLevel();
+    this.checkJitAvailable();
     // 外壳（HDS 标题栏 + 底部悬浮页签）作为栈底 NavDestination 推入，
     // 这样标题栏才能吃到系统「沉浸光感」材质（与官方范式一致）。
     if (!this.shellPushed) {
@@ -846,6 +851,107 @@ struct Home {
     AppLog.i('log', `export logs: ${this.statusText}`);
   }
 
+  /**
+   * 启动自检：本机能不能申请「可执行私有内存」（XPM）。
+   *
+   * 模拟器的 JIT 必须把生成的代码页升级成可执行，而部分设备的系统内核直接
+   * 拒绝（mprotect(RW→RX) 返回 EINVAL/EACCES）。这种情况下游戏必定黑屏或崩溃，
+   * 且**跟安装/游戏包无关**，所以启动就查一次、明确告诉用户，别再让人对着
+   * 黑屏猜（我们自己在排查时就吃过这个亏：换台设备才发现是平台限制）。
+   *
+   * 判据：jitProbe().firstWorking < 0 表示所有 JIT 策略都失败。
+   */
+  private checkJitAvailable(): void {
+    let broken: boolean = false;
+    let name: string = '';
+    try {
+      const r = testNapi.jitProbe();
+      broken = r.firstWorking < 0;
+      name = r.firstWorkingName;
+    } catch (e) {
+      AppLog.exception('jit', 'jitProbe failed', e);
+      return;
+    }
+    let model: string = '?';
+    let display: string = '?';
+    try {
+      model = deviceInfo.productModel;
+      display = deviceInfo.displayVersion;
+    } catch (e) {
+      // 取不到就留默认值
+    }
+    this.jitDetail = `设备 ${model} · 系统 ${display}`;
+    AppLog.i('jit',
+      `jit available=${!broken} firstWorking=${name} ${this.jitDetail}`);
+    this.jitBroken = broken;
+  }
+
+  /**
+   * 本机不支持 JIT 时的提示。
+   *
+   * 只提示、不拦操作：导入游戏本身不需要 JIT（装包照常可用），用户也可能
+   * 就是想先存着游戏等换设备。
+   */
+  @Builder
+  jitWarningOverlay() {
+    Column() {
+      Column({ space: 10 }) {
+        Text('本机暂时无法运行游戏')
+          .fontSize(18)
+          .fontWeight(FontWeight.Bold)
+          .fontColor($r('app.color.text_primary'))
+          .width('100%')
+        Text('当前系统不允许应用申请「可执行内存（JIT）」，模拟器无法运行任何游戏。' +
+          '这与游戏包无关，通常需要更换设备或系统版本。')
+          .fontSize(13)
+          .fontColor($r('app.color.text_secondary'))
+          .width('100%')
+        Text(this.jitDetail)
+          .fontSize(11)
+          .fontColor($r('app.color.text_hint'))
+          .width('100%')
+
+        Row({ space: 12 }) {
+          Button('导出诊断日志')
+            .fontSize(14)
+            .height(36)
+            .layoutWeight(1)
+            .backgroundColor($r('app.color.chip_bg'))
+            .fontColor($r('app.color.text_primary'))
+            .onClick(() => {
+              this.doExportLogs();
+            })
+          Button('知道了')
+            .fontSize(14)
+            .height(36)
+            .layoutWeight(1)
+            .backgroundColor($r('app.color.accent'))
+            .fontColor($r('app.color.text_on_accent'))
+            .onClick(() => {
+              this.jitBroken = false;
+            })
+        }
+        .width('100%')
+      }
+      .width('86%')
+      .padding(18)
+      .backgroundColor($r('app.color.card_bg'))
+      .borderRadius(20)
+      .shadow({
+        radius: 32,
+        color: $r('app.color.mask'),
+        offsetX: 0,
+        offsetY: 8,
+      })
+    }
+    .width('100%')
+    .height('100%')
+    .justifyContent(FlexAlign.Center)
+    .backgroundColor($r('app.color.mask'))
+    .onClick(() => {
+    })
+  }
+
   /** 首页按返回 = 退到后台（不退出进程，也不 pop 出栈底的空白根内容）。 */
   private moveToBackground(): void {
     try {
@@ -926,6 +1032,10 @@ struct Home {
         }
         if (this.passwordVisible) {
           this.passwordOverlay()
+        }
+        // 本机 JIT 不可用时的启动提示（跟安装流程无关，所以放最上层）。
+        if (this.jitBroken) {
+          this.jitWarningOverlay()
         }
       }
       .width('100%')
