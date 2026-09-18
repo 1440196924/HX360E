@@ -41,6 +41,9 @@ struct JitProbeReport {
 // 运行全部策略探测。每次调用都会重新探测（开销：毫秒级）。
 JitProbeReport RunJitProbe();
 
+/** 用非标 prctl(0x6a6974) 申请 JIT 权限；0=内核接受，-1 看 errno。 */
+int EnableJitViaPrctl();
+
 // 把报告格式化成单行字符串（hilog 连续多条会被缓冲丢弃，故合并输出）
 std::string FormatJitReport(const JitProbeReport& report);
 

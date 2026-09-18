@@ -20,6 +20,7 @@
 #include <string>
 
 #include <sys/mman.h>
+#include <sys/prctl.h>
 #include <unistd.h>
 
 #include <hilog/log.h>
@@ -253,8 +254,33 @@ StrategyResult ProbeAnonExecutableRwx() {
 
 }  // namespace
 
+/**
+ * 用鸿蒙的非标 prctl 申请 JIT 权限。
+ *
+ * 0x6a6974 正是 "jit" 的 ASCII（6a='j' 69='i' 74='t'）——鸿蒙内核用它控制
+ * Debug 场景下的可执行内存，且**只在非上架（调试）签名下有效**。
+ * 社区给出的调用形式是 `prctl(0x6a6974, 0, 0)`。
+ *
+ * 为什么必须调：本机内核对「匿名 RW → mprotect(RX)」返回 EINVAL/EACCES，
+ * 于是 JIT 代码页永远不可执行（表现为黑屏或 A64Backend abort）。开启后再走
+ * 原来的映射流程即可。
+ *
+ * 幂等：重复调用无副作用。返回值 0 = 内核接受；-1 看 errno
+ * （EINVAL 表示该内核不认这个选项）。
+ */
+int EnableJitViaPrctl() {
+    errno = 0;
+    const int r = prctl(0x6a6974, 0, 0);
+    const int e = errno;
+    HILOG("JIT: prctl(0x6a6974,0,0) -> ret=%{public}d errno=%{public}d",
+          r, e);
+    return r;
+}
+
 JitProbeReport RunJitProbe() {
     JitProbeReport report;
+    // 先尝试申请 JIT 权限，再探测各策略 —— 否则探测结果反映不了真实能力。
+    EnableJitViaPrctl();
     InstallProbeHandlers();
 
     // 顺序：安全且最可能成功的在前。
