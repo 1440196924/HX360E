@@ -11,6 +11,7 @@ import { Orientation } from '../common/Orientation';
 import { VirtualStick, VirtualDpad, PadButton } from '../common/VirtualStick';
 import { SettingsStore } from '../common/SettingsStore';
 import { AppLog } from '../common/AppLog';
+import { fileIo as fs } from '@kit.CoreFileKit';
 
 const DOMAIN = 0x0000;
 const TAG = 'HX360E';
@@ -58,6 +59,8 @@ struct GamePage {
   private dbgPanX: number = 0;
   private dbgPanY: number = 0;
   private debugTimer: number = -1;
+  /** 启动后 60s 密集打点的定时器（见 startBootProbe）。 */
+  private bootProbeTimer: number = -1;
 
   // 保持宽高比：等比 contain；关闭：横竖各算系数（拉伸满屏、不变形）。
   updateFitScale(stageW: number, stageH: number): void {
@@ -163,6 +166,7 @@ struct GamePage {
     this.debugTimer = setInterval(() => this.refreshDebugText(), 600);
     this.attachTimer = setInterval(() => this.tryAttach(), 200);
     this.promptTimer = setInterval(() => this.pollPrompt(), 150);
+    this.startBootProbe();
   }
 
   // 调试浮层开关：优先读设置里的 Display|show_debug_overlay，再退化到 native cvar。
@@ -300,6 +304,7 @@ struct GamePage {
     }
     if (this.promptTimer >= 0) {
       clearInterval(this.promptTimer);
+    this.stopBootProbe();
       this.promptTimer = -1;
     }
     // 离开游戏页时释放虚拟手柄按键并放行阻塞在提示上的 guest 线程。
@@ -413,6 +418,70 @@ struct GamePage {
       // 忽略
     }
     this.clearPrompt();
+  }
+
+  /**
+   * 启动后前 60 秒的密集打点（200ms 一次），用于定位「黑屏几秒后进程静默消失」。
+   *
+   * 为什么要这么密：这类消失（无 cppcrash、无 kill 日志）最可能是被内核 OOM 杀，
+   * 而 5 秒就死的情况下 2 秒采样只能拿到 2~3 个点、看不出走势；200ms 能拿到
+   * ~25 个点。AppLog.append 是同步 write，进程被 SIGKILL 也带不走已写内容。
+   *
+   * 每次记录：RSS / VmSize / 系统可用内存 / guest 已出帧数 —— 四个数一起看就能
+   * 区分「内存爆炸」「guest 卡住不动」「完全没起来」。
+   */
+  private startBootProbe(): void {
+    let ticks: number = 0;
+    this.bootProbeTimer = setInterval(() => {
+      ticks++;
+      try {
+        const mem: number[] = GamePage.readMemMb();
+        let frames: number = -1;
+        try {
+          frames = testNapi.vulkanStatus().frames;
+        } catch (e) {
+          frames = -1;
+        }
+        AppLog.i('probe',
+          `t=${ticks * 200}ms rss=${mem[0]}MB vm=${mem[1]}MB avail=${mem[2]}MB frames=${frames}`);
+      } catch (e) {
+        // 打点失败不能影响游戏
+      }
+      if (ticks >= 300) {   // 60s 后停
+        this.stopBootProbe();
+      }
+    }, 200);
+  }
+
+  private stopBootProbe(): void {
+    if (this.bootProbeTimer >= 0) {
+      clearInterval(this.bootProbeTimer);
+      this.bootProbeTimer = -1;
+    }
+  }
+
+  /** 读 /proc：返回 [VmRSS MB, VmSize MB, MemAvailable MB]。 */
+  private static readMemMb(): number[] {
+    const out: number[] = [0, 0, 0];
+    try {
+      const st: string = fs.readTextSync('/proc/self/status');
+      const rss = /VmRSS:\s+(\d+)/.exec(st);
+      const vm = /VmSize:\s+(\d+)/.exec(st);
+      if (rss !== null) {
+        out[0] = Math.round(Number(rss[1]) / 1024);
+      }
+      if (vm !== null) {
+        out[1] = Math.round(Number(vm[1]) / 1024);
+      }
+      const mi: string = fs.readTextSync('/proc/meminfo');
+      const av = /MemAvailable:\s+(\d+)/.exec(mi);
+      if (av !== null) {
+        out[2] = Math.round(Number(av[1]) / 1024);
+      }
+    } catch (e) {
+      // 读不到就留 0
+    }
+    return out;
   }
 
   // ---- 虚拟手柄输入 ----
