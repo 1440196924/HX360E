@@ -1,6 +1,8 @@
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 
+import { AppLog } from './AppLog';
+
 const DOMAIN = 0x0000;
 const TAG = 'HX360E';
 
@@ -243,7 +245,7 @@ export class GameLibrary {
    */
   static resolveTarget(dir: string, depth: number): string {
     try {
-      if (depth > 8 || !fs.accessSync(dir)) {
+      if (depth > 8 || !GameLibrary.exists(dir)) {
         return '';
       }
       const names: string[] = fs.listFileSync(dir).filter(
@@ -263,13 +265,15 @@ export class GameLibrary {
           continue;
         }
         const dataDir: string = `${dir}/${n}.data`;
-        if (fs.accessSync(dataDir) && fs.statSync(dataDir).isDirectory()) {
+        // accessSync 在不存在时**抛异常**，不能当布尔用（原来就是这里把整个
+        // 扫描打断，导致「已解压但未找到启动文件」）。
+        if (GameLibrary.exists(dataDir) && fs.statSync(dataDir).isDirectory()) {
           return `${dir}/${n}`;
         }
       }
       // STFS 包的文件名是十六进制，长度随内容类型而定：GOD 常见 16 位，
-    // XBLA（000D0000）实测是 42 位，所以上限要放宽（原来写死 40 会漏掉）。
-    const hexName = new RegExp('^[0-9A-Fa-f]{16,64}$');
+      // XBLA（000D0000）实测是 42 位，所以上限要放宽（原来写死 40 会漏掉）。
+      const hexName = new RegExp('^[0-9A-Fa-f]{16,64}$');
       for (const n of names) {
         if (!fs.statSync(`${dir}/${n}`).isDirectory() && hexName.test(n)) {
           return `${dir}/${n}`;
@@ -294,10 +298,25 @@ export class GameLibrary {
         }
       }
     } catch (e) {
-      hilog.error(DOMAIN, TAG, 'resolveTarget failed: %{public}s',
-        JSON.stringify(e));
+      // 用 AppLog（会落进 app.log，用户能导出）而不是只打 hilog。
+      AppLog.exception('library', 'resolveTarget failed', e);
     }
     return '';
+  }
+
+  /**
+   * 安全的存在性判断。
+   *
+   * 注意：`fs.accessSync(path)` 在路径不存在时是**抛异常**，不是返回 false ——
+   * 直接 `if (fs.accessSync(p))` 会把所在流程整个打断（resolveTarget 踩过这个坑）。
+   */
+  static exists(path: string): boolean {
+    try {
+      fs.accessSync(path);
+      return true;
+    } catch (e) {
+      return false;
+    }
   }
 
   /** 绝对路径 → 相对游戏目录的路径（存进元数据）。 */
