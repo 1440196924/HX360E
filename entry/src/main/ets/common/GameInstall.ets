@@ -522,7 +522,9 @@ export class GameInstall {
     }
     let names: string[] = [];
     try {
-      names = fs.listFileSync(dir);
+      // 同样跳过非法名字（含 U+FFFD），否则打印树时自己就抛 13900002。
+      names = fs.listFileSync(dir).filter(
+        (n: string) => n.indexOf('\uFFFD') < 0);
     } catch (e) {
       AppLog.w(tag, `list failed: ${dir}`);
       return;

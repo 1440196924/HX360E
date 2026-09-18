@@ -244,27 +244,39 @@ export class GameLibrary {
    * 递归子目录 > 第一个文件。点开头的文件（元数据/隐藏文件）跳过。
    */
   static resolveTarget(dir: string, depth: number): string {
+    // probe 记录"最后一次 fs 调用"，抛异常时一起打出来 —— 光看 13900002 不知道
+    // 是哪一步（list / stat / exists）挂了。
+    let probe: string = '';
     try {
+      probe = `dir=${dir} depth=${depth}`;
       if (depth > 8 || !GameLibrary.exists(dir)) {
         return '';
       }
+      probe = `listFileSync(${dir})`;
+      // 跳过点开头的隐藏项，以及**含替换字符 U+FFFD 的非法名字**：
+      // 那种名字是真·非法编码留在磁盘上的（例如早期版本把 GBK 字节直接当文件名
+      // 写盘），listFileSync 解不出来、拿它去 stat/递归必然报 13900002，
+      // 会把整个扫描拖垮。合法 UTF-8 名字不含 U+FFFD，不受影响。
       const names: string[] = fs.listFileSync(dir).filter(
-        (n: string) => !n.startsWith('.'));
+        (n: string) => !n.startsWith('.') && n.indexOf('\uFFFD') < 0);
       for (const n of names) {
         if (n.toLowerCase() === 'default.xex') {
           return `${dir}/${n}`;
         }
       }
       for (const n of names) {
+        probe = `statSync(${dir}/${n})`;
         if (n === 'game' && !fs.statSync(`${dir}/${n}`).isDirectory()) {
           return `${dir}/${n}`;
         }
       }
       for (const n of names) {
+        probe = `statSync(${dir}/${n})`;
         if (fs.statSync(`${dir}/${n}`).isDirectory()) {
           continue;
         }
         const dataDir: string = `${dir}/${n}.data`;
+        probe = `exists(${dataDir})`;
         // accessSync 在不存在时**抛异常**，不能当布尔用（原来就是这里把整个
         // 扫描打断，导致「已解压但未找到启动文件」）。
         if (GameLibrary.exists(dataDir) && fs.statSync(dataDir).isDirectory()) {
@@ -275,17 +287,21 @@ export class GameLibrary {
       // XBLA（000D0000）实测是 42 位，所以上限要放宽（原来写死 40 会漏掉）。
       const hexName = new RegExp('^[0-9A-Fa-f]{16,64}$');
       for (const n of names) {
+        probe = `statSync(${dir}/${n})`;
         if (!fs.statSync(`${dir}/${n}`).isDirectory() && hexName.test(n)) {
           return `${dir}/${n}`;
         }
       }
       for (const n of names) {
+        probe = `statSync(${dir}/${n})`;
         if (n.startsWith('game') && !fs.statSync(`${dir}/${n}`).isDirectory()) {
           return `${dir}/${n}`;
         }
       }
       for (const n of names) {
+        probe = `statSync(${dir}/${n})`;
         if (fs.statSync(`${dir}/${n}`).isDirectory()) {
+          probe = `recurse(${dir}/${n})`;
           const t: string = GameLibrary.resolveTarget(`${dir}/${n}`, depth + 1);
           if (t !== '') {
             return t;
@@ -293,13 +309,14 @@ export class GameLibrary {
         }
       }
       for (const n of names) {
+        probe = `statSync(${dir}/${n})`;
         if (!fs.statSync(`${dir}/${n}`).isDirectory()) {
           return `${dir}/${n}`;
         }
       }
     } catch (e) {
       // 用 AppLog（会落进 app.log，用户能导出）而不是只打 hilog。
-      AppLog.exception('library', 'resolveTarget failed', e);
+      AppLog.exception('library', `resolveTarget failed at [${probe}]`, e);
     }
     return '';
   }
