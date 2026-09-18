@@ -2,8 +2,8 @@
   "app": {
     "bundleName": "com.sddswsf.hx360e",
     "vendor": "example",
-    "versionCode": 1000000,
-    "versionName": "1.0.0",
+    "versionCode": 1000100,
+    "versionName": "1.0.1a",
     "buildVersion": "1",
     "icon": "$media:app_icon",
     "label": "$string:app_name"

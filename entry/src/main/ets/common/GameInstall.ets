@@ -90,16 +90,22 @@ export class GameInstall {
     const options = new picker.DocumentSelectOptions();
     options.maxSelectNumber = 1;
     options.selectMode = picker.DocumentSelectMode.FOLDER;
+    // 打点：把请求的参数记下来。部分设备的文件选择器不支持「选文件夹」，
+    // 可能①抛异常 ②静默返回空数组 —— 两种情况都要能从日志区分出来。
+    AppLog.i('install', 'folder pick: open picker (mode=FOLDER max=1)');
     let uris: string[] = [];
     try {
       const docPicker = new picker.DocumentViewPicker(ctx);
       uris = await docPicker.select(options);
     } catch (e) {
       // 「选文件夹」模式在部分设备的文件选择器上不被支持，会抛在这里。
-      AppLog.exception('install', 'folder pick failed', e);
+      AppLog.exception('install', 'folder pick failed (picker rejected)', e);
       return '选择文件夹失败（见 hilog）';
     }
+    AppLog.i('install', `folder pick: returned ${uris.length} uri(s)`);
     if (uris.length === 0) {
+      AppLog.w('install',
+        'folder pick: empty result —— 选择器不支持该模式或用户取消');
       return '已取消';
     }
 
@@ -260,15 +266,18 @@ export class GameInstall {
     const options = new picker.DocumentSelectOptions();
     options.maxSelectNumber = 1;
     options.fileSuffixFilters = ['压缩包|.zip'];
+    AppLog.i('install', 'archive pick: open picker (mode=FILE suffix=zip)');
     let uris: string[] = [];
     try {
       const docPicker = new picker.DocumentViewPicker(ctx);
       uris = await docPicker.select(options);
     } catch (e) {
-      AppLog.exception('install', 'archive pick failed', e);
+      AppLog.exception('install', 'archive pick failed (picker rejected)', e);
       return '选择压缩包失败（见 hilog）';
     }
+    AppLog.i('install', `archive pick: returned ${uris.length} uri(s)`);
     if (uris.length === 0) {
+      AppLog.w('install', 'archive pick: empty result（取消或选择器异常）');
       return '已取消';
     }
 
