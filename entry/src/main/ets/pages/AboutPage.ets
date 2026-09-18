@@ -1,7 +1,10 @@
 import { hilog } from '@kit.PerformanceAnalysisKit';
+import { deviceInfo } from '@kit.BasicServicesKit';
+import testNapi from 'libentry.so';
 import { common, bundleManager, Want } from '@kit.AbilityKit';
+import { window, display } from '@kit.ArkUI';
 import { HdsNavDestination, HdsNavDestinationTitleMode } from '@kit.UIDesignKit';
-import { TitleBarSupport } from '../common/TitleBarSupport';
+import { TitleBarSupport, TITLE_BAR_CONTENT_HEIGHT } from '../common/TitleBarSupport';
 
 const DOMAIN = 0x0000;
 const TAG = 'HX360E';
@@ -15,6 +18,17 @@ const REPO_URL = 'https://github.com/1440196924/HX360E';
 @Component
 export struct AboutPage {
   @State version: string = '';
+  /** 状态栏避让高度（沉浸式窗口下标题栏浮在内容之上）。 */
+  @State statusBarVp: number = 0;
+  /** 设备信息。 */
+  @State deviceLine: string = '-';
+  @State osLine: string = '-';
+  @State apiLine: string = '-';
+  /** 运行环境：JIT / Vulkan / 启动配置。 */
+  @State jitLine: string = '-';
+  @State jitProbeLine: string = '-';
+  @State vkLine: string = '-';
+  @State backendLine: string = '-';
 
   aboutToAppear(): void {
     try {
@@ -26,6 +40,93 @@ export struct AboutPage {
       hilog.error(DOMAIN, TAG, 'read version failed: %{public}s', JSON.stringify(e));
       this.version = '(未知)';
     }
+    this.collectDeviceInfo();
+    this.collectRuntimeInfo();
+    this.applyStatusBarInset();
+  }
+
+  /** 取状态栏高度（与 AdvancedPage 的做法一致）。 */
+  private applyStatusBarInset(): void {
+    try {
+      window.getLastWindow(getContext(this)).then((win: window.Window) => {
+        const avoid: window.AvoidArea =
+          win.getWindowAvoidArea(window.AvoidAreaType.TYPE_SYSTEM);
+        const density: number = display.getDefaultDisplaySync().densityPixels;
+        this.statusBarVp = density > 0
+          ? Math.ceil(avoid.topRect.height / density) : 0;
+      }).catch((err: Error) => {
+        hilog.error(DOMAIN, TAG, 'getLastWindow failed: %{public}s', err.message);
+      });
+    } catch (e) {
+      hilog.error(DOMAIN, TAG, 'applyStatusBarInset failed: %{public}s',
+        JSON.stringify(e));
+    }
+  }
+
+  /** 设备信息（机型 / 系统 / API 等级）。 */
+  private collectDeviceInfo(): void {
+    try {
+      this.deviceLine = deviceInfo.productModel;
+      this.osLine = `${deviceInfo.osFullName} · ${deviceInfo.displayVersion}`;
+      this.apiLine = `${deviceInfo.sdkApiVersion}`;
+    } catch (e) {
+      hilog.error(DOMAIN, TAG, 'read deviceInfo failed: %{public}s',
+        JSON.stringify(e));
+    }
+  }
+
+  /**
+   * 运行环境：JIT 能力 / Vulkan 状态 / 启动配置。
+   *
+   * JIT 这块尤其要显示清楚：部分设备的系统不允许申请可执行内存，模拟器
+   * **任何游戏都跑不起来**（表现为黑屏/崩溃），而用户往往以为是游戏包的问题。
+   * 这里把结论和探测明细都摆出来，反馈问题时一眼可辨。
+   */
+  private collectRuntimeInfo(): void {
+    try {
+      const r = testNapi.jitProbe();
+      const ok: boolean = r.firstWorking >= 0;
+      this.jitLine = ok
+        ? `可用（${r.firstWorkingName}）`
+        : '不可用 —— 本机系统不允许申请可执行内存，游戏无法运行';
+      const parts: string[] = [];
+      parts.push(`Baseline=${r.BaselineRw.ok ? '✓' : `✗${r.BaselineRw.errno}`}`);
+      parts.push(`AnonMprot=${r.AnonRwMprot.ok ? '✓' : `✗${r.AnonRwMprot.errno}`}`);
+      parts.push(`FileMap=${r.FileMapRxRw.ok ? '✓' : `✗${r.FileMapRxRw.errno}`}`);
+      parts.push(`AnonNone=${r.AnonNoneExecMprot.ok ? '✓' : `✗${r.AnonNoneExecMprot.errno}`}`);
+      parts.push(`AnonRwx=${r.AnonExecRwx.ok ? '✓' : `✗${r.AnonExecRwx.errno}`}`);
+      this.jitProbeLine = parts.join('  ');
+    } catch (e) {
+      this.jitLine = '(探测失败)';
+      this.jitProbeLine = '-';
+    }
+    try {
+      const v = testNapi.vulkanStatus();
+      const dev: string = v.deviceInfo;
+      // 这里的 Vulkan 状态是**运行时**的：只有进过游戏页、Vulkan 上下文初始化过
+      // 才有数据。没进过游戏时显示"未初始化"，否则会被误解成"不支持 Vulkan"。
+      this.vkLine = v.ready
+        ? `已就绪${dev !== '' ? ` · ${dev}` : ''}`
+        : `未初始化（进入游戏后显示）${dev !== '' ? ` · ${dev}` : ''}`;
+    } catch (e) {
+      this.vkLine = '(探测失败)';
+    }
+    try {
+      this.backendLine = testNapi.emulator.deviceInfo();
+    } catch (e) {
+      this.backendLine = '(不可用)';
+    }
+  }
+
+  /** 小节标题。 */
+  @Builder
+  sectionTitle(title: string) {
+    Text(title)
+      .fontSize(12)
+      .fontWeight(FontWeight.Medium)
+      .fontColor($r('app.color.text_hint'))
+      .width('100%')
+      .padding({ left: 16, right: 16, top: 14, bottom: 2 })
   }
 
   /** 用系统浏览器打开链接。 */
@@ -102,6 +203,21 @@ export struct AboutPage {
 
           Divider().color($r('app.color.divider'))
 
+          this.sectionTitle('设备')
+          this.infoRow('机型', this.deviceLine)
+          this.infoRow('系统', this.osLine)
+          this.infoRow('API 等级', this.apiLine)
+
+          Divider().color($r('app.color.divider'))
+
+          this.sectionTitle('运行环境')
+          this.infoRow('JIT', this.jitLine)
+          this.infoRow('JIT 探测', this.jitProbeLine)
+          this.infoRow('Vulkan', this.vkLine)
+          this.infoRow('后端', this.backendLine)
+
+          Divider().color($r('app.color.divider'))
+
           // 求充电：整块可点，跳系统浏览器打开 B 站主页。
           Column({ space: 8 }) {
             Row({ space: 8 }) {
@@ -151,6 +267,8 @@ export struct AboutPage {
       .width('100%')
       .layoutWeight(1)
       .scrollBar(BarState.Off)
+      // 让开浮在上面的 HDS 标题栏，否则第一行（开源地址）会被标题栏压住。
+      .contentStartOffset(this.statusBarVp + TITLE_BAR_CONTENT_HEIGHT)
     }
     .titleBar({
       avoidLayoutSafeArea: true,
