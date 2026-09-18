@@ -135,6 +135,25 @@ void HandlePadAxis(PadAxisGroup group, const struct GamePad_AxisEvent* event) {
       GAME_CONTROLLER_SUCCESS) {
     return;
   }
+  {
+    // 诊断：前若干次轴事件把 6 个可用轴的原始值都打出来，用来确认某个摇杆
+    // 到底落在 X/Y 还是 Z/RZ 上（SDK 没有 Rx/Ry getter，固件差异只能实测）。
+    static std::atomic<uint32_t> axis_raw{0};
+    if (axis_raw.fetch_add(1, std::memory_order_relaxed) < 24) {
+      double dx = 0, dy = 0, dz = 0, drz = 0, dhx = 0, dhy = 0;
+      OH_GamePad_AxisEvent_GetXAxisValue(event, &dx);
+      OH_GamePad_AxisEvent_GetYAxisValue(event, &dy);
+      OH_GamePad_AxisEvent_GetZAxisValue(event, &dz);
+      OH_GamePad_AxisEvent_GetRZAxisValue(event, &drz);
+      OH_GamePad_AxisEvent_GetHatXAxisValue(event, &dhx);
+      OH_GamePad_AxisEvent_GetHatYAxisValue(event, &dhy);
+      OH_LOG_Print(LOG_APP, LOG_INFO, 0, "HX360E",
+                   "pad axis g=%{public}d src=%{public}d "
+                   "x=%{public}.3f y=%{public}.3f z=%{public}.3f "
+                   "rz=%{public}.3f hat=%{public}.3f/%{public}.3f",
+                   int(group), int(source), dx, dy, dz, drz, dhx, dhy);
+    }
+  }
   switch (group) {
     case PadAxisGroup::kDpad:
     case PadAxisGroup::kLeftStick:
@@ -143,6 +162,22 @@ void HandlePadAxis(PadAxisGroup group, const struct GamePad_AxisEvent* event) {
       double y = 0.0;
       OH_GamePad_AxisEvent_GetXAxisValue(event, &x);
       OH_GamePad_AxisEvent_GetYAxisValue(event, &y);
+
+      // 右摇杆的轴向在固件之间不一致：SDK 只暴露 X/Y/Z/RZ（没有 Rx/Ry），
+      // 部分手柄把右摇杆按标准 HID 报在 Z/RZ 上，此时 X/Y 恒为 0 ——
+      // 表现就是"右摇杆完全没反应"。所以 X/Y 全零时回退到 Z/RZ。
+      if (group == PadAxisGroup::kRightStick &&
+          std::fabs(x) < 1e-6 && std::fabs(y) < 1e-6) {
+        double z = 0.0;
+        double rz = 0.0;
+        OH_GamePad_AxisEvent_GetZAxisValue(event, &z);
+        OH_GamePad_AxisEvent_GetRZAxisValue(event, &rz);
+        if (std::fabs(z) > 1e-6 || std::fabs(rz) > 1e-6) {
+          x = z;
+          y = rz;
+        }
+      }
+
       // 轴向统一：HarmonyOS 的 y 轴正方向朝下（与屏幕坐标一致），而本文件的
       // 约定（以及 XInput 的 thumb_ly）是 y 正方向朝上，所以取反。
       // 证据：同一平台上的 RPCS3_RE/core/ohos/input/ohos_gamepad.cpp 把

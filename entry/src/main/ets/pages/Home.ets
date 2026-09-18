@@ -8,8 +8,6 @@ import {
   HdsNavDestination,
   HdsNavDestinationTitleMode,
   TitleBarStyleOptions,
-  HdsNavigationMenuItemOptions,
-  HdsNavigationIconOptions,
   hdsMaterial,
 } from '@kit.UIDesignKit';
 import { TitleBarSupport, TITLE_BAR_CONTENT_HEIGHT } from '../common/TitleBarSupport';
@@ -273,30 +271,26 @@ struct Home {
   }
 
   /**
-   * 标题栏右侧的图标按钮（HDS 系统级 titleBar content.menu）。
+   * 标题栏右侧的「导入」按钮（自绘，放进 titleBar 的 stackBuilder 插槽）。
    *
-   * ArkTS 严格模式不允许无类型对象字面量，所以这里显式声明每一项的类型；
-   * 只在「游戏库」页签显示「导入」，设置页签返回空数组。
+   * 只在「游戏库」页签显示；设置页签不渲染。
    */
-  private titleBarMenu(): Array<HdsNavigationMenuItemOptions> {
-    const items: Array<HdsNavigationMenuItemOptions> = [];
-    if (this.currentTab !== 0) {
-      return items;
-    }
-    // 图标颜色跟主题走：浅色模式用深色 text_primary，深色模式自动变浅。
-    const glyph: SymbolGlyphModifier =
-      new SymbolGlyphModifier($r('sys.symbol.plus'))
-        .fontColor([$r('app.color.text_primary')]);
-    const icon: HdsNavigationIconOptions = {
-      icon: glyph,
-      isEnabled: true,
-      action: () => {
+  @Builder
+  titleBarAction() {
+    if (this.currentTab === 0) {
+      Button({ type: ButtonType.Circle }) {
+        SymbolGlyph($r('sys.symbol.plus'))
+          .fontSize(20)
+          .fontColor([$r('app.color.text_primary')])
+      }
+      .width(34)
+      .height(34)
+      .padding(0)
+      .backgroundColor($r('app.color.chip_bg'))
+      .onClick(() => {
         this.importGame();
-      },
-    };
-    const item: HdsNavigationMenuItemOptions = { content: icon };
-    items.push(item);
-    return items;
+      })
+    }
   }
 
   // 标题栏样式走公共模块（材质档位 + 渐次磨砂 + 不设背景色）。
@@ -776,10 +770,14 @@ struct Home {
       style: this.titleBarStyle(),
       content: {
         title: { mainTitle: this.currentTab === 0 ? '游戏库' : '设置' },
-        // 「导入」做成标题栏的系统级图标按钮（只在游戏库页签显示）。
-        menu: {
-          value: this.titleBarMenu(),
-        },
+        // 「导入」按钮放进标题栏的自定义构建器插槽。
+        //
+        // 注意：不能用 content.menu —— HdsNavigationMenuContentOptions 里带
+        // multiWindowEntryInAPPMenu({want: Want})，那一栏本质是"系统级/多窗
+        // 跳转入口"，点击会交给系统去跳转，没有可解析的 want 时系统直接弹
+        // 「功能暂不支持，敬请期待」，我们自己的 action 根本不会执行。
+        // stackBuilder 是官方给的自定义插槽，放自己的组件、点击回调才有效。
+        stackBuilder: this.titleBarAction,
       },
     })
     .hideBackButton(true)
