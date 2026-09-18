@@ -10,7 +10,7 @@ const DOMAIN = 0x0000;
 const TAG = 'HX360E';
 /** 作者 B 站主页。 */
 const AUTHOR_URL = 'https://space.bilibili.com/297193944';
-const AUTHOR_NAME = '山东的大蒜王师傅';
+const AUTHOR_NAME = '山东大蒜王师傅';
 /** 开源仓库地址。 */
 const REPO_URL = 'https://github.com/1440196924/HX360E';
 
@@ -173,6 +173,45 @@ export struct AboutPage {
     })
   }
 
+  // 支持作者卡片：整块可点，跳系统浏览器打开 B 站主页。
+  @Builder
+  authorCard() {
+    Column({ space: 8 }) {
+      Row({ space: 8 }) {
+        SymbolGlyph($r('sys.symbol.heart_fill'))
+          .fontSize(18)
+          .fontColor([$r('app.color.accent')])
+        Text('支持作者')
+          .fontSize(15)
+          .fontWeight(FontWeight.Medium)
+          .fontColor($r('app.color.text_primary'))
+      }
+      .width('100%')
+
+      Text('用爱发电不易，如果这个模拟器对你有帮助，欢迎到 B 站关注 / 充电支持，你的支持就是我更新最大的动力～')
+        .fontSize(12)
+        .fontColor($r('app.color.text_secondary'))
+        .width('100%')
+
+      Row({ space: 4 }) {
+        Text(`B 站：${AUTHOR_NAME}`)
+          .fontSize(13)
+          .fontColor($r('app.color.accent'))
+        Blank()
+        Text('前往充电 ›')
+          .fontSize(13)
+          .fontColor($r('app.color.accent'))
+      }
+      .width('100%')
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+    .padding({ left: 16, right: 16, top: 14, bottom: 14 })
+    .onClick(() => {
+      this.openUrl(AUTHOR_URL);
+    })
+  }
+
   build() {
     HdsNavDestination() {
       Scroll() {
@@ -201,6 +240,10 @@ export struct AboutPage {
 
           Divider().color($r('app.color.divider'))
 
+          this.authorCard()
+
+          Divider().color($r('app.color.divider'))
+
           this.sectionTitle('设备')
           this.infoRow('机型', this.deviceLine)
           this.infoRow('系统', this.osLine)
@@ -213,44 +256,6 @@ export struct AboutPage {
           this.infoRow('JIT 探测', this.jitProbeLine)
           this.infoRow('Vulkan', this.vkLine)
           this.infoRow('后端', this.backendLine)
-
-          Divider().color($r('app.color.divider'))
-
-          // 求充电：整块可点，跳系统浏览器打开 B 站主页。
-          Column({ space: 8 }) {
-            Row({ space: 8 }) {
-              SymbolGlyph($r('sys.symbol.heart_fill'))
-                .fontSize(18)
-                .fontColor([$r('app.color.accent')])
-              Text('支持作者')
-                .fontSize(15)
-                .fontWeight(FontWeight.Medium)
-                .fontColor($r('app.color.text_primary'))
-            }
-            .width('100%')
-
-            Text('用爱发电不易，如果这个模拟器对你有帮助，欢迎到 B 站关注 / 充电支持，你的支持就是我更新最大的动力～')
-              .fontSize(12)
-              .fontColor($r('app.color.text_secondary'))
-              .width('100%')
-
-            Row({ space: 4 }) {
-              Text(`B 站：${AUTHOR_NAME}`)
-                .fontSize(13)
-                .fontColor($r('app.color.accent'))
-              Blank()
-              Text('前往充电 ›')
-                .fontSize(13)
-                .fontColor($r('app.color.accent'))
-            }
-            .width('100%')
-          }
-          .width('100%')
-          .alignItems(HorizontalAlign.Start)
-          .padding({ left: 16, right: 16, top: 14, bottom: 14 })
-          .onClick(() => {
-            this.openUrl(AUTHOR_URL);
-          })
 
           Divider().color($r('app.color.divider'))
 
