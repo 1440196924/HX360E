@@ -572,12 +572,12 @@ struct Home {
       '--log_gpu_frame_time_breakdown=false',
       '--log_resolve_details=false',
       '--guest_scheduler_stats=true',
-      // 【实验】关掉协作式 fiber 调度器：开了之后 guest 线程跑在 fiber 上，
-      // XThread::Reenter（KeSetCurrentStackPointers 触发）只能走 C++ 异常路径
-      // （xthread.cc:808 的 longjmp 分支要求 !fiber_），而 OHOS 上异常穿不过
-      // JIT 帧 -> std::terminate -> abort -> App 静默消失（忍龙2 即如此）。
-      // 关掉后线程是真实 host 线程 => 走 longjmp 分支，压根不产生异常。
-      '--guest_scheduler=false',
+      // guest 调度器（协作式纤程）不在这里传：命令行优先级高于 --config，传了会
+      // 盖掉设置页「设置 > 内核 > guest 调度器」的选择。忍龙2 这类走
+      // KeSetCurrentStackPointers 的游戏必须把它**关掉**才能进游戏（开了之后
+      // guest 线程是 fiber，XThread::Reenter 只能走 C++ 异常路径，而 OHOS 上
+      // 异常穿不过 JIT 帧 -> terminate -> App 静默消失），原因见 docs/TODO.md
+      // 的 Phase 9。
       // guest 崩（未处理的内存访问 / 非法指令）时**不要**终止模拟器。
       // xenia 默认 guest_crash_is_fatal=true，会走 xe::FatalError → abort()，
       // 表现就是"游戏黑屏几秒后 App 直接消失"，而且因为 abort 发生在 guest
