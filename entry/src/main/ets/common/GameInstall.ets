@@ -364,11 +364,16 @@ export class GameInstall {
     p.detail = '正在读取游戏信息…';
     p.percent = 99;
     onProgress(p);
+    // 解压后把目录树打进 app.log：装不上时这一份就是最直接的现场（能看出
+    // 条目名解码对不对、启动文件到底叫什么）。
+    GameInstall.logTree('install', dir, 1, 4);
     const target: string = GameLibrary.resolveTarget(dir, 0);
     if (target === '') {
+      AppLog.e('install', `未找到启动目标，目录=${dir}`);
       GameInstall.cleanup(filesDir, id);
       return '已解压但未找到可启动文件（default.xex / STFS / game*）';
     }
+    AppLog.i('install', `target=${target}`);
 
     const tm: TitleMeta = GameInstall.readTitleMeta(target);
     const meta = new GameMeta();
@@ -505,6 +510,42 @@ export class GameInstall {
    *     报 13900002（文件不存在），选择器的授权是按 URI 走的。
    *  2. read/write 都必须显式传 offset，否则会写出全 0。
    */
+  /**
+   * 把目录树打进 app.log（诊断用）。
+   *
+   * 安装失败时最需要的就是"磁盘上到底有什么"：条目名解码是否正常、启动文件
+   * 叫什么名字。装不上时不用再让用户复现，直接看这份。
+   */
+  static logTree(tag: string, dir: string, level: number, maxLevel: number): void {
+    if (level > maxLevel) {
+      return;
+    }
+    let names: string[] = [];
+    try {
+      names = fs.listFileSync(dir);
+    } catch (e) {
+      AppLog.w(tag, `list failed: ${dir}`);
+      return;
+    }
+    for (const n of names) {
+      const full: string = `${dir}/${n}`;
+      let isDir: boolean = false;
+      let size: number = 0;
+      try {
+        const st = fs.statSync(full);
+        isDir = st.isDirectory();
+        size = st.size;
+      } catch (e) {
+        AppLog.w(tag, `stat failed: ${n}`);
+        continue;
+      }
+      AppLog.i(tag, `  ${'  '.repeat(level)}${n}${isDir ? '/' : ` [${size}]`}`);
+      if (isDir) {
+        GameInstall.logTree(tag, full, level + 1, maxLevel);
+      }
+    }
+  }
+
   private static copyInto(srcUri: string, dstPath: string): number {
     const inFile = fs.openSync(srcUri, fs.OpenMode.READ_ONLY);
     const outFile = fs.openSync(dstPath,
