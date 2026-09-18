@@ -6,6 +6,14 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdio>
+#include <csignal>
+#include <exception>
+#include <execinfo.h>
+#include <unwind.h>
+#include <dlfcn.h>
+#include <new>
+#include <stdexcept>
+#include <string>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
@@ -467,7 +475,143 @@ void OnSurfaceResized() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 进程死因探针（诊断「黑屏几秒后 App 直接消失」）。
+//
+// 现象：无 cppcrash / jscrash、无 OOM、无 appfreeze、也没有信号被应用层处理，
+// 日志在固定时刻断掉 —— 只剩「进程自己 exit()」这一种可能。这三条钩子覆盖
+// 三种死法，任何一种都会在 hilog 留下唯一一行标记，一眼可判：
+//   · atexit 触发        → 某处调了 exit()/从 main 返回
+//   · std::terminate     → 未捕获异常 / noexcept 违规
+//   · SIGABRT            → abort()（xenia 的 xe::FatalError 就是它）
+// ---------------------------------------------------------------------------
+namespace {
+
+/**
+ * 把绝对地址解析成 `模块名+偏移 (符号)`。
+ *
+ * 用 dladdr 而不是读 /proc/self/maps：实测沙箱里 maps 的**路径列是空的**
+ * （只能拿到偏移、拿不到模块名），dladdr 直接问链接器，不受这个限制。
+ */
+std::string HxDescribePc(uintptr_t pc) {
+    Dl_info info;
+    std::memset(&info, 0, sizeof(info));
+    if (dladdr(reinterpret_cast<void*>(pc), &info) == 0 ||
+        info.dli_fname == nullptr) {
+        return "?";
+    }
+    const char* slash = std::strrchr(info.dli_fname, '/');
+    const char* base = (slash != nullptr) ? slash + 1 : info.dli_fname;
+    const unsigned long long off =
+        static_cast<unsigned long long>(pc -
+            reinterpret_cast<uintptr_t>(info.dli_fbase));
+    char buf[384];
+    if (info.dli_sname != nullptr) {
+        std::snprintf(buf, sizeof(buf), "%s+0x%llx (%s)", base, off,
+                      info.dli_sname);
+    } else {
+        std::snprintf(buf, sizeof(buf), "%s+0x%llx", base, off);
+    }
+    return std::string(buf);
+}
+
+/** 统计 _Unwind_Backtrace 走了多少帧。 */
+struct HxTraceState {
+    int n;
+};
+
+/**
+ * libunwind 的 trace 回调：逐帧打印。
+ *
+ * 用 libunwind 自己走一遍栈（不是 backtrace()），是为了回答一个具体问题：
+ * **展开器能不能穿过 JIT 帧**。若它很早就停下（帧数明显少于真实调用深度、
+ * 且停在 JIT 区域边界），就说明 JIT 函数的 FDE 没被采纳 —— 那正是
+ * XThread::Reenter 的 FiberReentryException 无法展开、进而 std::terminate
+ * 的直接原因。
+ */
+_Unwind_Reason_Code HxUnwindTrace(struct _Unwind_Context* ctx, void* arg) {
+    HxTraceState* st = static_cast<HxTraceState*>(arg);
+    const uintptr_t ip = reinterpret_cast<uintptr_t>(_Unwind_GetIP(ctx));
+    HXLOG("HX360E-DEATH: unwind[%{public}d] %{public}p = %{public}s", st->n,
+          reinterpret_cast<void*>(ip), HxDescribePc(ip).c_str());
+    st->n++;
+    if (st->n >= 24) {
+        return _URC_END_OF_STACK;
+    }
+    return _URC_NO_REASON;
+}
+
+void HxOnExit() {
+    // 注意：这里只能做最小动作（可能已在退出流程中）。
+    HXLOG("HX360E-DEATH: atexit fired -> 进程是被 exit() 正常结束的");
+}
+
+void HxOnTerminate() {
+    // terminate 基本都是「未捕获的 C++ 异常」。趁 terminate 处理器里当前异常
+    // 还可用（current_exception/rethrow），把 what() 打出来 —— 这一行就是根因：
+    // 常见是 std::bad_alloc（分配失败）或 xenia 自己抛的异常。
+    std::string detail;
+    std::exception_ptr eptr = std::current_exception();
+    if (eptr) {
+        try {
+            std::rethrow_exception(eptr);
+        } catch (const std::bad_alloc&) {
+            detail = "std::bad_alloc（内存分配失败）";
+        } catch (const std::length_error& e) {
+            detail = std::string("std::length_error: ") + e.what();
+        } catch (const std::exception& e) {
+            detail = std::string("std::exception: ") + e.what();
+        } catch (...) {
+            detail = "非 std::exception 的未知类型异常";
+        }
+    } else {
+        detail = "取不到当前异常（可能是 noexcept 违规或线程退出路径）";
+    }
+    HXLOG("HX360E-DEATH: std::terminate fired -> %{public}s", detail.c_str());
+
+    // 异常类型不是 std::exception 时 what() 帮不上忙，只能定位「谁抛的」：
+    // 在 terminate 处理器里取当前线程的调用栈（terminate 就在抛出线程上跑）。
+    // 地址是绝对 PC；配合 native_fault.log 里的 bias（libentry 的加载偏移）
+    // 相减即可用未 strip 的 libentry.so 做 addr2line 离线定位。
+    void* frames[32];
+    const int n = backtrace(frames, 32);
+    for (int i = 0; i < n; i++) {
+        const uintptr_t pc = reinterpret_cast<uintptr_t>(frames[i]);
+        HXLOG("HX360E-DEATH: bt[%{public}d] %{public}p = %{public}s", i,
+              frames[i], HxDescribePc(pc).c_str());
+    }
+
+    // 再用 libunwind 走一遍，看它能在哪一帧停下（停在 JIT 边界 = FDE 未被采纳）。
+    HxTraceState st;
+    st.n = 0;
+    _Unwind_Backtrace(HxUnwindTrace, &st);
+    HXLOG("HX360E-DEATH: _Unwind_Backtrace walked %{public}d frame(s)", st.n);
+}
+
+void HxOnAbort(int sig) {
+    HXLOG("HX360E-DEATH: SIGABRT(%{public}d) -> abort()，交给系统出崩溃转储",
+          sig);
+    // 恢复默认处理并重新触发，保证系统仍能生成 cppcrash（不要吞掉）。
+    signal(SIGABRT, SIG_DFL);
+    raise(SIGABRT);
+}
+
+void InstallDeathHooks() {
+    static bool installed = false;
+    if (installed) {
+        return;
+    }
+    installed = true;
+    atexit(HxOnExit);
+    std::set_terminate(HxOnTerminate);
+    signal(SIGABRT, HxOnAbort);
+    HXLOG("HX360E: death hooks installed (atexit/terminate/SIGABRT)");
+}
+
+}  // namespace
+
 void Boot() {  HXLOG("HX360E Boot() called, booting=%{public}d", g_booting.load() ? 1 : 0);
+  InstallDeathHooks();
   bool expected = false;
   if (!g_booting.compare_exchange_strong(expected, true)) {
     HXLOG("HX360E boot: already booting/running, ignored");

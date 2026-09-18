@@ -954,6 +954,43 @@ index 877fe4fe8..2f49beba6 100644
  
  namespace xe {
  namespace cpu {
+diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/cpu/backend/a64/a64_code_cache_posix.cc b/emulator-core/src/main/cpp/xenia/src/xenia/cpu/backend/a64/a64_code_cache_posix.cc
+index 026821de8..51e01c3d5 100644
+--- a/emulator-core/src/main/cpp/xenia/src/xenia/cpu/backend/a64/a64_code_cache_posix.cc
++++ b/emulator-core/src/main/cpp/xenia/src/xenia/cpu/backend/a64/a64_code_cache_posix.cc
+@@ -9,11 +9,13 @@
+ 
+ #include "xenia/cpu/backend/a64/a64_code_cache.h"
+ 
++#include <atomic>
+ #include <cstring>
+ #include <vector>
+ 
+ #include "xenia/base/assert.h"
+ #include "xenia/base/logging.h"
++#include "xenia/gpu/vulkan/hx_diag_log.h"
+ #include "xenia/base/math.h"
+ #include "xenia/base/platform.h"
+ #include "xenia/cpu/backend/a64/a64_stack_layout.h"
+@@ -516,6 +518,18 @@ void PosixA64CodeCache::InitializeUnwindEntry(
+     uint8_t* fde_address = eh_frame_table_ + sizeof(cie_t);
+     __register_frame(fde_address);
+     registered_frames_.push_back(fde_address);
++    // HX360E 诊断：确认注册确实在发生（HX_DIAG_LOG 是 fmt 风格，占位符必须用 {}，
++    // 且指针要先转成整数再传，否则模板实例化失败）。count 记总注册数便于判定。
++    {
++      static std::atomic<uint32_t> hx_reg_count{0};
++      const uint32_t n = hx_reg_count.fetch_add(1, std::memory_order_relaxed) + 1;
++      if (n <= 5 || (n % 500) == 0) {
++        HX_DIAG_LOG("A64UNW2: register fde={} used={} count={}",
++                    static_cast<unsigned long long>(
++                        reinterpret_cast<uintptr_t>(fde_address)),
++                    static_cast<unsigned long long>(p - eh_frame_table_), n);
++      }
++    }
+     eh_frame_table_=p;
+ 
+ #else
 diff --git a/emulator-core/src/main/cpp/xenia/src/xenia/cpu/backend/code_cache_base.h b/emulator-core/src/main/cpp/xenia/src/xenia/cpu/backend/code_cache_base.h
 index 57cd83547..332a0bc73 100644
 --- a/emulator-core/src/main/cpp/xenia/src/xenia/cpu/backend/code_cache_base.h

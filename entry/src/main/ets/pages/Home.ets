@@ -572,6 +572,12 @@ struct Home {
       '--log_gpu_frame_time_breakdown=false',
       '--log_resolve_details=false',
       '--guest_scheduler_stats=true',
+      // guest 崩（未处理的内存访问 / 非法指令）时**不要**终止模拟器。
+      // xenia 默认 guest_crash_is_fatal=true，会走 xe::FatalError → abort()，
+      // 表现就是"游戏黑屏几秒后 App 直接消失"，而且因为 abort 发生在 guest
+      // fiber 线程上、xenia 的日志在 OHOS 上又落不了盘，现场全丢。
+      // 关掉之后崩溃的那条线程只被 park，App 活着，便于事后查 guest 崩在哪。
+      '--guest_crash_is_fatal=false',
       // 系统级超分（XEngine 1.5x）改由设置项 Vulkan|hx360e_xeg_spatial_upscale
       // 控制（默认开）。这里不再传参：命令行优先级高于 --config，传了就会盖掉
       // 用户在设置页里的选择。

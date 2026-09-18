@@ -1259,3 +1259,71 @@ HxPipe(creates/waits)、HxSubmit(fence/queue+submit/polls)，均 1/s 打印。
 2. GPU 侧：pass 数偏多（16.5-21/帧）、4xMSAA 带宽、resolve 9.8ms。
 
 注意：收尾时把 --log_gpu_frame_time_breakdown=true 与这些计数器一起撤掉。
+## Phase 9：忍者龙剑传2「黑屏几秒后 App 静默消失」定位（2026-09-18/19）
+
+### 9.1 现象
+- Pura X View（VOL-AL00 / 7.0.0.105 SP12C00E8R5P3）与 Pura 70 均复现；**LIMBO 正常**；**与设备无关**。
+- 黑屏约 3~4 秒后 App **直接消失**（不是回桌面、无弹窗）。
+
+### 9.2 已排除（逐条有证据）
+| 猜测 | 证据 |
+| --- | --- |
+| JIT / XPM | 该机 `jit available=true`；xe.log 无 host-side fiber crash |
+| 普通崩溃 | faultlogger 近 30 分钟无 cppcrash / jscrash |
+| OOM | hilog 无 lowmem / oom；MemAvailable 3.4GB |
+| 应用卡死 | hilog 无 appfreeze / watchdog 记录 |
+| `guest_crash_is_fatal` | 加 `--guest_crash_is_fatal=false` 后仍死于同一点（**已证伪**） |
+| MapFileView 1GB 失败 | fork 自己写了 fallback（XELOGW），LIMBO 同路径正常，非元凶 |
+
+### 9.3 死因钩子（已确证）
+`ohos_emulator.cc` 的 `Boot()` 里装了 `atexit` / `std::set_terminate` / `SIGABRT` 三个钩子：
+```
+HX360E-DEATH: std::terminate fired -> 非 std::exception 的未知类型异常
+HX360E-DEATH: SIGABRT(6) -> abort()
+```
+=> 某线程抛了**未捕获的 C++ 异常**，类型**非 std::exception 派生**。
+
+### 9.4 根因链（addr2line 逐帧解出）
+```
+guest 启动时通过 KeSetCurrentStackPointers 切 fiber 栈
+  -> XThread::Reenter 故意 throw FiberReentryException        xthread.cc:821
+     （注释点名 Forza Horizon 2 这类游戏；fiber 模式下 longjmp 兜底被设计性禁用）
+  -> 需靠 DWARF 展开穿过 JIT 帧，回到 XThread::Execute 的 catch  xthread.cc:739
+  -> 未捕获 -> terminate -> abort -> App 消失
+```
+`_Unwind_Backtrace` 实测栈（底->顶，共 18 帧）：
+```
+[17] std::function<void()>                 fiber 入口
+[16] xe::kernel::XThread::Execute()        xthread.cc:736   <- catch 所在函数
+[15] xe::cpu::Processor::Execute()         processor.cc:396
+[14] a64::A64Function::CallImpl()          a64_function.cc:44
+[13..6] JIT guest 代码 8 帧（dladdr 解析为 "?" = 匿名可执行页）
+[5]  KeSetCurrentStackPointers shim trampoline
+[4]  xe::kernel::XThread::Reenter()        xthread.cc:808   <- 抛出点
+```
+
+### 9.5 关键结论（推翻过两次错误推断，勿重复）
+- **FDE 注册正常**：`a64_code_cache_posix.cc` 的 `InitializeUnwindEntry` 内会 `__register_frame(FDE)`
+  （fork 已有 Android/LLVM libunwind 的「注册 FDE 而非 CIE」修复），实测注册上千条。
+- **展开本身正常**：`_Unwind_Backtrace` 成功穿过全部 8 个 JIT 帧 => 不是注册/展开问题。
+- **catch 存在且未被平台宏挡住**（`xthread.cc:739`，只有 SIGRTMIN 那段是 `#if XE_PLATFORM_LINUX`）。
+- => 唯一剩下：**personality routine 没在 frame[16] 识别出 catch**。
+
+### 9.6 下一步（唯一待做）
+给展开期的 personality 挂钩子（或改用 fork 里那个**没被用上**的 `__jit_personality`，同文件还留着
+`_UA_CLEANUP_PHASE` 日志），打印每次调用的 `actions` / `IP` / 返回值：
+- frame[16] 压根没被调用 -> frame list / 帧标记问题
+- 调用了但返回 CONTINUE_UNWIND -> 类型匹配（typeinfo）问题
+- 返回 HANDLER_FOUND 却没落地 -> landing pad 地址问题
+
+### 9.7 本轮新增诊断设施（可撤）
+- `ohos_emulator.cc`：`InstallDeathHooks()`（atexit/terminate/SIGABRT + backtrace + `_Unwind_Backtrace`），`Boot()` 里安装。
+- `GamePage.ets`：`startBootProbe()` 启动后 60s 每 200ms 打点 `rss/vm/avail/frames`。
+  **注意**：ArkTS 读 `/proc` 被沙箱挡（实测恒为 0），要 native 读才行。
+- fork `a64_code_cache_posix.cc`：`A64UNW2: register fde=… used=… count=…`（前 5 次 + 每 500 次一条）。
+- 坑：`HX_DIAG_LOG` 是 **fmt 风格**，占位符必须用 `{}`；指针先转 `uintptr_t` 再传（`uint8_t*` 会模板实例化失败）。
+- 启动参数新增 `--guest_crash_is_fatal=false`（已证伪非根治，但可避免 guest 崩时 App 直接消失；要回退删掉即可）。
+
+### 9.8 顺带进展
+- 分卷 zip 安装链路在 Pura 70 上已验证到「入库成功」（选目录 -> 多选分卷 -> 跨卷解压 -> 条目名 GBK->UTF-8 -> 找到 STFS 启动目标）。
+- rar 支持（`@ohos/unrar`）已实现（含加密包 + 进度反馈 + 沙箱暂存保留原名以支持分卷 rar），**尚未真机验证**（缺 rar 样本）。
