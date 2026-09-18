@@ -14,6 +14,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <zlib.h>
+#include <iconv.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -254,6 +255,51 @@ struct Entry {
   int AesSaltLen() const { return 8 + (aes_strength - 1) * 4; }
 };
 
+/**
+ * 把 zip 条目名转成 UTF-8。
+ *
+ * zip 规范里条目名编码由通用标志位 bit 11 声明：置位 = UTF-8，不置位 = 沿用
+ * 创建工具的本地编码（中文 Windows 打包就是 GBK/CP936）。我们之前直接按原始
+ * 字节当文件名写盘，于是中文名的包解出来是 GBK 字节，ArkTS 的 fs 按 UTF-8
+ * 解码自然对不上（statSync 报 13900002 文件不存在，表现为"未找到启动文件"）。
+ *
+ * 用系统 libc 的 iconv 转换；覆盖中文 Windows 打包这一最常见情形，失败则退回
+ * 原始字节（宁可名字乱，也不要写出半个名字）。
+ */
+std::string EntryNameToUtf8(const std::string& raw, bool utf8_flagged) {
+  if (utf8_flagged) {
+    return raw;
+  }
+  bool ascii_only = true;
+  for (size_t i = 0; i < raw.size(); i++) {
+    if (static_cast<unsigned char>(raw[i]) >= 0x80) {
+      ascii_only = false;
+      break;
+    }
+  }
+  if (ascii_only) {
+    return raw;
+  }
+  const iconv_t cd = iconv_open("UTF-8", "GBK");
+  if (cd == reinterpret_cast<iconv_t>(-1)) {
+    return raw;
+  }
+  std::string out;
+  out.resize(raw.size() * 4 + 8);
+  char* in_ptr = const_cast<char*>(raw.data());
+  size_t in_left = raw.size();
+  char* out_ptr = out.data();
+  size_t out_left = out.size();
+  const size_t r = iconv(cd, &in_ptr, &in_left, &out_ptr, &out_left);
+  const size_t produced = out.size() - out_left;
+  iconv_close(cd);
+  if (r == size_t(-1) || in_left != 0) {
+    return raw;
+  }
+  out.resize(produced);
+  return out;
+}
+
 /** 解析中央目录，失败返回 false 并填 error。 */
 bool ParseCentralDir(const std::vector<uint8_t>& cd, std::vector<Entry>* out,
                      std::string* error) {
@@ -278,7 +324,11 @@ bool ParseCentralDir(const std::vector<uint8_t>& cd, std::vector<Entry>* out,
       *error = "压缩包中央目录损坏";
       return false;
     }
-    e.name.assign(reinterpret_cast<const char*>(&cd[p + 46]), nlen);
+    // 条目名编码：bit 11 置位才是 UTF-8，否则要按本地编码（中文 Windows = GBK）
+    // 转成 UTF-8 —— 否则中文名的包解出来是 GBK 字节，ArkTS 的 fs 对不上。
+    const bool utf8_flag = (e.flags & 0x0800) != 0;
+    e.name = EntryNameToUtf8(
+      std::string(reinterpret_cast<const char*>(&cd[p + 46]), nlen), utf8_flag);
     const uint8_t* extra = &cd[p + 46 + nlen];
 
     // Zip64 扩展：只补那些在 32 位字段里被写成全 1 的值，顺序固定。
