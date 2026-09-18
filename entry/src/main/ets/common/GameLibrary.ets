@@ -265,53 +265,67 @@ export class GameLibrary {
         }
       }
       for (const n of names) {
-        probe = `statSync(${dir}/${n})`;
-        if (n === 'game' && !fs.statSync(`${dir}/${n}`).isDirectory()) {
-          return `${dir}/${n}`;
+        const p: string = `${dir}/${n}`;
+        probe = `statSync(${p})`;
+        const st = GameLibrary.stat(p);
+        if (n === 'game' && st !== undefined && !st.isDirectory()) {
+          return p;
         }
       }
       for (const n of names) {
-        probe = `statSync(${dir}/${n})`;
-        if (fs.statSync(`${dir}/${n}`).isDirectory()) {
+        const p: string = `${dir}/${n}`;
+        probe = `statSync(${p})`;
+        const st = GameLibrary.stat(p);
+        if (st === undefined || st.isDirectory()) {
           continue;
         }
-        const dataDir: string = `${dir}/${n}.data`;
-        probe = `exists(${dataDir})`;
-        // accessSync 在不存在时**抛异常**，不能当布尔用（原来就是这里把整个
-        // 扫描打断，导致「已解压但未找到启动文件」）。
-        if (GameLibrary.exists(dataDir) && fs.statSync(dataDir).isDirectory()) {
-          return `${dir}/${n}`;
+        const dataDir: string = `${p}.data`;
+        probe = `statSync(${dataDir})`;
+        // 一律用 stat()：不存在返回 undefined。**不要**用 accessSync 当布尔 ——
+        // 实测这台设备上 accessSync 对不存在的路径并不抛异常，于是会走到
+        // 后面的 statSync 上再抛 13900002，把整个扫描打断。
+        const dst = GameLibrary.stat(dataDir);
+        if (dst !== undefined && dst.isDirectory()) {
+          return p;
         }
       }
       // STFS 包的文件名是十六进制，长度随内容类型而定：GOD 常见 16 位，
       // XBLA（000D0000）实测是 42 位，所以上限要放宽（原来写死 40 会漏掉）。
       const hexName = new RegExp('^[0-9A-Fa-f]{16,64}$');
       for (const n of names) {
-        probe = `statSync(${dir}/${n})`;
-        if (!fs.statSync(`${dir}/${n}`).isDirectory() && hexName.test(n)) {
-          return `${dir}/${n}`;
+        const p: string = `${dir}/${n}`;
+        probe = `statSync(${p})`;
+        const st = GameLibrary.stat(p);
+        if (st !== undefined && !st.isDirectory() && hexName.test(n)) {
+          return p;
         }
       }
       for (const n of names) {
-        probe = `statSync(${dir}/${n})`;
-        if (n.startsWith('game') && !fs.statSync(`${dir}/${n}`).isDirectory()) {
-          return `${dir}/${n}`;
+        const p: string = `${dir}/${n}`;
+        probe = `statSync(${p})`;
+        const st = GameLibrary.stat(p);
+        if (n.startsWith('game') && st !== undefined && !st.isDirectory()) {
+          return p;
         }
       }
       for (const n of names) {
-        probe = `statSync(${dir}/${n})`;
-        if (fs.statSync(`${dir}/${n}`).isDirectory()) {
-          probe = `recurse(${dir}/${n})`;
-          const t: string = GameLibrary.resolveTarget(`${dir}/${n}`, depth + 1);
+        const p: string = `${dir}/${n}`;
+        probe = `statSync(${p})`;
+        const st = GameLibrary.stat(p);
+        if (st !== undefined && st.isDirectory()) {
+          probe = `recurse(${p})`;
+          const t: string = GameLibrary.resolveTarget(p, depth + 1);
           if (t !== '') {
             return t;
           }
         }
       }
       for (const n of names) {
-        probe = `statSync(${dir}/${n})`;
-        if (!fs.statSync(`${dir}/${n}`).isDirectory()) {
-          return `${dir}/${n}`;
+        const p: string = `${dir}/${n}`;
+        probe = `statSync(${p})`;
+        const st = GameLibrary.stat(p);
+        if (st !== undefined && !st.isDirectory()) {
+          return p;
         }
       }
     } catch (e) {
@@ -319,6 +333,21 @@ export class GameLibrary {
       AppLog.exception('library', `resolveTarget failed at [${probe}]`, e);
     }
     return '';
+  }
+
+  /**
+   * 安全 stat：不存在/不可访问一律返回 undefined。
+   *
+   * 为什么必须包：`accessSync` 与 `statSync` 的异常语义在这台设备上并不一致
+   * （实测 accessSync 对不存在的路径**不抛**），拿它们当布尔用会把所在流程
+   * 整个打断。扫描这类"很多条目都可能不合法"的场景，一律走这个封装。
+   */
+  static stat(path: string): fs.Stat | undefined {
+    try {
+      return fs.statSync(path);
+    } catch (e) {
+      return undefined;
+    }
   }
 
   /**
