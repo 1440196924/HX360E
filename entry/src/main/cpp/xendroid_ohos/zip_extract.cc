@@ -52,6 +52,74 @@ uint64_t Rd64(const uint8_t* p) {
   return uint64_t(Rd32(p)) | (uint64_t(Rd32(p + 4)) << 32);
 }
 
+/**
+ * 一卷（一个分卷文件）到全局偏移的映射后，按序打开的一组文件。
+ *
+ * 分卷 ZIP（WinRAR/7-Zip 的"切分卷"）就是把原始 zip 字节流连续切开：
+ * 各卷按顺序首尾相接就是一个完整合法的 zip（EOCD 里的偏移也是相对整个流的），
+ * 所以这里把"单文件随机读"升级成"跨卷随机读"，其余解析逻辑完全不用改。
+ */
+struct VolumeSet {
+  std::vector<int> fds;
+  std::vector<uint64_t> starts;   // 每卷在全局流里的起始偏移
+  uint64_t total = 0;
+
+  ~VolumeSet() {
+    for (int fd : fds) {
+      if (fd >= 0) {
+      }
+    }
+  }
+
+  /** 按给定顺序打开所有卷；全部成功才返回 true。 */
+  bool Open(const std::vector<std::string>& parts) {
+    for (const std::string& p : parts) {
+      const int fd = open(p.c_str(), O_RDONLY);
+      if (fd < 0) {
+        return false;
+      }
+      const off_t end = lseek(fd, 0, SEEK_END);
+      if (end < 0) {
+        return false;
+      }
+      starts.push_back(total);
+      fds.push_back(fd);
+      total += uint64_t(end);
+    }
+    return !fds.empty();
+  }
+
+  bool ReadAt(uint64_t off, void* buf, size_t len) const {
+    uint8_t* p = static_cast<uint8_t*>(buf);
+    if (off + len > total) {
+      return false;
+    }
+    size_t got = 0;
+    while (got < len) {
+      const uint64_t g = off + got;
+      // 定位到卷（卷数很少，线性找足够）。
+      size_t i = fds.size() - 1;
+      for (size_t k = 0; k + 1 < fds.size(); k++) {
+        if (g < starts[k + 1]) {
+          i = k;
+          break;
+        }
+      }
+      const uint64_t in_vol = g - starts[i];
+      const uint64_t vol_avail = (i + 1 < fds.size() ? starts[i + 1] : total) -
+        starts[i];
+      const size_t chunk = size_t(std::min<uint64_t>(len - got,
+        vol_avail - in_vol));
+      const ssize_t n = pread(fds[i], p + got, chunk, off_t(in_vol));
+      if (n <= 0) {
+        return false;
+      }
+      got += size_t(n);
+    }
+    return true;
+  }
+};
+
 /** 顺序读文件（大文件不能用一次 read，会被信号打断）。 */
 bool ReadAt(int fd, uint64_t off, void* buf, size_t len) {
   uint8_t* p = static_cast<uint8_t*>(buf);
@@ -264,7 +332,7 @@ bool ParseCentralDir(const std::vector<uint8_t>& cd, std::vector<Entry>* out,
 }
 
 /** 找到 EOCD（必要时升级到 Zip64）并解析出 total/cd_size/cd_off。 */
-bool ReadDirectoryInfo(int fd, uint64_t file_size, uint64_t* total_out,
+bool ReadDirectoryInfo(const VolumeSet& vols, uint64_t file_size, uint64_t* total_out,
                        uint64_t* cd_size_out, uint64_t* cd_off_out,
                        std::string* error) {
   const uint64_t tail_len = std::min<uint64_t>(file_size, 22 + 65535);
@@ -274,7 +342,7 @@ bool ReadDirectoryInfo(int fd, uint64_t file_size, uint64_t* total_out,
   }
   std::vector<uint8_t> tail;
   tail.resize(static_cast<size_t>(tail_len));
-  if (!ReadAt(fd, file_size - tail_len, tail.data(), tail.size())) {
+  if (!vols.ReadAt(file_size - tail_len, tail.data(), tail.size())) {
     *error = "读取压缩包失败";
     return false;
   }
@@ -300,11 +368,11 @@ bool ReadDirectoryInfo(int fd, uint64_t file_size, uint64_t* total_out,
                       cd_off == 0xFFFFFFFFull;
   if (need64 && eocd_abs >= 20) {
     uint8_t loc[20];
-    if (ReadAt(fd, eocd_abs - 20, loc, sizeof(loc)) &&
+    if (vols.ReadAt(eocd_abs - 20, loc, sizeof(loc)) &&
         Rd32(loc) == kSigZip64Loc) {
       const uint64_t z64_off = Rd64(loc + 8);
       uint8_t z64[56];
-      if (ReadAt(fd, z64_off, z64, sizeof(z64)) &&
+      if (vols.ReadAt(z64_off, z64, sizeof(z64)) &&
           Rd32(z64) == kSigZip64Eocd) {
         total = Rd64(z64 + 32);
         cd_size = Rd64(z64 + 40);
@@ -324,12 +392,14 @@ bool ReadDirectoryInfo(int fd, uint64_t file_size, uint64_t* total_out,
 
 }  // namespace
 
-ExtractResult Extract(const std::string& zip_path, const std::string& dest_dir,
-                      const std::string& password,
+ExtractResult Extract(const std::vector<std::string>& parts,
+                      const std::string& dest_dir, const std::string& password,
                       const ProgressFn& on_progress) {
   ExtractResult res;
-  const int fd = open(zip_path.c_str(), O_RDONLY);
-  if (fd < 0) {
+  // 分卷 ZIP：各卷按顺序拼接就是一个完整 zip，所以这里统一按"卷集合"打开，
+  // 单卷就是只有一卷的特例。
+  VolumeSet vols;
+  if (!vols.Open(parts)) {
     res.error = "打开压缩包失败";
     return res;
   }
@@ -339,34 +409,29 @@ ExtractResult Extract(const std::string& zip_path, const std::string& dest_dir,
   bool has_encrypted = false;
 
   {
-    const off_t end = lseek(fd, 0, SEEK_END);
-    if (end <= 0) {
-      close(fd);
+    const uint64_t end = vols.total;
+    if (end == 0) {
       res.error = "压缩包为空或无法读取";
       return res;
     }
     uint64_t total = 0, cd_size = 0, cd_off = 0;
     std::string err;
-    if (!ReadDirectoryInfo(fd, uint64_t(end), &total, &cd_size, &cd_off, &err)) {
-      close(fd);
+    if (!ReadDirectoryInfo(vols, end, &total, &cd_size, &cd_off, &err)) {
       res.error = err;
       return res;
     }
     std::vector<uint8_t> cd;
     cd.resize(static_cast<size_t>(cd_size));
-    if (!ReadAt(fd, cd_off, cd.data(), cd.size())) {
-      close(fd);
+    if (!vols.ReadAt(cd_off, cd.data(), cd.size())) {
       res.error = "读取中央目录失败";
       return res;
     }
     if (!ParseCentralDir(cd, &entries, &err)) {
-      close(fd);
       res.error = err;
       return res;
     }
   }
   if (entries.empty()) {
-    close(fd);
     res.error = "压缩包里没有文件";
     return res;
   }
@@ -382,7 +447,6 @@ ExtractResult Extract(const std::string& zip_path, const std::string& dest_dir,
     }
   }
   if (has_encrypted && password.empty()) {
-    close(fd);
     res.need_password = true;
     res.error = "该压缩包已加密，请输入密码";
     return res;
@@ -402,7 +466,6 @@ ExtractResult Extract(const std::string& zip_path, const std::string& dest_dir,
     std::string clean;
     if (!SanitizeName(e.name, &clean)) {
       res.error = "压缩包内含有非法路径：" + e.name;
-      close(fd);
       return res;
     }
     const std::string dst = dest_dir + "/" + clean;
@@ -413,9 +476,8 @@ ExtractResult Extract(const std::string& zip_path, const std::string& dest_dir,
 
     // 本地头：数据起点要用本地头的 name/extra 长度算（可能与中央目录不同）。
     uint8_t lh[30];
-    if (!ReadAt(fd, e.local_off, lh, sizeof(lh)) || Rd32(lh) != kSigLocal) {
+    if (!vols.ReadAt(e.local_off, lh, sizeof(lh)) || Rd32(lh) != kSigLocal) {
       res.error = "压缩包条目损坏：" + clean;
-      close(fd);
       return res;
     }
     const uint16_t l_nlen = Rd16(lh + 26);
@@ -438,13 +500,11 @@ ExtractResult Extract(const std::string& zip_path, const std::string& dest_dir,
       mac_key_len = 10;   // WinZip AES 的 MAC key 长度固定 10（截断的 SHA1）
       if (e.comp_size < uint64_t(salt_len) + 2 + 10) {
         res.error = "加密条目长度异常：" + clean;
-        close(fd);
         return res;
       }
       uint8_t salt[16];
-      if (!ReadAt(fd, data_off, salt, size_t(salt_len))) {
+      if (!vols.ReadAt(data_off, salt, size_t(salt_len))) {
         res.error = "读取压缩包失败";
-        close(fd);
         return res;
       }
       data_off += uint64_t(salt_len);
@@ -454,9 +514,8 @@ ExtractResult Extract(const std::string& zip_path, const std::string& dest_dir,
                      size_t(salt_len), 1000, derived,
                      size_t(aes_key_len) + 2 + 10);
       uint8_t verifier[2];
-      if (!ReadAt(fd, data_off, verifier, 2)) {
+      if (!vols.ReadAt(data_off, verifier, 2)) {
         res.error = "读取压缩包失败";
-        close(fd);
         return res;
       }
       data_off += 2;
@@ -464,7 +523,6 @@ ExtractResult Extract(const std::string& zip_path, const std::string& dest_dir,
           verifier[1] != derived[aes_key_len + 1]) {
         res.bad_password = true;
         res.error = "密码错误";
-        close(fd);
         return res;
       }
       memcpy(aes_key, derived, size_t(aes_key_len));
@@ -474,13 +532,11 @@ ExtractResult Extract(const std::string& zip_path, const std::string& dest_dir,
     } else if (e.encrypted) {
       if (e.comp_size < 12) {
         res.error = "加密条目长度异常：" + clean;
-        close(fd);
         return res;
       }
       uint8_t hdr[12];
-      if (!ReadAt(fd, data_off, hdr, sizeof(hdr))) {
+      if (!vols.ReadAt(data_off, hdr, sizeof(hdr))) {
         res.error = "读取压缩包失败";
-        close(fd);
         return res;
       }
       data_off += 12;
@@ -492,7 +548,6 @@ ExtractResult Extract(const std::string& zip_path, const std::string& dest_dir,
       if (hdr[11] != check) {
         res.bad_password = true;
         res.error = "密码错误";
-        close(fd);
         return res;
       }
       use_zipcrypto = true;
@@ -503,7 +558,6 @@ ExtractResult Extract(const std::string& zip_path, const std::string& dest_dir,
     FILE* fp = fopen(dst.c_str(), "wb");
     if (fp == nullptr) {
       res.error = "无法写入文件：" + clean;
-      close(fd);
       return res;
     }
 
@@ -513,7 +567,6 @@ ExtractResult Extract(const std::string& zip_path, const std::string& dest_dir,
     const bool inflate_used = (e.method == 8);
     if (inflate_used && inflateInit2(&zs, -15) != Z_OK) {
       fclose(fp);
-      close(fd);
       res.error = "初始化解压器失败";
       return res;
     }
@@ -530,7 +583,7 @@ ExtractResult Extract(const std::string& zip_path, const std::string& dest_dir,
 
     while (remain > 0 && !failed) {
       const size_t want = size_t(std::min<uint64_t>(remain, kChunk));
-      if (!ReadAt(fd, data_off, in.data(), want)) {
+      if (!vols.ReadAt(data_off, in.data(), want)) {
         failed = true;
         fail_msg = "压缩包数据残缺：" + clean;
         break;
@@ -611,7 +664,7 @@ ExtractResult Extract(const std::string& zip_path, const std::string& dest_dir,
     // 收尾校验：AES 看 HMAC，其余看 crc32。
     if (!failed && !res.canceled && mac_used) {
       uint8_t expect[10];
-      if (!ReadAt(fd, data_off, expect, sizeof(expect))) {
+      if (!vols.ReadAt(data_off, expect, sizeof(expect))) {
         failed = true;
         fail_msg = "压缩包数据残缺：" + clean;
       } else {
@@ -633,21 +686,17 @@ ExtractResult Extract(const std::string& zip_path, const std::string& dest_dir,
     fclose(fp);
     if (failed) {
       unlink(dst.c_str());
-      close(fd);
       res.error = fail_msg;
       return res;
     }
     if (res.canceled) {
       unlink(dst.c_str());
-      close(fd);
       return res;
     }
     file_count++;
     res.written = written;
     res.files = file_count;
   }
-
-  close(fd);
   if (on_progress) {
     ExtractProgress ep;
     ep.done = total_bytes;

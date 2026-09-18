@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <vector>
 
 namespace hxzip {
 
@@ -35,14 +36,27 @@ struct ExtractProgress {
 using ProgressFn = std::function<bool(const ExtractProgress&)>;
 
 /**
- * 把 zip_path 解压到 dest_dir（内部会按需建子目录）。
+ * 把 zip（可多卷）解压到 dest_dir（内部会按需建子目录）。
  *
+ * @param part_paths 分卷文件路径，**必须按卷顺序**给出（WinRAR/7-Zip 的
+ *                   `.z01/.z02/.../.zip`、`.001/.002/...` 都是连续切分，
+ *                   按序拼接即一个完整 zip）。单卷就传一个元素。
  * @param password 空串 = 没有密码。包内若有加密项且 password 为空，直接返回
  *                 need_password=true（不落任何文件）。
  * @return 结果；ok=false 时看 error / need_password / bad_password。
  */
-ExtractResult Extract(const std::string& zip_path, const std::string& dest_dir,
-                      const std::string& password,
+ExtractResult Extract(const std::vector<std::string>& part_paths,
+                      const std::string& dest_dir, const std::string& password,
                       const ProgressFn& on_progress);
+
+/** 单卷便捷重载。 */
+inline ExtractResult Extract(const std::string& zip_path,
+                             const std::string& dest_dir,
+                             const std::string& password,
+                             const ProgressFn& on_progress) {
+  std::vector<std::string> one;
+  one.push_back(zip_path);
+  return Extract(one, dest_dir, password, on_progress);
+}
 
 }  // namespace hxzip

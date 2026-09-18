@@ -264,9 +264,11 @@ export class GameInstall {
     onProgress(p);
 
     const options = new picker.DocumentSelectOptions();
-    options.maxSelectNumber = 1;
+    // 多选：分卷 zip（.z01/.z02/.../.zip 或 .001/.002/...）需要一次把各卷都选上
+    // —— 选择器只授权被选中的文件，同目录里没选中的分卷我们读不到。
+    options.maxSelectNumber = 32;
     options.fileSuffixFilters = ['压缩包|.zip'];
-    AppLog.i('install', 'archive pick: open picker (mode=FILE suffix=zip)');
+    AppLog.i('install', 'archive pick: open picker (mode=FILE multi suffix=zip)');
     let uris: string[] = [];
     try {
       const docPicker = new picker.DocumentViewPicker(ctx);
@@ -281,19 +283,48 @@ export class GameInstall {
       return '已取消';
     }
 
-    const srcPath: string = GameInstall.uriToPath(uris[0]);
-    const displayName: string = GameInstall.uriBaseName(srcPath);
-    hilog.info(DOMAIN, TAG, 'install archive: path=%{public}s', srcPath);
+    // 1) 把选中的文件按卷序排好（分卷 zip 各卷按序拼接才是完整 zip）。
+    const ordered: string[] = GameInstall.orderVolumes(uris);
+    const volNames: string[] = [];
+    for (const u of ordered) {
+      volNames.push(GameInstall.uriBaseName(u));
+    }
+    AppLog.i('install',
+      `archive volumes(${ordered.length}): ${volNames.join(' | ')}`);
+    const displayName: string = GameInstall.displayNameForArchive(volNames[0]);
 
     const id: string = GameLibrary.makeId(displayName, Date.now());
     const dir: string = GameLibrary.gameDir(filesDir, id);
     GameLibrary.ensureDir(dir);
 
+    // 2) 先把压缩包复制进沙箱：选择器给的是 URI/公共目录路径，只有 ArkTS 的 fs
+    //    认 URI，native 的 open() 读不了，所以统一落进沙箱再交给 native 解压。
+    p.active = true;
+    p.detail = ordered.length > 1
+      ? `正在复制 ${ordered.length} 个分卷到沙箱…`
+      : '正在复制压缩包到沙箱…';
+    p.percent = 0;
+    onProgress(p);
+    const staged: string[] = [];
+    try {
+      for (let i = 0; i < ordered.length; i++) {
+        const dst: string = `${dir}/__in_${i}.zip`;
+        fs.copyFileSync(ordered[i], dst);
+        staged.push(dst);
+      }
+    } catch (e) {
+      AppLog.exception('install', 'stage archive failed', e);
+      GameInstall.cleanup(filesDir, id);
+      return '复制压缩包到沙箱失败（见导出日志）';
+    }
+    AppLog.i('install', `archive staged: ${staged.length} file(s)`);
+    const joined: string = staged.join('\n');
+
     // 1) 解压（可能需要密码，最多让用户重试 3 次）。
     let password: string = '';
     let attempts: number = 0;
     while (true) {
-      const r: string = await GameInstall.runExtract(srcPath, dir, password,
+      const r: string = await GameInstall.runExtract(joined, dir, password,
         p, onProgress, control);
       if (r === '') {
         break;   // 解压成功
@@ -451,6 +482,63 @@ export class GameInstall {
   }
 
   // ---- 内部工具 ----
+
+  /**
+   * 把选中的文件按「分卷顺序」排好。
+   *
+   * 支持两种常见命名：
+   *   - WinRAR/7-Zip 切分卷：`X.z01`、`X.z02`…`X.zip`（最后一个卷是 .zip）
+   *   - 数字卷：`X.001`、`X.002`…（部分工具这么切）
+   * 其余情况按原顺序返回（单卷就是原样一个）。
+   */
+  private static orderVolumes(uris: string[]): string[] {
+    if (uris.length <= 1) {
+      return uris;
+    }
+    const names: string[] = [];
+    for (const u of uris) {
+      names.push(GameInstall.uriBaseName(u));
+    }
+    // 用「去掉卷后缀」的基名分组，组内按卷序号排；.zip（最后一卷）排最后。
+    const idxOf = (name: string): number => {
+      const lower: string = name.toLowerCase();
+      if (lower.endsWith('.zip')) {
+        return 100000;   // 最后一卷
+      }
+      const m = lower.match(/\.z(\d{2,})$/);
+      if (m !== null) {
+        return parseInt(m[1], 10);
+      }
+      const m2 = lower.match(/\.(\d{3,})$/);
+      if (m2 !== null) {
+        return parseInt(m2[1], 10);
+      }
+      const m3 = lower.match(/\.part(\d+)\.zip$/);
+      if (m3 !== null) {
+        return parseInt(m3[1], 10);
+      }
+      return 0;
+    };
+    const idx: number[] = [];
+    for (let i = 0; i < uris.length; i++) {
+      idx.push(i);
+    }
+    idx.sort((a: number, b: number) => idxOf(names[a]) - idxOf(names[b]));
+    const out: string[] = [];
+    for (const i of idx) {
+      out.push(uris[i]);
+    }
+    return out;
+  }
+
+  /** 分卷包名 → 显示名（去掉 .z01 / .001 / .part1 这类卷后缀）。 */
+  private static displayNameForArchive(name: string): string {
+    let n: string = name.replace(/\.zip$/i, '');
+    n = n.replace(/\.z\d{2,}$/i, '');
+    n = n.replace(/\.\d{3,}$/i, '');
+    n = n.replace(/\.part\d+$/i, '');
+    return n === '' ? name : n;
+  }
 
   private static cleanup(filesDir: string, id: string): void {
     try {

@@ -86,14 +86,35 @@ napi_value ExtractStart(napi_env env, napi_callback_info info) {
   const std::string dest = GetString(env, args[1]);
   const std::string password = argc >= 3 ? GetString(env, args[2]) : std::string();
 
+  // 第一参数是多卷路径：用 '\n' 分隔（路径里不可能出现换行），
+  // 顺序由调用方保证（分卷 zip 按序拼接才是完整 zip）。单卷就是一段。
+  std::vector<std::string> parts;
+  {
+    size_t start = 0;
+    while (start <= zip.size()) {
+      const size_t nl = zip.find('\n', start);
+      const size_t end = (nl == std::string::npos) ? zip.size() : nl;
+      if (end > start) {
+        parts.push_back(zip.substr(start, end - start));
+      }
+      if (nl == std::string::npos) {
+        break;
+      }
+      start = nl + 1;
+    }
+  }
+  if (parts.empty()) {
+    return MakeString(env, "");
+  }
+
   std::lock_guard<std::mutex> lock(g_job_mu);
   if (g_job != nullptr) {
     return MakeString(env, "");
   }
   auto* job = new ZipJob();
-  job->worker = std::thread([job, zip, dest, password]() {
+  job->worker = std::thread([job, parts, dest, password]() {
     const hxzip::ExtractResult r = hxzip::Extract(
-      zip, dest, password, [job](const hxzip::ExtractProgress& p) {
+      parts, dest, password, [job](const hxzip::ExtractProgress& p) {
         std::lock_guard<std::mutex> l(job->mu);
         job->done = p.done;
         job->total = p.total;
