@@ -1327,3 +1327,30 @@ guest 启动时通过 KeSetCurrentStackPointers 切 fiber 栈
 ### 9.8 顺带进展
 - 分卷 zip 安装链路在 Pura 70 上已验证到「入库成功」（选目录 -> 多选分卷 -> 跨卷解压 -> 条目名 GBK->UTF-8 -> 找到 STFS 启动目标）。
 - rar 支持（`@ohos/unrar`）已实现（含加密包 + 进度反馈 + 沙箱暂存保留原名以支持分卷 rar），**尚未真机验证**（缺 rar 样本）。
+### 9.9 结论与修复（2026-09-19 已验证）
+
+**根因不是展开器，而是「走了哪条 reentry 路径」**：
+
+```
+guest_scheduler=true（kernel_flags.cc:24 默认 true）
+  -> guest 线程被放到 fiber 上跑（xthread.cc:452 GuestScheduler::enabled() && !is_host_thread()）
+  -> XThread::Reenter() 里 longjmp 分支的守卫是 !fiber_
+     （xthread.cc:808，注释：fiber_reentry_longjmp "Plain host threads only;
+       the cooperative scheduler keeps the exception path"）
+  -> fiber 线程只能 throw FiberReentryException
+  -> 依赖 DWARF 展开穿过 JIT 帧（OHOS 上失败）
+  -> std::terminate -> abort -> App 静默消失
+```
+
+LIMBO / 真三国无双7 为什么没事：它们不走 KeSetCurrentStackPointers，所以这条路径
+从来没被触发过；只有忍龙2 这种「fiber 栈切换」的游戏会撞上。
+
+**修复（已验证）**：启动参数加 `--guest_scheduler=false`
+=> 线程是真实 host 线程 => `fiber_ == nullptr` => Reenter 走 longjmp => **不产生 C++ 异常**。
+验证：忍龙2 越过黑屏进游戏，App 存活，app.log 里 `HX360E-DEATH` 计数 0。
+
+**代价（待评估）**：协作式调度器本来是默认开的（可能对性能/线程开销有用），
+全局关掉可能影响其他游戏的表现；若要保守，可改成按游戏配置（命令行 > 游戏配置 > 全局）。
+
+**真正的根治方向（未做）**：查清 OHOS 上「异常展开穿过 JIT 帧」为何失败
+（personality 是否被调用 / 返回什么，见 9.6），修好之后就能恢复调度器。
