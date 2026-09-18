@@ -241,8 +241,8 @@ function ImportMenu(params: ImportMenuParams) {
 
     Divider().color($r('app.color.divider')).margin({ left: 12, right: 12 })
 
-    ImportMenuRow('从压缩包安装（zip）',
-      '分卷包(.z01/.001 等)请把所有卷一起选中', true, params.onArchive)
+    ImportMenuRow('从压缩包安装（zip / rar）',
+      '分卷包(.z01/.001/.partN)请把所有卷一起选中', true, params.onArchive)
   }
   .width(232)
   .padding({ top: 4, bottom: 4 })

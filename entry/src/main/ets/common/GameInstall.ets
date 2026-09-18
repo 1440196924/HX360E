@@ -6,6 +6,9 @@ import testNapi from 'libentry.so';
 import { GameLibrary, GameMeta } from './GameLibrary';
 import { copyRanges } from './InstallCopy';
 import { AppLog } from './AppLog';
+// rar 解压：基于 UnRAR 的 ohpm 包（Apache-2.0），只接受沙箱路径，支持加密包。
+import { UnrarApi } from '@ohos/unrar';
+import { extractRar } from './RarExtract';
 
 const DOMAIN = 0x0000;
 const TAG = 'HX360E';
@@ -299,23 +302,27 @@ export class GameInstall {
     GameLibrary.ensureDir(dir);
 
     // 2) 先把压缩包复制进沙箱：选择器给的是 URI/公共目录路径，只有 ArkTS 的 fs
-    //    认 URI，native 的 open() 读不了，所以统一落进沙箱再交给 native 解压。
+    //    认 URI，native 的 open() 读不了；rar 库也明确要求沙箱路径。所以统一落盘。
+    //    注意**保留原文件名**并放在独立子目录里：多卷 rar（.part1.rar / .r00…）
+    //    要靠"同目录同名的相邻卷"去找后续卷，改名就找不到了。
     p.active = true;
     p.detail = ordered.length > 1
       ? `正在复制 ${ordered.length} 个分卷到沙箱…`
       : '正在复制压缩包到沙箱…';
     p.percent = 0;
     onProgress(p);
+    const stageDir: string = `${dir}/__in`;
+    GameLibrary.ensureDir(stageDir);
     const staged: string[] = [];
     try {
       for (let i = 0; i < ordered.length; i++) {
-        const dst: string = `${dir}/__in_${i}.zip`;
+        const dst: string = `${stageDir}/${GameInstall.uriBaseName(ordered[i])}`;
         // 不能用 fs.copyFileSync(uri, path)：选择器给的是 file://docs/... URI，
         // copyFileSync 会报 13900002（文件不存在）。必须先用 openSync(uri) 拿到
         // fd 再按显式 offset 读写 —— 与本文件下半部分 copyRanges 的做法一致
         // （本设备上不显式传 offset 的 read/write 会写出全 0）。
         const n: number = GameInstall.copyInto(ordered[i], dst);
-        AppLog.i('install', `archive staged[${i}]: ${n} bytes`);
+        AppLog.i('install', `archive staged[${i}]: ${n} bytes -> ${GameInstall.uriBaseName(ordered[i])}`);
         staged.push(dst);
       }
     } catch (e) {
@@ -324,13 +331,23 @@ export class GameInstall {
       return '复制压缩包到沙箱失败（见导出日志）';
     }
     AppLog.i('install', `archive staged: ${staged.length} file(s)`);
-    const joined: string = staged.join('\n');
 
-    // 1) 解压（可能需要密码，最多让用户重试 3 次）。
+    // 3) 认内容格式：分卷命名只说明"怎么切的"，内容可能是 zip 也可能是 rar。
+    const magic: string = GameInstall.readMagic(staged[0]);
+    AppLog.i('install', `archive magic=${magic}`);
+    if (magic !== 'zip' && magic !== 'rar') {
+      GameInstall.cleanup(filesDir, id);
+      if (magic === '7z') {
+        return '这是 7z 包，暂不支持；请先解压后重新打包成 zip';
+      }
+      return '无法识别的压缩包格式（目前支持 zip / rar）';
+    }
+
+    // 4) 解压（可能需要密码，最多让用户重试 3 次）。
     let password: string = '';
     let attempts: number = 0;
     while (true) {
-      const r: string = await GameInstall.runExtract(joined, dir, password,
+      const r: string = await GameInstall.extractOnce(magic, staged, dir, password,
         p, onProgress, control);
       if (r === '') {
         break;   // 解压成功
@@ -501,6 +518,105 @@ export class GameInstall {
   }
 
   // ---- 内部工具 ----
+
+  /** 读文件头判格式：zip / rar / 7z / unknown。 */
+  private static readMagic(path: string): string {
+    try {
+      const f = fs.openSync(path, fs.OpenMode.READ_ONLY);
+      try {
+        const buf = new ArrayBuffer(6);
+        const n: number = fs.readSync(f.fd, buf, { offset: 0, length: 6 });
+        const u = new Uint8Array(buf);
+        if (n >= 2 && u[0] === 0x50 && u[1] === 0x4B) {
+          return 'zip';
+        }
+        if (n >= 4 && u[0] === 0x52 && u[1] === 0x61 && u[2] === 0x72 &&
+          u[3] === 0x21) {
+          return 'rar';
+        }
+        if (n >= 6 && u[0] === 0x37 && u[1] === 0x7A && u[2] === 0xBC &&
+          u[3] === 0xAF && u[4] === 0x27 && u[5] === 0x1C) {
+          return '7z';
+        }
+      } finally {
+        fs.closeSync(f);
+      }
+    } catch (e) {
+      AppLog.exception('install', 'readMagic failed', e);
+    }
+    return 'unknown';
+  }
+
+  /** 按格式分发一次解压；返回 '' = 成功。 */
+  private static async extractOnce(magic: string, staged: string[],
+                                  dir: string, password: string,
+                                  p: InstallProgress,
+                                  onProgress: (p: InstallProgress) => void,
+                                  control: InstallControl): Promise<string> {
+    if (magic === 'rar') {
+      return GameInstall.runRarExtract(staged[0], dir, password, p, onProgress,
+        control);
+    }
+    // zip：多卷按顺序用 '\n' 拼给 native（各卷按序拼接才是完整 zip）。
+    return GameInstall.runExtract(staged.join('\n'), dir, password, p,
+      onProgress, control);
+  }
+
+  /**
+   * 用 @ohos/unrar 解压 rar（含加密包）。
+   *
+   * 该库没有进度回调，只能整包 await 完再置 100%；取消也无法中断（解压期间
+   * 只记录取消请求，完成后由上层丢弃目录）。
+   */
+  private static async runRarExtract(path: string, destDir: string,
+                                     password: string, p: InstallProgress,
+                                     onProgress: (p: InstallProgress) => void,
+                                     control: InstallControl): Promise<string> {
+    p.active = true;
+    p.detail = '正在解压 rar…';
+    p.percent = 0;
+    p.stats = '';
+    onProgress(p);
+
+    let encrypted: number = 0;
+    try {
+      encrypted = UnrarApi.isEncrypted(path);
+    } catch (e) {
+      AppLog.exception('install', 'rar isEncrypted failed', e);
+      encrypted = 0;
+    }
+    AppLog.i('install',
+      `rar: encrypted=${encrypted} password=${password !== '' ? 'yes' : 'no'}`);
+    if (encrypted > 0 && password === '') {
+      return 'need_password';
+    }
+    if (control.canceled) {
+      return 'canceled';
+    }
+    try {
+      // 同步 extract() 放到任务池线程（见 RarExtract.ets 的说明：自带的异步
+      // 接口没有 .catch，失败时会永久挂起）。
+      const ret: Object = await taskpool.execute(extractRar, path, destDir, password);
+      const r: string = ret as string;
+      AppLog.i('install', `rar: extract returned [${r}]`);
+      if (r === 'need_password') {
+        return 'need_password';
+      }
+      // 成功时返回固定文案「解压成功」；其余（含口令错）都视为失败。
+      if (r !== '解压成功') {
+        return encrypted > 0
+          ? 'bad_password'
+          : (r !== '' && r !== 'exception' ? r : '解压失败（见导出日志）');
+      }
+    } catch (e) {
+      AppLog.exception('install', 'rar extract failed', e);
+      return encrypted > 0 ? 'bad_password' : '解压失败（见导出日志）';
+    }
+    p.percent = 99;
+    p.detail = '正在解压 rar…';
+    onProgress(p);
+    return '';
+  }
 
   /**
    * 把选择器给的 URI 文件复制到沙箱路径，返回复制的字节数。

@@ -21,3 +21,7 @@
 -enable-toplevel-obfuscation
 -enable-filename-obfuscation
 -enable-export-obfuscation
+
+# @ohos/unrar 要求不被混淆
+-keep
+./oh_modules/@ohos/unrar
