@@ -1,12 +1,21 @@
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { common } from '@kit.AbilityKit';
 import { deviceInfo } from '@kit.BasicServicesKit';
-import { window, display, LengthMetrics, SymbolGlyphModifier } from '@kit.ArkUI';
+import {
+  window,
+  display,
+  LengthMetrics,
+  SymbolGlyphModifier,
+  UIContext,
+  ComponentContent,
+} from '@kit.ArkUI';
 import { fileIo } from '@kit.CoreFileKit';
 import {
   HdsTabs,
   HdsTabsController,
+  HdsTabsAttribute,
   HdsNavDestination,
+  HdsNavDestinationAttribute,
   HdsNavDestinationTitleMode,
   TitleBarStyleOptions,
   HdsNavigationMenuItemOptions,
@@ -27,6 +36,8 @@ import { Orientation } from '../common/Orientation';
 
 const DOMAIN = 0x0000;
 const TAG = 'HX360E';
+/** 标题栏「+」图标的组件 id：作为导入菜单的锚点。 */
+const IMPORT_BTN_ID: string = 'hx360e_import_btn';
 
 /**
  * 游戏卡片：封面 + 名称，长按弹系统上下文菜单（背景模糊、卡片预览浮起、菜单贴下方）。
@@ -204,6 +215,58 @@ struct GameRow {
  * 颜色统一用 app.color.* 资源，深色模式自动跟随系统。
  * 原 demo 首页保留为「导入游戏（调试台）」页（pages/Index）。
  */
+/** 导入方式菜单的参数（ComponentContent 走单参数最省事）。 */
+class ImportMenuParams {
+  apiLevel: number = 0;
+  onFolder: () => void = () => {
+  };
+  onArchive: () => void = () => {
+  };
+}
+
+/**
+ * 导入方式弹出菜单的内容。
+ *
+ * 必须是**全局** @Builder：openMenu 用的 wrapBuilder 只接受全局 @Builder 函数，
+ * 传 struct 成员方法会报「wrapBuilder's parameter should be '@Builder' function」。
+ */
+@Builder
+function ImportMenu(params: ImportMenuParams) {
+  Column() {
+    ImportMenuRow('从文件夹安装',
+      params.apiLevel >= 26
+        ? 'GOD / 多 data 文件包'
+        : `本机 API ${params.apiLevel} 不支持选文件夹`,
+      true, params.onFolder)
+
+    Divider().color($r('app.color.divider')).margin({ left: 12, right: 12 })
+
+    ImportMenuRow('从压缩包安装（zip）', '解压到沙箱，保留目录结构', true,
+      params.onArchive)
+  }
+  .width(232)
+  .padding({ top: 4, bottom: 4 })
+  .backgroundColor($r('app.color.card_bg'))
+  .borderRadius(12)
+}
+
+@Builder
+function ImportMenuRow(label: string, hint: string, enabled: boolean,
+                       action: () => void) {
+  Column({ space: 2 }) {
+    Text(label)
+      .fontSize(15)
+      .fontColor(enabled ? $r('app.color.text_primary')
+        : $r('app.color.text_hint'))
+    Text(hint).fontSize(11).fontColor($r('app.color.text_hint'))
+  }
+  .alignItems(HorizontalAlign.Start)
+  .width('100%')
+  .padding({ left: 16, right: 16, top: 10, bottom: 10 })
+  .opacity(enabled ? 1 : 0.6)
+  .onClick(action)
+}
+
 @Entry
 @Component
 struct Home {
@@ -231,10 +294,11 @@ struct Home {
   @State installStats: string = '';
   // 压缩包加密时的密码浮层。
   @State passwordVisible: boolean = false;
-  /** 「导入方式」选择浮层：文件夹 / 压缩包。 */
-  @State importChoiceVisible: boolean = false;
   /** 系统 API 等级；「选文件夹」需要 26+，低版本只能走压缩包。 */
   private apiLevel: number = 0;
+  /** 当前打开的导入菜单（closeMenu 需要同一个 ComponentContent 句柄）。 */
+  private importMenuContent: ComponentContent<ImportMenuParams> | undefined =
+    undefined;
   @State passwordPrompt: string = '';
   @State passwordInput: string = '';
   private passwordResolver: ((v: string) => void) | undefined = undefined;
@@ -302,12 +366,14 @@ struct Home {
       icon: glyph,
       isEnabled: true,
       action: () => {
-        // 先弹「导入方式」：文件夹 / 压缩包。
-        // 原因：系统的「选择文件夹」模式（DocumentSelectMode.FOLDER）要
-        // API 26+ 才支持，API 24 设备上选择器会秒退并返回 0 个（用户看到的是
-        // 选择器弹一句"功能暂不支持，敬请期待"），那种设备只能走压缩包。
-        this.importChoiceVisible = true;
+        // 打开锚定在「+」下方的弹出菜单（系统推荐接口：
+        // UIContext.PromptAction.openMenu + HDS 图标项的 componentId 作锚点）。
+        // 背景：系统的「选择文件夹」要 API 26+，API 24 上选择器会秒退返回空，
+        // 所以菜单里同时给出「压缩包」这条路。
+        this.openImportMenu();
       },
+      // 作为 openMenu 的锚点：菜单会弹在这个图标下方。
+      componentId: IMPORT_BTN_ID,
     };
     const item: HdsNavigationMenuItemOptions = { content: icon };
     items.push(item);
@@ -653,99 +719,62 @@ struct Home {
   }
 
   /**
-   * 「导入方式」选择浮层。
+   * 打开「导入方式」弹出菜单，锚定在标题栏「+」下方。
    *
-   * 两条路的差别（2026-09 实测）：
-   *  - 文件夹：走 DocumentSelectMode.FOLDER，**需要系统 API 26+**。API 24 设备上
-   *    选择器会打开后秒退并返回 0 个（用户看到选择器自己弹"功能暂不支持"）。
-   *  - 压缩包：走文件模式（各版本都支持），解压到沙箱，**保留目录结构**。
+   * 用官方接口 UIContext.PromptAction.openMenu(content, target)：content 是
+   * ComponentContent（包一份 @Builder），target 用 HDS 图标项的 componentId
+   * 作锚点，菜单默认贴在锚点下方，不需要自己算坐标。
    *
-   * 所以 API < 26 时直接把用户引到压缩包这条路，不再去踩那个系统的坑。
+   * 注意：wrapBuilder 只接受**全局** @Builder 函数，所以菜单内容写在文件顶部
+   * 的 ImportMenu（不是本 struct 的成员方法）。
    */
-  @Builder
-  importChoiceOverlay() {
-    Column() {
-      Column({ space: 10 }) {
-        Text('导入游戏')
-          .fontSize(18)
-          .fontWeight(FontWeight.Bold)
-          .fontColor($r('app.color.text_primary'))
-          .width('100%')
-
-        this.importChoiceRow('从文件夹安装',
-          this.folderModeSupported()
-            ? 'GOD / 多 data 文件包'
-            : `本机 API ${this.apiLevel} 不支持选文件夹，请用压缩包`,
-          $r('sys.symbol.folder'), this.folderModeSupported(), () => {
-            this.importChoiceVisible = false;
-            this.importGame();
-          })
-        this.rowDivider()
-        this.importChoiceRow('从压缩包安装（zip）',
-          '解压到沙箱，保留目录结构，支持加密包',
-          $r('sys.symbol.doc_zipper'), true, () => {
-            this.importChoiceVisible = false;
-            this.importArchive();
-          })
-
-        Button('取消')
-          .fontSize(14)
-          .height(36)
-          .width('100%')
-          .backgroundColor($r('app.color.chip_bg'))
-          .fontColor($r('app.color.text_primary'))
-          .onClick(() => {
-            this.importChoiceVisible = false;
-          })
-      }
-      .width('86%')
-      .padding(18)
-      .backgroundColor($r('app.color.card_bg'))
-      .borderRadius(20)
-      .shadow({
-        radius: 32,
-        color: $r('app.color.mask'),
-        offsetX: 0,
-        offsetY: 8,
-      })
+  private openImportMenu(): void {
+    try {
+      const ui: UIContext = this.getUIContext();
+      const params = new ImportMenuParams();
+      params.apiLevel = this.apiLevel;
+      params.onFolder = () => {
+        this.closeImportMenu();
+        if (this.folderModeSupported()) {
+          this.importGame();
+        } else {
+          this.statusText = '本机不支持选择文件夹，请改用「从压缩包安装」';
+        }
+      };
+      params.onArchive = () => {
+        this.closeImportMenu();
+        this.importArchive();
+      };
+      const content: ComponentContent<ImportMenuParams> =
+        new ComponentContent(ui, wrapBuilder(ImportMenu), params);
+      this.importMenuContent = content;
+      ui.getPromptAction().openMenu(content, { id: IMPORT_BTN_ID })
+        .catch((err: Error) => {
+          AppLog.e('ui', `openMenu failed: ${err.message}`);
+        });
+      AppLog.i('ui', 'import menu opened');
+    } catch (e) {
+      AppLog.exception('ui', 'openImportMenu failed', e);
     }
-    .width('100%')
-    .height('100%')
-    .justifyContent(FlexAlign.Center)
-    .backgroundColor($r('app.color.mask'))
-    .onClick(() => {
-    })
+  }
+
+  private closeImportMenu(): void {
+    const content: ComponentContent<ImportMenuParams> | undefined =
+      this.importMenuContent;
+    this.importMenuContent = undefined;
+    if (content === undefined) {
+      return;
+    }
+    try {
+      this.getUIContext().getPromptAction().closeMenu(content);
+    } catch (e) {
+      AppLog.exception('ui', 'closeImportMenu failed', e);
+    }
   }
 
   /** 「选择文件夹」需要系统 API 26+（实测 API 24 上选择器秒退返回空）。 */
   private folderModeSupported(): boolean {
     return this.apiLevel >= 26;
-  }
-
-  @Builder
-  importChoiceRow(label: string, hint: string, symbol: Resource,
-                  enabled: boolean, action: () => void) {
-    Row({ space: 12 }) {
-      SymbolGlyph(symbol)
-        .fontSize(22)
-        .fontColor([enabled ? $r('app.color.accent') : $r('app.color.text_hint')])
-      Column({ space: 2 }) {
-        Text(label)
-          .fontSize(15)
-          .fontColor(enabled ? $r('app.color.text_primary')
-            : $r('app.color.text_hint'))
-        Text(hint)
-          .fontSize(11)
-          .fontColor($r('app.color.text_hint'))
-      }
-      .alignItems(HorizontalAlign.Start)
-      .layoutWeight(1)
-      Text('›').fontSize(20).fontColor($r('app.color.text_hint'))
-    }
-    .width('100%')
-    .padding({ top: 12, bottom: 12 })
-    .opacity(enabled ? 1 : 0.6)
-    .onClick(action)
   }
 
   // 密码浮层：解压暂停在等密码，取消等同于放弃安装。
@@ -875,9 +904,6 @@ struct Home {
         }
         if (this.passwordVisible) {
           this.passwordOverlay()
-        }
-        if (this.importChoiceVisible) {
-          this.importChoiceOverlay()
         }
       }
       .width('100%')
