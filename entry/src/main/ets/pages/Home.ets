@@ -1,5 +1,6 @@
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { common } from '@kit.AbilityKit';
+import { deviceInfo } from '@kit.BasicServicesKit';
 import { window, display, LengthMetrics, SymbolGlyphModifier } from '@kit.ArkUI';
 import { fileIo } from '@kit.CoreFileKit';
 import {
@@ -230,6 +231,10 @@ struct Home {
   @State installStats: string = '';
   // 压缩包加密时的密码浮层。
   @State passwordVisible: boolean = false;
+  /** 「导入方式」选择浮层：文件夹 / 压缩包。 */
+  @State importChoiceVisible: boolean = false;
+  /** 系统 API 等级；「选文件夹」需要 26+，低版本只能走压缩包。 */
+  private apiLevel: number = 0;
   @State passwordPrompt: string = '';
   @State passwordInput: string = '';
   private passwordResolver: ((v: string) => void) | undefined = undefined;
@@ -251,6 +256,11 @@ struct Home {
       this.initSafeArea(ctx);
       // 首次运行写默认配置；旧版本配置按 CONFIG_SCHEMA_VERSION 迁移。
       SettingsStore.ensureDefaults(ctx.filesDir);
+    }
+    try {
+      this.apiLevel = deviceInfo.sdkApiVersion;
+    } catch (e) {
+      this.apiLevel = 0;
     }
     this.reloadGames();
     this.probeXEngine();
@@ -292,7 +302,11 @@ struct Home {
       icon: glyph,
       isEnabled: true,
       action: () => {
-        this.importGame();
+        // 先弹「导入方式」：文件夹 / 压缩包。
+        // 原因：系统的「选择文件夹」模式（DocumentSelectMode.FOLDER）要
+        // API 26+ 才支持，API 24 设备上选择器会秒退并返回 0 个（用户看到的是
+        // 选择器弹一句"功能暂不支持，敬请期待"），那种设备只能走压缩包。
+        this.importChoiceVisible = true;
       },
     };
     const item: HdsNavigationMenuItemOptions = { content: icon };
@@ -638,6 +652,102 @@ struct Home {
     }
   }
 
+  /**
+   * 「导入方式」选择浮层。
+   *
+   * 两条路的差别（2026-09 实测）：
+   *  - 文件夹：走 DocumentSelectMode.FOLDER，**需要系统 API 26+**。API 24 设备上
+   *    选择器会打开后秒退并返回 0 个（用户看到选择器自己弹"功能暂不支持"）。
+   *  - 压缩包：走文件模式（各版本都支持），解压到沙箱，**保留目录结构**。
+   *
+   * 所以 API < 26 时直接把用户引到压缩包这条路，不再去踩那个系统的坑。
+   */
+  @Builder
+  importChoiceOverlay() {
+    Column() {
+      Column({ space: 10 }) {
+        Text('导入游戏')
+          .fontSize(18)
+          .fontWeight(FontWeight.Bold)
+          .fontColor($r('app.color.text_primary'))
+          .width('100%')
+
+        this.importChoiceRow('从文件夹安装',
+          this.folderModeSupported()
+            ? 'GOD / 多 data 文件包'
+            : `本机 API ${this.apiLevel} 不支持选文件夹，请用压缩包`,
+          $r('sys.symbol.folder'), this.folderModeSupported(), () => {
+            this.importChoiceVisible = false;
+            this.importGame();
+          })
+        this.rowDivider()
+        this.importChoiceRow('从压缩包安装（zip）',
+          '解压到沙箱，保留目录结构，支持加密包',
+          $r('sys.symbol.doc_zipper'), true, () => {
+            this.importChoiceVisible = false;
+            this.importArchive();
+          })
+
+        Button('取消')
+          .fontSize(14)
+          .height(36)
+          .width('100%')
+          .backgroundColor($r('app.color.chip_bg'))
+          .fontColor($r('app.color.text_primary'))
+          .onClick(() => {
+            this.importChoiceVisible = false;
+          })
+      }
+      .width('86%')
+      .padding(18)
+      .backgroundColor($r('app.color.card_bg'))
+      .borderRadius(20)
+      .shadow({
+        radius: 32,
+        color: $r('app.color.mask'),
+        offsetX: 0,
+        offsetY: 8,
+      })
+    }
+    .width('100%')
+    .height('100%')
+    .justifyContent(FlexAlign.Center)
+    .backgroundColor($r('app.color.mask'))
+    .onClick(() => {
+    })
+  }
+
+  /** 「选择文件夹」需要系统 API 26+（实测 API 24 上选择器秒退返回空）。 */
+  private folderModeSupported(): boolean {
+    return this.apiLevel >= 26;
+  }
+
+  @Builder
+  importChoiceRow(label: string, hint: string, symbol: Resource,
+                  enabled: boolean, action: () => void) {
+    Row({ space: 12 }) {
+      SymbolGlyph(symbol)
+        .fontSize(22)
+        .fontColor([enabled ? $r('app.color.accent') : $r('app.color.text_hint')])
+      Column({ space: 2 }) {
+        Text(label)
+          .fontSize(15)
+          .fontColor(enabled ? $r('app.color.text_primary')
+            : $r('app.color.text_hint'))
+        Text(hint)
+          .fontSize(11)
+          .fontColor($r('app.color.text_hint'))
+      }
+      .alignItems(HorizontalAlign.Start)
+      .layoutWeight(1)
+      Text('›').fontSize(20).fontColor($r('app.color.text_hint'))
+    }
+    .width('100%')
+    .padding({ top: 12, bottom: 12 })
+    .opacity(enabled ? 1 : 0.6)
+    .onClick(action)
+  }
+
   // 密码浮层：解压暂停在等密码，取消等同于放弃安装。
   @Builder
   passwordOverlay() {
@@ -765,6 +875,9 @@ struct Home {
         }
         if (this.passwordVisible) {
           this.passwordOverlay()
+        }
+        if (this.importChoiceVisible) {
+          this.importChoiceOverlay()
         }
       }
       .width('100%')
