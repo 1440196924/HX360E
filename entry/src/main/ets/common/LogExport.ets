@@ -51,7 +51,12 @@ export class LogExport {
   static buildText(filesDir: string): string {
     const logDir: string = `${filesDir}/logs`;
     let text: string = `HX360E logs ${new Date().toISOString()}\n`;
-    text += '===== native_fault.prev.log (上次运行，崩溃现场) =====\n';
+    // 应用层（ArkTS）日志放最前面：用户反馈时先看这个。
+    text += '\n===== app.prev.log (上一份应用日志，tail 256KB) =====\n';
+    text += LogExport.readLogTail(`${logDir}/app.prev.log`, 256 * 1024);
+    text += '\n===== app.log (应用日志，tail 512KB) =====\n';
+    text += LogExport.readLogTail(`${logDir}/app.log`, 512 * 1024);
+    text += '\n===== native_fault.prev.log (上次运行，崩溃现场) =====\n';
     text += LogExport.readLogTail(`${logDir}/native_fault.prev.log`, 256 * 1024);
     text += '\n===== native_fault.log (tail 256KB) =====\n';
     text += LogExport.readLogTail(`${logDir}/native_fault.log`, 256 * 1024);

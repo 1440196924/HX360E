@@ -5,6 +5,7 @@ import { taskpool } from '@kit.ArkTS';
 import testNapi from 'libentry.so';
 import { GameLibrary, GameMeta } from './GameLibrary';
 import { copyRanges } from './InstallCopy';
+import { AppLog } from './AppLog';
 
 const DOMAIN = 0x0000;
 const TAG = 'HX360E';
@@ -94,7 +95,8 @@ export class GameInstall {
       const docPicker = new picker.DocumentViewPicker(ctx);
       uris = await docPicker.select(options);
     } catch (e) {
-      hilog.error(DOMAIN, TAG, 'folder pick failed: %{public}s', JSON.stringify(e));
+      // 「选文件夹」模式在部分设备的文件选择器上不被支持，会抛在这里。
+      AppLog.exception('install', 'folder pick failed', e);
       return '选择文件夹失败（见 hilog）';
     }
     if (uris.length === 0) {
@@ -263,7 +265,7 @@ export class GameInstall {
       const docPicker = new picker.DocumentViewPicker(ctx);
       uris = await docPicker.select(options);
     } catch (e) {
-      hilog.error(DOMAIN, TAG, 'archive pick failed: %{public}s', JSON.stringify(e));
+      AppLog.exception('install', 'archive pick failed', e);
       return '选择压缩包失败（见 hilog）';
     }
     if (uris.length === 0) {

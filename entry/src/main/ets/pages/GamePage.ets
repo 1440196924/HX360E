@@ -10,6 +10,7 @@ import { inputDevice } from '@kit.InputKit';
 import { Orientation } from '../common/Orientation';
 import { VirtualStick, VirtualDpad, PadButton } from '../common/VirtualStick';
 import { SettingsStore } from '../common/SettingsStore';
+import { AppLog } from '../common/AppLog';
 
 const DOMAIN = 0x0000;
 const TAG = 'HX360E';
@@ -253,11 +254,11 @@ struct GamePage {
   private exitGame(): void {
     this.exitDialogVisible = false;
     this.quitAfterLeave = true;
+    AppLog.i('game', 'exit game by user');
     try {
       router.back();
     } catch (e) {
-      hilog.error(DOMAIN, TAG, 'exitGame back failed: %{public}s',
-        JSON.stringify(e));
+      AppLog.exception('game', 'exitGame back failed', e);
     }
   }
 
