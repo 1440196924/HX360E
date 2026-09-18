@@ -404,6 +404,32 @@ ExtractResult Extract(const std::vector<std::string>& parts,
     return res;
   }
 
+  // 先认内容格式。分卷命名（.001/.z01）只是"怎么切的"，不代表内容是什么：
+  // 拼接后是 zip 才能用本解压器；若是 7z/rar 分卷，必须给出明确提示，
+  // 而不是让用户看到含混的"不是有效的 zip"。
+  {
+    uint8_t sig[6] = {0};
+    const size_t n = size_t(std::min<uint64_t>(sizeof(sig), vols.total));
+    if (n >= 4 && vols.ReadAt(0, sig, n)) {
+      const bool is_zip = sig[0] == 'P' && sig[1] == 'K';
+      const bool is_7z = n >= 6 && sig[0] == 0x37 && sig[1] == 0x7A &&
+        sig[2] == 0xBC && sig[3] == 0xAF && sig[4] == 0x27 && sig[5] == 0x1C;
+      const bool is_rar = sig[0] == 'R' && sig[1] == 'a' && sig[2] == 'r' &&
+        sig[3] == '!';
+      if (!is_zip) {
+        if (is_7z) {
+          res.error = "这是 7z 分卷包（.7z.001 之类），暂不支持；"
+            "请在电脑上解压后重新打包成 zip";
+        } else if (is_rar) {
+          res.error = "这是 RAR 包，暂不支持；请在电脑上解压后重新打包成 zip";
+        } else {
+          res.error = "内容不是 zip（分卷命名不影响格式判定，但内容得是 zip）";
+        }
+        return res;
+      }
+    }
+  }
+
   std::vector<Entry> entries;
   uint64_t total_bytes = 0;
   bool has_encrypted = false;

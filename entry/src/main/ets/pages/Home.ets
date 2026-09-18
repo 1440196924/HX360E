@@ -241,8 +241,8 @@ function ImportMenu(params: ImportMenuParams) {
 
     Divider().color($r('app.color.divider')).margin({ left: 12, right: 12 })
 
-    ImportMenuRow('从压缩包安装（zip）', '解压到沙箱，保留目录结构', true,
-      params.onArchive)
+    ImportMenuRow('从压缩包安装（zip）',
+      '分卷包(.z01/.001 等)请把所有卷一起选中', true, params.onArchive)
   }
   .width(232)
   .padding({ top: 4, bottom: 4 })
@@ -644,6 +644,7 @@ struct Home {
         },
         this.installControl);
       AppLog.i('install', `folder install done: ${this.statusText}`);
+      this.toast(this.statusText);
       this.reloadGames();
     } catch (e) {
       this.statusText = '导入失败（见 hilog）';
@@ -688,6 +689,7 @@ struct Home {
         this.installControl,
         (retry: boolean) => this.askArchivePassword(retry));
       AppLog.i('install', `archive install done: ${this.statusText}`);
+      this.toast(this.statusText);
       this.reloadGames();
     } catch (e) {
       this.statusText = '导入失败（见 hilog）';
@@ -855,6 +857,26 @@ struct Home {
     } catch (e) {
       hilog.error(DOMAIN, TAG, 'moveToBackground failed: %{public}s',
         JSON.stringify(e));
+    }
+  }
+
+  /**
+   * 把结果用系统 toast 提示一下。
+   *
+   * 底部那条常驻提示控件已经去掉（用户要求），所以导入/安装的成功或失败必须
+   * 另找出口——否则失败时用户看到的就是"什么都没发生"。
+   */
+  private toast(msg: string): void {
+    if (msg === '') {
+      return;
+    }
+    try {
+      this.getUIContext().getPromptAction().showToast({
+        message: msg,
+        duration: 3000,
+      });
+    } catch (e) {
+      AppLog.exception('ui', 'showToast failed', e);
     }
   }
 

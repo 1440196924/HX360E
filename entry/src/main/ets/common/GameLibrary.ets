@@ -267,7 +267,9 @@ export class GameLibrary {
           return `${dir}/${n}`;
         }
       }
-      const hexName = new RegExp('^[0-9A-Fa-f]{16,40}$');
+      // STFS 包的文件名是十六进制，长度随内容类型而定：GOD 常见 16 位，
+    // XBLA（000D0000）实测是 42 位，所以上限要放宽（原来写死 40 会漏掉）。
+    const hexName = new RegExp('^[0-9A-Fa-f]{16,64}$');
       for (const n of names) {
         if (!fs.statSync(`${dir}/${n}`).isDirectory() && hexName.test(n)) {
           return `${dir}/${n}`;

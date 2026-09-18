@@ -264,11 +264,12 @@ export class GameInstall {
     onProgress(p);
 
     const options = new picker.DocumentSelectOptions();
-    // 多选：分卷 zip（.z01/.z02/.../.zip 或 .001/.002/...）需要一次把各卷都选上
+    // 多选：分卷包（.z01/.z02/…/.zip 或 .001/.002/…）必须一次把各卷都选上
     // —— 选择器只授权被选中的文件，同目录里没选中的分卷我们读不到。
+    // 注意**不设 fileSuffixFilters**：分卷的尾缀是 .001/.002/.z01 之类，
+    // 用 '压缩包|.zip' 过滤会让这些卷根本选不中（而且过滤会作用于每一次多选）。
     options.maxSelectNumber = 32;
-    options.fileSuffixFilters = ['压缩包|.zip'];
-    AppLog.i('install', 'archive pick: open picker (mode=FILE multi suffix=zip)');
+    AppLog.i('install', 'archive pick: open picker (mode=FILE multi, no suffix filter)');
     let uris: string[] = [];
     try {
       const docPicker = new picker.DocumentViewPicker(ctx);
@@ -309,7 +310,12 @@ export class GameInstall {
     try {
       for (let i = 0; i < ordered.length; i++) {
         const dst: string = `${dir}/__in_${i}.zip`;
-        fs.copyFileSync(ordered[i], dst);
+        // 不能用 fs.copyFileSync(uri, path)：选择器给的是 file://docs/... URI，
+        // copyFileSync 会报 13900002（文件不存在）。必须先用 openSync(uri) 拿到
+        // fd 再按显式 offset 读写 —— 与本文件下半部分 copyRanges 的做法一致
+        // （本设备上不显式传 offset 的 read/write 会写出全 0）。
+        const n: number = GameInstall.copyInto(ordered[i], dst);
+        AppLog.i('install', `archive staged[${i}]: ${n} bytes`);
         staged.push(dst);
       }
     } catch (e) {
@@ -346,7 +352,15 @@ export class GameInstall {
       return r === 'bad_password' ? '密码错误（已尝试多次）' : r;
     }
 
-    // 2) 收尾：找启动目标 + 读标题/封面 + 落元数据（与文件夹安装同一套）。
+    // 2) 收尾：删掉沙箱里的临时分卷副本（只是解压用的中转，别留在游戏目录里
+    //    占空间、也别被当成游戏内容），再找启动目标 + 读标题/封面 + 落元数据。
+    for (const s of staged) {
+      try {
+        fs.unlinkSync(s);
+      } catch (e) {
+        // 删不掉不影响安装
+      }
+    }
     p.detail = '正在读取游戏信息…';
     p.percent = 99;
     onProgress(p);
@@ -482,6 +496,38 @@ export class GameInstall {
   }
 
   // ---- 内部工具 ----
+
+  /**
+   * 把选择器给的 URI 文件复制到沙箱路径，返回复制的字节数。
+   *
+   * 关键两点（都是本设备实测踩出来的）：
+   *  1. 源必须用 `fs.openSync(uri)` 打开成 fd —— 直接对 URI 调 copyFileSync 会
+   *     报 13900002（文件不存在），选择器的授权是按 URI 走的。
+   *  2. read/write 都必须显式传 offset，否则会写出全 0。
+   */
+  private static copyInto(srcUri: string, dstPath: string): number {
+    const inFile = fs.openSync(srcUri, fs.OpenMode.READ_ONLY);
+    const outFile = fs.openSync(dstPath,
+      fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+    try {
+      const chunk: number = 4 * 1024 * 1024;
+      const buf = new ArrayBuffer(chunk);
+      let off: number = 0;
+      while (true) {
+        const n: number = fs.readSync(inFile.fd, buf,
+          { offset: off, length: chunk });
+        if (n <= 0) {
+          break;
+        }
+        fs.writeSync(outFile.fd, buf, { offset: off, length: n });
+        off += n;
+      }
+      return off;
+    } finally {
+      fs.closeSync(inFile);
+      fs.closeSync(outFile);
+    }
+  }
 
   /**
    * 把选中的文件按「分卷顺序」排好。
