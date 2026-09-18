@@ -101,13 +101,11 @@ export struct AboutPage {
       this.jitProbeLine = '-';
     }
     try {
+      // 能力信息（GPU 名 / Vulkan 版本 / 驱动）：临时建 instance 枚举，跟游戏无关，
+      // 所以没进过游戏也能显示。
+      const info: string = testNapi.vulkanInfo();
       const v = testNapi.vulkanStatus();
-      const dev: string = v.deviceInfo;
-      // 这里的 Vulkan 状态是**运行时**的：只有进过游戏页、Vulkan 上下文初始化过
-      // 才有数据。没进过游戏时显示"未初始化"，否则会被误解成"不支持 Vulkan"。
-      this.vkLine = v.ready
-        ? `已就绪${dev !== '' ? ` · ${dev}` : ''}`
-        : `未初始化（进入游戏后显示）${dev !== '' ? ` · ${dev}` : ''}`;
+      this.vkLine = v.ready ? `${info} · 呈现已就绪` : info;
     } catch (e) {
       this.vkLine = '(探测失败)';
     }

@@ -29,6 +29,11 @@ class VulkanContext {
     // 设备能力报告（Phase 0.4），用于 UI 展示与日志
     std::string GetDeviceInfo() const;
 
+    // Vulkan 能力探测（与呈现链路无关）：临时建 instance 枚举物理设备，
+    // 返回「设备名 · Vulkan 版本 · 驱动版本」。**不依赖 surface / 游戏启动**，
+    // 所以「关于」页在没进过游戏时也能显示真实 GPU 与 Vulkan 版本。
+    static std::string ProbeVulkanInfo();
+
     // XEngine Kit（Maleoon GPU 加速）能力探测：临时建一个 instance 只为拿到
     // VkPhysicalDevice，然后用 HMS_XEG_EnumerateDeviceExtensionProperties 查询
     // 设备支持的 XEG 特性（libxengine.so 用 dlopen，不硬链接）。

@@ -621,6 +621,57 @@ void VulkanContext::Shutdown() {
     HILOG("VulkanCtx: shutdown OK");
 }
 
+// Vulkan 能力探测：只读查询，建临时 instance 枚举物理设备后即销毁。
+// 与呈现链路无关，所以「关于」页不必先进游戏就能显示真实 GPU / Vulkan 版本。
+std::string VulkanContext::ProbeVulkanInfo() {
+    VkApplicationInfo app_info{};
+    app_info.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+    app_info.pApplicationName = "HX360E";
+    app_info.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
+    app_info.pEngineName = "HX360E";
+    app_info.engineVersion = VK_MAKE_VERSION(1, 0, 0);
+    app_info.apiVersion = VK_API_VERSION_1_0;
+    VkInstanceCreateInfo instance_info{};
+    instance_info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+    instance_info.pApplicationInfo = &app_info;
+    VkInstance instance = VK_NULL_HANDLE;
+    if (vkCreateInstance(&instance_info, nullptr, &instance) != VK_SUCCESS) {
+        HILOG("VulkanInfo: vkCreateInstance FAIL");
+        return "建临时 Vulkan instance 失败";
+    }
+
+    std::string out;
+    uint32_t count = 0;
+    if (vkEnumeratePhysicalDevices(instance, &count, nullptr) == VK_SUCCESS &&
+        count > 0) {
+        std::vector<VkPhysicalDevice> devices(count);
+        vkEnumeratePhysicalDevices(instance, &count, devices.data());
+        // 手机只有一个 GPU，报第一个；多于一个时把名字都列出来。
+        for (uint32_t i = 0; i < devices.size(); ++i) {
+            VkPhysicalDeviceProperties p{};
+            vkGetPhysicalDeviceProperties(devices[i], &p);
+            if (i > 0) {
+                out += " / ";
+            }
+            out += p.deviceName;
+            out += " · Vulkan ";
+            out += std::to_string(VK_VERSION_MAJOR(p.apiVersion));
+            out += ".";
+            out += std::to_string(VK_VERSION_MINOR(p.apiVersion));
+            out += ".";
+            out += std::to_string(VK_VERSION_PATCH(p.apiVersion));
+            char drv[32];
+            std::snprintf(drv, sizeof(drv), " · 驱动 0x%08X", p.driverVersion);
+            out += drv;
+        }
+    } else {
+        out = "无 Vulkan 物理设备";
+    }
+    vkDestroyInstance(instance, nullptr);
+    HILOG("VulkanInfo: %{public}s", out.c_str());
+    return out;
+}
+
 // XEngine Kit 能力探测：只读查询，建临时 instance 拿 physical device 后即销毁。
 // libxengine.so 用 dlopen，避免在非 Maleoon 设备上给 libentry.so 引入硬依赖。
 std::string VulkanContext::ProbeXEngineExtensions() {

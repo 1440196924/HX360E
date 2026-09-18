@@ -211,6 +211,8 @@ export interface ZipApi {
 
 export const jitProbe: () => JitProbeResult;
 export const vulkanStatus: () => VulkanStatus;
+/** Vulkan 能力摘要（GPU 名 · Vulkan 版本 · 驱动版本），不依赖游戏启动。 */
+export const vulkanInfo: () => string;
 export const attachSurface: (surfaceId: string) => boolean;
 export const emulator: EmulatorApi;
 export const config: ConfigApi;

@@ -150,6 +150,16 @@ napi_value VulkanStatus(napi_env env, napi_callback_info info) {
 // 路径参考 HMPS4e（已真机验证）：controller.getXComponentSurfaceId()
 //   → OH_NativeWindow_CreateNativeWindowFromSurfaceId → vkCreateSurfaceOHOS。
 // 不走 XComponent 回调的 window 参数（实测该路径 present 成功但内容不上屏）。
+// Vulkan 能力（GPU 名 / Vulkan 版本 / 驱动版本）：不依赖 surface，关于页可随时读。
+// 在后台线程跑？不需要 —— 建一次临时 instance 只有毫秒级。
+static napi_value VulkanInfo(napi_env env, napi_callback_info info) {
+    // 注意别用 `info` 当局部名：会和 napi_callback_info 参数撞名。
+    std::string summary = hx360e::VulkanContext::ProbeVulkanInfo();
+    napi_value out = nullptr;
+    napi_create_string_utf8(env, summary.c_str(), NAPI_AUTO_LENGTH, &out);
+    return out;
+}
+
 napi_value AttachSurface(napi_env env, napi_callback_info info) {
     size_t argc = 1;
     napi_value args[1] = {nullptr};
@@ -441,6 +451,8 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"jitProbe", nullptr, JitProbe, nullptr, nullptr, nullptr,
          napi_default, nullptr},
         {"vulkanStatus", nullptr, VulkanStatus, nullptr, nullptr, nullptr,
+         napi_default, nullptr},
+        {"vulkanInfo", nullptr, VulkanInfo, nullptr, nullptr, nullptr,
          napi_default, nullptr},
         {"attachSurface", nullptr, AttachSurface, nullptr, nullptr, nullptr,
          napi_default, nullptr},
