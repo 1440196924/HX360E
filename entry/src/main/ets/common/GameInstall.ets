@@ -554,8 +554,16 @@ export class GameInstall {
                                   onProgress: (p: InstallProgress) => void,
                                   control: InstallControl): Promise<string> {
     if (magic === 'rar') {
-      return GameInstall.runRarExtract(staged[0], dir, password, p, onProgress,
-        control);
+      // 压缩包已解压字节数要从"目标目录大小"里扣掉（暂存副本也在目标目录下）。
+      let archiveBytes: number = 0;
+      for (const s of staged) {
+        const st = GameLibrary.stat(s);
+        if (st !== undefined) {
+          archiveBytes += st.size;
+        }
+      }
+      return GameInstall.runRarExtract(staged[0], dir, password, archiveBytes, p,
+        onProgress, control);
     }
     // zip：多卷按顺序用 '\n' 拼给 native（各卷按序拼接才是完整 zip）。
     return GameInstall.runExtract(staged.join('\n'), dir, password, p,
@@ -569,7 +577,8 @@ export class GameInstall {
    * 只记录取消请求，完成后由上层丢弃目录）。
    */
   private static async runRarExtract(path: string, destDir: string,
-                                     password: string, p: InstallProgress,
+                                     password: string, archiveBytes: number,
+                                     p: InstallProgress,
                                      onProgress: (p: InstallProgress) => void,
                                      control: InstallControl): Promise<string> {
     p.active = true;
@@ -596,8 +605,28 @@ export class GameInstall {
     try {
       // 同步 extract() 放到任务池线程（见 RarExtract.ets 的说明：自带的异步
       // 接口没有 .catch，失败时会永久挂起）。
-      const ret: Object = await taskpool.execute(extractRar, path, destDir, password);
-      const r: string = ret as string;
+      //
+      // 进度：这个库没有任何进度回调，也没有"总解压量"可查，所以只能在解压期间
+      // 每秒看一次目标目录长大了多少，显示「已解压 xx MB」。这是动态反馈，
+      // 不是百分比 —— 想要真进度条得自己接 UnRAR 的 CALLBACK/UCM_PROCESSDATA。
+      let finished: boolean = false;
+      let result: string = 'exception';
+      taskpool.execute(extractRar, path, destDir, password)
+        .then((v: Object) => {
+          result = v as string;
+          finished = true;
+        })
+        .catch((e: Error) => {
+          AppLog.exception('install', 'rar extract rejected', e);
+          finished = true;
+        });
+      while (!finished) {
+        await GameInstall.sleep(1000);
+        const grown: number = GameLibrary.dirSize(destDir) - archiveBytes;
+        p.stats = `已解压 ${GameLibrary.formatSize(grown > 0 ? grown : 0)}`;
+        onProgress(p);
+      }
+      const r: string = result;
       AppLog.i('install', `rar: extract returned [${r}]`);
       if (r === 'need_password') {
         return 'need_password';
