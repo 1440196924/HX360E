@@ -288,7 +288,7 @@ struct GamePage {
     }
     try {
       const ctx = getContext(this) as common.UIAbilityContext;
-      Orientation.portrait(ctx);
+      Orientation.autoRotation(ctx);
     } catch (e) {
       // 忽略
     }

@@ -65,4 +65,9 @@ export class Orientation {
   static autoLandscape(ctx: common.UIAbilityContext): void {
     Orientation.apply(ctx, window.Orientation.AUTO_ROTATION_LANDSCAPE);
   }
+
+  /** 跟随屏幕方向：允许自由旋转（竖屏与横屏均跟随重力）。 */
+  static autoRotation(ctx: common.UIAbilityContext): void {
+    Orientation.apply(ctx, window.Orientation.AUTO_ROTATION);
+  }
 }

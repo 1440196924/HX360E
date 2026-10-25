@@ -320,7 +320,7 @@ struct Home {
   aboutToAppear(): void {
     const ctx: common.Context | undefined = this.appContext();
     if (ctx !== undefined) {
-      Orientation.portrait(getContext(this) as common.UIAbilityContext);
+      Orientation.autoRotation(getContext(this) as common.UIAbilityContext);
       this.initSafeArea(ctx);
       // 首次运行写默认配置；旧版本配置按 CONFIG_SCHEMA_VERSION 迁移。
       SettingsStore.ensureDefaults(ctx.filesDir);
@@ -416,9 +416,9 @@ struct Home {
 
   // 从别的页面返回时刷新（例如导入完游戏回来 / 从横屏的游戏页返回）。
   onPageShow(): void {
-    // 从游戏页（横屏）返回时切回竖屏——必须走主窗口，否则上下文菜单等子窗
+    // 从游戏页（横屏）返回时恢复跟随屏幕方向——必须走主窗口，否则上下文菜单等子窗
     // 会成为"最后窗口"导致朝向设不上。
-    Orientation.portrait(getContext(this) as common.UIAbilityContext);
+    Orientation.autoRotation(getContext(this) as common.UIAbilityContext);
     this.reloadGames();
   }
 
